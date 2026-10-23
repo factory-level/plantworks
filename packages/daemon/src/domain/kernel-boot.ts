@@ -346,8 +346,8 @@ export function authBlockMessage(selected = ""): string {
     const login = selected.split(",").map((p) => p === "claude" ? "`claude auth login`" : "`codex login`").join(" or ");
     return [
       `Error: Kernel rig cannot boot — no provider chosen at setup (${selected}) is authenticated.`,
-      `Reason: rig setup --providers ${selected} recorded that choice in provider.selected, and the kernel uses only chosen providers.`,
-      `Fix: Run ${login}, or rerun rig setup with --providers to change the choice. Then run \`rig daemon start\` (or \`rig setup\`) again.`,
+      `Reason: provider.selected is ${selected} (saved by rig setup --providers or rig config set, or OPENRIG_PROVIDER_SELECTED in the daemon's environment), and the kernel uses only chosen providers.`,
+      `Fix: Run ${login}, or change the choice with rig setup --providers or rig config set provider.selected (a daemon environment value overrides both). Then run \`rig daemon start\` (or \`rig setup\`) again.`,
     ].join("\n");
   }
   return [

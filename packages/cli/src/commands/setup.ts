@@ -439,11 +439,18 @@ function recordProvidersStep(deps: SetupDeps, chosen: readonly SetupProvider[]):
       id: "providers_record",
       status: "warn",
       message: `Could not record provider.selected=${value}: ${(err as Error).message}`,
-      reason: "Without it, the kernel counts every signed-in provider, not only the ones chosen.",
+      reason: "A kernel's first boot then uses provider.selected as it already was: an earlier choice, or every signed-in provider when it's empty.",
       fixHint: `Run rig config set provider.selected ${value}.`,
     };
   }
-  return { id: "providers_record", status: "applied", message: `Recorded provider.selected=${value}; the kernel uses only these providers.` };
+  // An environment value wins over the saved one; only setup's own environment is visible here, not the daemon's.
+  const envValue = (deps.env ?? process.env)["OPENRIG_PROVIDER_SELECTED"];
+  const envNote = envValue ? ` OPENRIG_PROVIDER_SELECTED=${envValue} in this environment takes precedence over the saved value.` : "";
+  return {
+    id: "providers_record",
+    status: "applied",
+    message: `Saved provider.selected=${value} for the kernel's first boot; a kernel that already exists keeps its seats.${envNote}`,
+  };
 }
 
 export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boolean; policy?: string; specPath?: string; herdr?: boolean; ghostty?: boolean; providers?: readonly SetupProvider[]; doctorDeps?: DoctorDeps; routerLine?: "yes" | "no" }): Promise<SetupResult> {

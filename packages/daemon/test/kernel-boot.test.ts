@@ -289,7 +289,7 @@ describe("bootKernelIfNeeded — only the providers chosen at setup count", () =
     expect(status.kernelState).toBe("auth_blocked");
     expect(status.detail).toMatch(/^Error: .*\(codex\)/m);
     expect(status.detail).toMatch(/^Reason: .*provider\.selected/m);
-    expect(status.detail).toMatch(/^Fix: Run `codex login`, or rerun rig setup with --providers/m);
+    expect(status.detail).toMatch(/^Fix: Run `codex login`, or change the choice with rig setup --providers/m);
     expect(status.detail).not.toContain("claude auth login");
     expect((bootstrap as unknown as { bootstrap: ReturnType<typeof vi.fn> }).bootstrap).not.toHaveBeenCalled();
   });

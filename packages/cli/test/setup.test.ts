@@ -1036,6 +1036,9 @@ describe("--providers: a provider the person didn't choose reads not selected, n
     const result = await runSetup(makeDeps({ recordProviders }), { providers: ["codex", "claude"] });
     expect(recordProviders.mock.calls).toEqual([["claude,codex"]]);
     expect(result.steps.find((s) => s.id === "providers_record")).toMatchObject({ status: "applied", message: expect.stringContaining("provider.selected=claude,codex") });
+    expect(result.steps.find((s) => s.id === "providers_record")?.message).toContain("a kernel that already exists keeps its seats");
+    const overridden = await runSetup(makeDeps({ recordProviders, env: { ...process.env, OPENRIG_PROVIDER_SELECTED: "codex" } }), { providers: ["claude"] });
+    expect(overridden.steps.find((s) => s.id === "providers_record")?.message).toContain("OPENRIG_PROVIDER_SELECTED=codex in this environment takes precedence");
   });
 
   it("records nothing without --providers or on a dry run", async () => {

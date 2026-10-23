@@ -160,8 +160,10 @@ configurations, as below; do not take the pin from a cached page summary.
      role. For workshop, draw from its `rig.yaml` at the pinned commit.
 5. **Fit it to their providers.** Start from the choice they made at setup:
    `rig config get provider.selected` prints `claude`, `codex` or
-   `claude,codex` when `rig setup --providers` recorded one, and the kernel
-   itself runs only those. When it's empty, infer which tools they have from
+   `claude,codex` when `rig setup --providers` recorded one. A kernel that
+   boots after that choice runs only those providers; one that booted earlier
+   keeps its seats (check `rig ps --nodes --rig kernel`). When it's empty,
+   infer which tools they have from
    the kernel's own runtimes (`rig ps --nodes --rig kernel --json`), or ask. Check
    only the providers the team needs (`claude auth status` or
    `codex login status`). If you run in Claude Code, the kernel launch allows
