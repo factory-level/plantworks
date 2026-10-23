@@ -158,8 +158,11 @@ configurations, as below; do not take the pin from a cached page summary.
      `rig specs preview <team> --kind rig --json`: draw members and runtimes
      from `graph.nodes` and edges from `graph.edges`, with one line on each
      role. For workshop, draw from its `rig.yaml` at the pinned commit.
-5. **Fit it to their providers.** Infer which tools they have from the
-   kernel's own runtimes (`rig ps --nodes --rig kernel --json`), or ask. Check
+5. **Fit it to their providers.** Start from the choice they made at setup:
+   `rig config get provider.selected` prints `claude`, `codex` or
+   `claude,codex` when `rig setup --providers` recorded one, and the kernel
+   itself runs only those. When it's empty, infer which tools they have from
+   the kernel's own runtimes (`rig ps --nodes --rig kernel --json`), or ask. Check
    only the providers the team needs (`claude auth status` or
    `codex login status`). If you run in Claude Code, the kernel launch allows
    both checks; say in one line that it can still ask them to approve it if
