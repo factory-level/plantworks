@@ -124,9 +124,14 @@ export function claimNextRoutes(opts: ClaimNextOptions): BrokerRoutes {
       const key = spec.endpoint.slotBudgetKey;
       const cap = capFor(caps, key);
       const reserved = store.db.transaction(() => {
+        // PW-22: a draining seat gets no new work. Checked in the same transaction as the reserve.
+        if (store.isDraining(seat)) return { draining: true } as const;
         const used = inFlight(store, teams, key);
         return used >= cap ? { capped: used } : store.reserve(team, cls, seat, qitemId);
       }).immediate();
+      if (reserved && "draining" in reserved) {
+        return c.json({ error: "seat_draining", message: `${seat} is draining and takes no new work; DELETE ${API}/seats/${seat}/drain resumes it`, seat }, 409);
+      }
       if (reserved && "capped" in reserved) {
         return c.json({ error: "slot_cap_reached", message: `slot budget ${key} has ${reserved.capped} of ${cap} jobs in flight; ask again later`, slotBudgetKey: key, cap, inFlight: reserved.capped }, 429);
       }
