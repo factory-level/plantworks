@@ -123,7 +123,15 @@ export function createBroker(opts: BrokerOptions): Hono {
     // cancelling would free its slot while Pi may run.
     if (row.reserved_by) return fail(409, "not_cancellable", `job ${row.job_id} is being handed to ${row.reserved_by}; cancel it after the handoff settles`, { job: jobRecord(row) });
     if (!canTransition(row.state, "cancelled")) return fail(409, "not_cancellable", `a ${row.state} job cannot be cancelled`, { job: jobRecord(row) });
-    const { row: next, detail } = store.transition(row.job_id, "cancelled", { reason: "front-door" });
+    let moved;
+    try {
+      moved = store.transition(row.job_id, "cancelled", { reason: "front-door" });
+    } catch (e) {
+      // The job was reserved or changed between the read above and the transaction (another broker
+      // on the same file): refuse, as for a reserved job.
+      return fail(409, "not_cancellable", (e as Error).message, { job: jobRecord(store.get(row.job_id)!) });
+    }
+    const { row: next, detail } = moved;
     emit(next, "cancelled", detail);
     return c.json(jobRecord(next));
   });

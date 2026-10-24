@@ -251,3 +251,31 @@ test("cap 0 stops claims for a key", async () => {
   await t.submit("t_1");
   assert.equal((await t.claim("dev-a@team")).status, 429);
 });
+
+test("two broker connections on one SQLite file: a side transition can't free another's reservation", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "pw-2conn-")), "broker.sqlite");
+  const a = openStore(file);
+  const b = openStore(file);
+  try {
+    a.insert({ jobId: "kb-social-media-t_1-a1", team: "social-media", task: { prompt: "p" } }, "quick", "queued");
+    const stale = a.get("kb-social-media-t_1-a1")!;
+    assert.equal(stale.reserved_by, null, "A has seen the job unreserved");
+    // B reserves after A's read; A's transition must still refuse.
+    assert.ok(b.reserve("social-media", "quick", "dev-b@team", "qitem-b"));
+    assert.throws(() => a.transition("kb-social-media-t_1-a1", "cancelled", { reason: "front-door" }), /is reserved for a seat/);
+    assert.deepEqual([a.get("kb-social-media-t_1-a1")!.state, a.get("kb-social-media-t_1-a1")!.reserved_qitem_id], ["queued", "qitem-b"]);
+    // Store transactions are IMMEDIATE: while A holds the write lock, B can't reserve or transition at all.
+    b.db.pragma("busy_timeout = 0");
+    a.db.exec("BEGIN IMMEDIATE");
+    try {
+      assert.throws(() => b.release("kb-social-media-t_1-a1", "dev-b@team", "qitem-b"), /database is locked|SQLITE_BUSY/);
+      assert.throws(() => b.confirmClaim("kb-social-media-t_1-a1", "dev-b@team", "qitem-b"), /database is locked|SQLITE_BUSY/);
+    } finally {
+      a.db.exec("COMMIT");
+    }
+    assert.notEqual(b.confirmClaim("kb-social-media-t_1-a1", "dev-b@team", "qitem-b"), "lost", "B, the holder, settles it");
+  } finally {
+    a.close();
+    b.close();
+  }
+});

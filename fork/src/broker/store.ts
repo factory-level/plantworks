@@ -68,20 +68,29 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
   db.pragma("busy_timeout = 5000");
   db.exec(SCHEMA);
   const iso = () => now().toISOString();
-  const tx = <T>(fn: () => T): T => db.transaction(fn)();
+  // IMMEDIATE: the write lock is taken up front, so a read inside the transaction can't go stale
+  // against another broker process on the same file. Nested calls run as savepoints.
+  const tx = <T>(fn: () => T): T => db.transaction(fn).immediate();
   const get = (jobId: string) => db.prepare("SELECT * FROM jobs WHERE job_id = ?").get(jobId) as JobRow | undefined;
 
-  /** One PW-09 transition and its row update, atomically. Throws on an illegal transition. */
-  const apply = (jobId: string, to: JobState, detail: Record<string, unknown>, columns: TransitionColumns) => tx(() => {
+  /**
+   * One PW-09 transition and its row update, atomically. Throws on an illegal transition. A reserved
+   * job moves only for its holder (`holder`, from confirmClaim). The check is both a read inside
+   * the immediate transaction and a condition on the UPDATE itself.
+   */
+  const apply = (jobId: string, to: JobState, detail: Record<string, unknown>, columns: TransitionColumns, holder?: { seat: string; qitemId: string }) => tx(() => {
     const row = get(jobId);
     if (!row) throw new Error(`no job ${jobId}`);
+    if (row.reserved_by && !holder) throw new Error(`job ${jobId} is reserved for a seat; settle the handoff with confirmClaim or release first`);
     const checked = checkTransition(row.state, to, detail);
     const names = Object.keys(columns);
     const bad = names.filter((c) => !TRANSITION_COLUMNS.includes(c));
     if (bad.length) throw new Error(`transition cannot set ${bad.join(", ")}`);
     const sets = names.map((c) => `, ${c} = @${c}`).join("");
-    db.prepare(`UPDATE jobs SET state = @to, detail = @detail, updated_at = @at, reserved_by = NULL, reserved_at = NULL, reserved_qitem_id = NULL${sets} WHERE job_id = @jobId`)
-      .run({ ...columns, to, detail: JSON.stringify(checked), at: iso(), jobId });
+    const guard = holder ? "reserved_by = @seat AND reserved_qitem_id = @qitemId" : "reserved_by IS NULL";
+    const r = db.prepare(`UPDATE jobs SET state = @to, detail = @detail, updated_at = @at, reserved_by = NULL, reserved_at = NULL, reserved_qitem_id = NULL${sets} WHERE job_id = @jobId AND state = @from AND ${guard}`)
+      .run({ ...columns, to, from: row.state, detail: JSON.stringify(checked), at: iso(), jobId, seat: holder?.seat ?? null, qitemId: holder?.qitemId ?? null });
+    if (r.changes !== 1) throw new Error(`job ${jobId} changed while it was being moved to ${to}`);
     return { row: get(jobId)!, detail: checked };
   });
 
@@ -107,8 +116,7 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
     transition(jobId: string, to: JobState, detail: Record<string, unknown> = {}, columns: TransitionColumns = {}): { row: JobRow; detail: TransitionDetail } {
       if (to === "claimed") throw new Error("claim through confirmClaim, which checks the reservation");
       // A reserved job is mid-handoff and its qitem may be delivered (PW-19 fail-closed): only
-      // confirmClaim or a verified release may end the reservation, never a side transition.
-      if (get(jobId)?.reserved_by) throw new Error(`job ${jobId} is reserved for a seat; settle the handoff with confirmClaim or release first`);
+      // confirmClaim or a verified release may end the reservation; apply() refuses it here.
       return apply(jobId, to, detail, columns);
     },
 
@@ -135,7 +143,7 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
       return tx(() => {
         const row = get(jobId);
         if (!row || row.state !== "queued" || row.reserved_by !== seat || row.reserved_qitem_id !== qitemId) return "lost";
-        return apply(jobId, "claimed", {}, { claimed_by: seat, claimed_at: iso(), qitem_id: qitemId });
+        return apply(jobId, "claimed", {}, { claimed_by: seat, claimed_at: iso(), qitem_id: qitemId }, { seat, qitemId });
       });
     },
 
