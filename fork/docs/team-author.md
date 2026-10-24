@@ -82,7 +82,7 @@ it has none. See "Approvals" in `../src/broker/README.md`.
 
 ## Not covered here
 
-- **Handing a job off to an SRE agent via Slack** (PW-34) is not built. It is gated, and this page
+- **Handing a job off to an SRE agent via Slack** is not built. It is gated, and this page
   will describe it once it exists. A job closed as `handoff-sre` is only reported, as the bridge
   skill says.
 - **The platform's own design documents** (its front-door and approval design, its cluster
