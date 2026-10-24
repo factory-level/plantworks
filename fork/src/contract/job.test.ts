@@ -50,8 +50,9 @@ test("jobId parses into board, card and attempt", () => {
 
 test("valid envelopes pass unchanged; the broker resolves an absent class", () => {
   assert.deepEqual(validateEnvelope(good), { ok: true, envelope: good });
-  const full = { ...good, class: "long", task: { prompt: "x", title: "t" }, timeoutSeconds: 900 };
+  const full = { ...good, class: "long", task: { prompt: "x", title: "t" }, timeoutSeconds: 900, repo: "factory-level/plantworks", contextBudget: 8192, origin: { kind: "card", ref: "PW-09" } };
   assert.deepEqual(validateEnvelope(full), { ok: true, envelope: full });
+  assert.deepEqual(validateEnvelope({ ...good, repo: "o/r", origin: { kind: "opaque", ref: "anything" } }).ok, true);
 });
 
 test("invalid envelopes are rejected with every reason", () => {
@@ -69,6 +70,16 @@ test("invalid envelopes are rejected with every reason", () => {
   const long = validateEnvelope({ ...good, task: { prompt: "x".repeat(MAX_PROMPT + 1), title: "t".repeat(MAX_TITLE + 1) } });
   assert.ok(!long.ok);
   assert.equal(long.errors.length, 2);
+  for (const envelope of [
+    { ...good, contextBudget: 0 },
+    { ...good, contextBudget: 1.5 },
+    { ...good, repo: "" },
+    { ...good, repo: "o/" },
+    { ...good, repo: "/r" },
+    { ...good, repo: { owner: "o", name: "r" } },
+    { ...good, origin: { kind: "card", ref: "x", url: "https://untrusted.example" } },
+    { ...good, callback: { url: "http://127.0.0.1", auth: { token: "inline" } } },
+  ]) assert.equal(validateEnvelope(envelope).ok, false, JSON.stringify(envelope));
 });
 
 const stripDescriptions = (v: unknown): unknown =>
@@ -99,6 +110,9 @@ test("the published JSON Schema matches the validator", () => {
         },
       },
       timeoutSeconds: { type: "integer", minimum: 1 },
+      repo: { type: "string", pattern: "^[^/]+/[^/]+$" },
+      contextBudget: { type: "integer", minimum: 1 },
+      origin: { type: "object", additionalProperties: false, required: ["kind", "ref"], properties: { kind: { type: "string", minLength: 1 }, ref: { type: "string", minLength: 1 } } },
       priority: { enum: Object.keys(JOB_PRIORITIES) },
     },
   });

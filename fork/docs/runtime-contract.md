@@ -49,13 +49,38 @@ too unless `--db` points elsewhere. A worker reads nothing from disk.
 | `PLANTWORKS_PLATFORM_FILE`, `PLANTWORKS_BROKER_DB` | image `broker` role | no | | Passed as `--platform` and `--db` (`fork/container/entrypoint.sh:39`–`:40`) |
 | `PLANTWORKS_SLOT_CAP` | broker | no | 1 per `slotBudgetKey` | A malformed value stops the broker (`fork/src/broker/command.ts:38`) |
 | `PLANTWORKS_BROKER_SESSION` | broker | no | `plantworks-broker` | The qitem source session |
-| `*_CALLBACK` | broker, `pw job run` | when a team spec names one | | Only `_CALLBACK` names resolve into a spec's callback URL |
+| `*_CALLBACK` | broker, `pw job run` | when a team spec names one | | `callbackDefault` must be exactly `${NAME_CALLBACK}`; the operator supplies the URL |
+| `PLANTWORKS_CALLBACK_TOKEN_<NAME>` | broker | when team `events.auth.secretRef` names `<NAME>` | | Only this dedicated operator credential namespace is available to team refs; broker/daemon process variables are not addressable. Unknown or unset references stop broker startup; values are not logged or emitted. |
 | `PLANTWORKS_BROKER_URL` | worker, kit | no | `http://127.0.0.1:7534` | `fork/src/broker/worker.ts:11` |
 | `PLANTWORKS_TEAM`, `PLANTWORKS_SEAT`, `PLANTWORKS_CLASS` | image `worker` role | team and seat | | `fork/container/entrypoint.sh:46`–`:49` |
 | `PLANTWORKS_TEAM` | kit | yes | | The kit serves exactly one team (`fork/src/hermes/command.ts:12`–`:13`) |
 | `FORK_ROLE_FILE` | image entrypoint | no | `/tmp/fork-role` | Where a long-running role records itself for `HEALTHCHECK` (`fork/container/entrypoint.sh:16`) |
 | `PLANTWORKS_LLM_URL`, `PLANTWORKS_LLM_API_KEY` | `pw job run` (governor), `pw llm preflight` | for those commands | | Never passed to Pi (`fork/src/job/run.ts:140`) |
 | `PLANTWORKS_MCP_TOKEN` | kit, `--http` | yes with `--http` | | |
+
+## Fork-defined contract additions
+
+The following additive shapes are **fork-defined pending HarnessHG acknowledgement**. They are
+validated and documented here to make the current implementation explicit; they do not claim an
+upstream or HarnessHG contract decision.
+
+- Optional envelope `repo` (an `owner/name` string), `contextBudget` (positive integer tokens; absent
+  uses the selected class context), and opaque `origin: { kind, ref }`.
+- `plantworks.job.state` data may include known `qitemId`, `seat`, `summary` (at most 2 KiB in
+  UTF-8), `artifacts: [{ name, uri }]`, `evidence: [{ kind, uri }]`, and `usage` with prompt and
+  completion token counts only when known.
+- Broker event ids use the persisted `job_transitions.id` directly:
+  `<jobId>:<transitionSeq>`. The id is stable across replay and distinct for repeated states. The
+  sequence is globally increasing and increasing per job, but not dense per job.
+- Callback URL remains operator-owned in `events.callbackDefault`, which must be exactly
+  `${NAME_CALLBACK}`; literal or mixed URLs are rejected. Optional team
+  `events.auth: { secretRef: NAME }` resolves only `PLANTWORKS_CALLBACK_TOKEN_NAME`, an explicit
+  callback-only operator credential. No general process environment name is addressable. There is
+  no job-envelope callback URL or auth field. With auth absent, callbacks remain unauthenticated.
+- The broker keeps a durable delivery cursor per team. It retries each event for at most three
+  exhausted emitter budgets (eight HTTP attempts per budget), then records it as parked and logs
+  once; other teams continue independently. Parked events remain in transition history and the
+  failure table, but no HTTP replay or pull endpoint is provided yet.
 
 ## Network
 

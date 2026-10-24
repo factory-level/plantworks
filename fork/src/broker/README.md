@@ -28,11 +28,12 @@ plantworks pw broker serve --teams <dir> [--platform platform.json] [--db file] 
 - **Auth.** With `PLANTWORKS_BROKER_TOKEN` set, every request under `/plantworks/v1/` needs
   `Authorization: Bearer <token>`, including routes other cards add under `/plantworks/v1/`. Without it (loopback, Phase
   0-1 dev only), the API is open.
-- **Events.** `plantworks.job.state` (PW-10) is posted to the team's `events.callbackDefault`.
-  `${NAME}` placeholders in that value are read from the broker's environment at start, so the
-  sample spec's `${PLANTWORKS_FRONTDOOR_CALLBACK}` works. Only names ending in `_CALLBACK` resolve,
-  so a spec cannot copy a broker secret (its token, an endpoint key) into the URL events go to.
-  Any other name, or an unset one, stops the broker.
+- **Events.** `plantworks.job.state` (PW-10) is posted to the team's `events.callbackDefault`,
+  which must be exactly an operator environment reference such as `${PLANTWORKS_FRONTDOOR_CALLBACK}`.
+  Literal and mixed callback URLs are rejected. Optional `events.auth.secretRef: FRONTDOOR` resolves
+  only `PLANTWORKS_CALLBACK_TOKEN_FRONTDOOR`; arbitrary broker and daemon variables are not
+  addressable. An unknown or unset callback reference stops the broker. Without `events.auth`, the
+  callback remains unauthenticated.
 
 ## API
 
@@ -431,8 +432,8 @@ kept in the broker's SQLite file (`seat_drains`), so it survives a broker restar
 - Drain is per seat. There is no broker-wide drain, and a seat that is never drained or resumed
   explicitly keeps whatever state it last had. `/healthz` checks only the broker's own file, not
   the daemon.
-- Event delivery is in memory (PW-10). A broker that stops while an event is still retrying
-  loses that event. The job row is kept. The persistent outbox remains a follow-up.
+- Job-state event delivery uses a durable per-team outbox and resumes after broker restart.
+  Approval events remain in memory and can be lost if the broker stops while they are retrying.
 - Worker reconciliation does not capture the worker's output; until that reporting path exists, it
   stores `{text: null, artifacts: []}` after authenticated logical completion. It does not infer
   process exit.

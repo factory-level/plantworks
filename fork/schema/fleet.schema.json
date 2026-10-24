@@ -72,8 +72,17 @@
       "additionalProperties": false,
       "required": ["callbackDefault", "approvalConsumer"],
       "properties": {
-        "callbackDefault": { "type": "string", "minLength": 1 },
-        "approvalConsumer": { "type": "string", "minLength": 1 }
+        "callbackDefault": { "type": "string", "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*_CALLBACK\\}$", "description": "Exactly one operator-owned callback URL environment reference; literal URLs are rejected." },
+        "approvalConsumer": { "type": "string", "minLength": 1 },
+        "auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["secretRef"],
+          "properties": {
+            "secretRef": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "description": "NAME resolves only from the operator's PLANTWORKS_CALLBACK_TOKEN_NAME variable." }
+          },
+          "description": "Optional operator-authorized callback-only bearer credential reference; fork-defined pending HarnessHG acknowledgement."
+        }
       }
     },
     "hermesProfile": {

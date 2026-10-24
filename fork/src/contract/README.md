@@ -19,12 +19,18 @@ emitter and tests.
 | `task.prompt` | yes | What the worker is asked to do, at most 65,536 characters |
 | `task.title` | no | Short label for logs and events, at most 200 characters |
 | `timeoutSeconds` | no | Requested job timeout. The broker rejects values above the class ceiling |
+| `repo` | no | Optional `owner/name` repository string; fork-defined and pending HarnessHG acknowledgement |
+| `contextBudget` | no | Optional positive token count; when absent, the selected class context applies; fork-defined and pending HarnessHG acknowledgement |
+| `origin` | no | Optional opaque `{ kind, ref }` reference; fork-defined and pending HarnessHG acknowledgement |
 
 Unknown fields are rejected, so that a misspelt field is never silently ignored.
 
-**There is no per-job callback.** Events go only to the team spec's `events.callbackDefault`,
-which the operator sets. A submitter-chosen URL would let anyone who can submit a job make the
-broker send requests to local services, cloud metadata or in-cluster addresses.
+**There is no per-job callback or auth.** Events go only to the operator-configured team
+`events.callbackDefault`, which must be exactly an operator-supplied `${NAME_CALLBACK}` reference.
+Optional `events.auth.secretRef: NAME` resolves only `PLANTWORKS_CALLBACK_TOKEN_NAME`; it cannot
+address arbitrary process environment variables. Without auth, callbacks remain unauthenticated.
+The broker refuses to start if a configured callback reference cannot be resolved. These additive
+envelope fields and the event mapping are fork-defined pending HarnessHG acknowledgement.
 
 ## States
 

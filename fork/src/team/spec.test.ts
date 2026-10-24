@@ -40,6 +40,14 @@ test("the ADR sample is valid, and its profile carries trains × orchestrators a
   assert.equal(hermesProfileConfig(s as TeamSpec), PROFILE_CONFIG);
 });
 
+test("callback auth accepts only an optional configured secret reference", () => {
+  assert.deepEqual(problems((d) => { d.events.auth = { secretRef: "FRONTDOOR_TOKEN" }; }), []);
+  assert.match(problems((d) => { d.events.auth = { secretRef: "missing-lowercase" }; }).join("\n"), /secretRef must name a configured credential/);
+  assert.match(problems((d) => { d.events.auth = { secretRef: "FRONTDOOR_TOKEN", token: "inline-secret" }; }).join("\n"), /unknown field events\.auth\.token/);
+  assert.match(problems((d) => { d.events.callbackDefault = "https://untrusted.invalid/events"; }).join("\n"), /callbackDefault must be exactly one operator callback reference/);
+  assert.match(problems((d) => { d.events.callbackDefault = "${FRONTDOOR_CALLBACK}/events"; }).join("\n"), /callbackDefault must be exactly one operator callback reference/);
+});
+
 test("the ADR's map form of max_in_progress_per_profile is rejected (Hermes 0.22.5 would read it as no cap)", () => {
   const s = spec();
   s.hermesProfile.kanban.max_in_progress_per_profile = { "social-media": 1 };
@@ -118,5 +126,7 @@ test("the published fleet.schema.json names exactly the validator's fields", () 
   assert.deepEqual(keys(cls.properties.context), Object.keys(s.classes.quick.context).sort());
   assert.deepEqual(keys(cls.properties.perCall), Object.keys(s.classes.quick.perCall).sort());
   assert.equal(schema.properties.hermesProfile.properties.kanban.properties.max_in_progress_per_profile.type, "integer");
-  for (const part of ["perTrain", "endpoint", "events", "hermesProfile"]) assert.deepEqual(keys(schema.properties[part]), Object.keys(s[part]).sort(), part);
+  for (const part of ["perTrain", "endpoint", "hermesProfile"]) assert.deepEqual(keys(schema.properties[part]), Object.keys(s[part]).sort(), part);
+  assert.deepEqual(keys(schema.properties.events), [...Object.keys(s.events), "auth"].sort());
+  assert.deepEqual(schema.properties.events.required, ["callbackDefault", "approvalConsumer"]);
 });

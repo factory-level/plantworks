@@ -77,11 +77,13 @@ export async function runJob(opts: RunOptions): Promise<RunResult> {
   });
   const sent: Promise<void>[] = [];
   let state: JobState = "queued";
+  let transitionSeq = 0;
   const enter = (to: JobState, detail: Record<string, unknown> = {}) => {
     const checked = to === "queued" ? {} : transition(state, to, detail);
     state = to;
+    transitionSeq++;
     // Delivery runs alongside the job; a slow consumer never holds the seat.
-    sent.push(emitter.emit(jobStateEvent(job, to, checked)).catch(() => {}));
+    sent.push(emitter.emit(jobStateEvent({ ...job, transitionSeq }, to, checked)).catch(() => {}));
   };
 
   enter("queued");
