@@ -176,7 +176,7 @@ idempotent.
 | `not_found` | no job with that `jobId` exists **in this team** |
 | `not_cancellable` | cancel on a job that is not `queued`, `held` or `cancelled` (broker 409) |
 | `job_conflict` | submit reuses a `jobId` with a different envelope (broker 409), possibly another team's. It carries only the `jobId`. Nothing changes |
-| `broker_rejected` | the broker returned another 400: `unknown_class`, `timeout_over_ceiling`, `unknown_team`, or `approval_unsupported` (a class that needs approval is refused until PW-23). It carries the broker's `error` and `message` |
+| `broker_rejected` | the broker returned another 400: `unknown_class`, `timeout_over_ceiling` or `unknown_team`. It carries the broker's `error` and `message` |
 | `broker_auth_failed` | the broker answered 401: the server's broker token is missing or wrong. This is a configuration fault, so repeating the call does not help |
 | `broker_unavailable` | network error, timeout or 5xx. The call may be repeated: submit and cancel are idempotent |
 
@@ -263,7 +263,7 @@ merges and review verifies them:
 
 | Item | Owner | Position |
 |---|---|---|
-| Jobs API | build (PW-17) | `POST /plantworks/v1/jobs`: 201 for a new job, 200 when the same envelope is repeated, 409 `job_conflict` when a `jobId` is reused with a different envelope, 400 `invalid_envelope`/`unknown_team`/`unknown_class`/`timeout_over_ceiling`/`approval_unsupported`, and 401 `unauthorized`. Error bodies are `{ error, message }`. `GET /plantworks/v1/jobs/{jobId}`: the record, or 404. `POST /plantworks/v1/jobs/{jobId}/cancel`: 200 for `queued`/`held` (and for an already `cancelled` job), 409 for other states, 404 when unknown |
+| Jobs API | build (PW-17) | `POST /plantworks/v1/jobs`: 201 for a new job, 200 when the same envelope is repeated, 409 `job_conflict` when a `jobId` is reused with a different envelope, 400 `invalid_envelope`/`unknown_team`/`unknown_class`/`timeout_over_ceiling`, and 401 `unauthorized`. Error bodies are `{ error, message }`. `GET /plantworks/v1/jobs/{jobId}`: the record, or 404. `POST /plantworks/v1/jobs/{jobId}/cancel`: 200 for `queued`/`held` (and for an already `cancelled` job), 409 for other states, 404 when unknown |
 | Job record | build (PW-17) | `{ jobId, team, class, state, detail, createdAt, updatedAt, result }`. `result` is null until the job is terminal, then `{ text \| null, artifacts: [{ name, bytes, sha256 }] }`. It stays null until the worker report path (PW-21) exists, and `artifacts` stays `[]` until artifact storage is scheduled. **No result storage exists yet.** PW-17 sets no cap on stored text, because nothing writes it yet. PW-21 adds the cap. The 16,000-character paging is client-side |
 | Broker auth | build (PW-17) | Bearer `PLANTWORKS_BROKER_TOKEN` on every `/plantworks/v1/` route. The default bind is `127.0.0.1:7534`. Loopback with no token configured is unauthenticated, for Phase 0–1 development only |
 | `mcp_servers.plantworks` and the skill in the emitted profile | build2 (PW-20) | Done in this PR: `hermesProfileConfig()` and `emitTeam()`. The `${}` references stay literal |

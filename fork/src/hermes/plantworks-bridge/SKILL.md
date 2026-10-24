@@ -64,8 +64,6 @@ Do not use it for questions you can answer yourself in the conversation.
 - `not_found` means the job does not exist in this team, or the broker no longer keeps it.
 - `job_conflict` means this card and attempt were already submitted with a different prompt.
   Do not resubmit; inspect the existing job, or ask before submitting the next attempt.
-- `broker_rejected` with `approval_unsupported`: that class needs an approval, which the
-  team cannot take yet. Say so; do not resubmit it in another class without asking.
 - `broker_auth_failed` is a setup fault. Tell the person; repeating the call will not help.
 - `broker_unavailable` is temporary. Repeat the same call later; submit and cancel are
   idempotent.

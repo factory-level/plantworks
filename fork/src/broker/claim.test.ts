@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { emitTeam } from "../team/command.ts";
 import { PHASE_0_1 } from "../team/spec.ts";
 import { DaemonRefused, claimNextRoutes, daemonQueue, newQitemId, type DaemonQueue } from "./claim.ts";
-import { API, createBroker, loadTeams, type Emit } from "./server.ts";
+import { API, createBroker, loadTeams, type Send } from "./server.ts";
 import { openStore } from "./store.ts";
 import { parseSlotCaps, type SlotCaps } from "./slots.ts";
 
@@ -45,10 +45,11 @@ function setup(daemon: DaemonQueue, now: () => Date = () => new Date(), token?: 
   assert.ok("files" in emitTeam(definition, dir, platform));
   const store = openStore(":memory:", now);
   const events: [string, string][] = [];
-  const emit: Emit = (row, state) => events.push([row.job_id, state]);
+  // plantworks.job.state events as [jobId, state] (PW-23 replaced the emit test hook with send)
+  const send: Send = (_team, e) => { if (e.type === "plantworks.job.state") events.push([e.subject, e.data.state as string]); };
   let n = 0;
   const routes = [claimNextRoutes({ daemon, brokerSession: "plantworks-broker", slotCaps, newQitemId: () => `qitem-test-${++n}`, log: () => {} })];
-  const app = createBroker({ store, teams: loadTeams(dir, platform), emit, routes, token });
+  const app = createBroker({ store, teams: loadTeams(dir, platform), send, routes, token, publicUrl: "http://broker.test" });
   const call = (path: string, body: unknown, headers: Record<string, string> = {}) =>
     app.request(`${API}${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
   const submit = (card: string, extra: Record<string, unknown> = {}) => call("/jobs", { jobId: `kb-social-media-${card}-a1`, team: "social-media", task: { prompt: `do ${card}` }, ...extra });
