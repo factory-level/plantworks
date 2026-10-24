@@ -21,6 +21,22 @@ from `jobId`. Callers should use `jobId` for submit idempotency and should not c
 The broker persists an ambiguous reservation and reconciles it before another seat can claim that
 job.
 
+**Decision (PW-09): no `qitem-<ts>-<sha256(jobId)[:16]>` derivation.** A derived ID exists so that a
+retried create after a crash reuses the same ID. The broker already guarantees that by storing the
+ID instead of deriving it:
+- The ID is minted before the reservation and committed in the same transaction, before any daemon
+  call (`fork/src/broker/claim.ts:132`–`:145`, `fork/src/broker/store.ts:185`–`:191`). No create
+  can be sent without its ID already being durable.
+- Every create, first attempt or recovery, uses the stored `reserved_qitem_id`
+  (`fork/src/broker/claim.ts:161`, `:194`–`:198`, `:231`).
+- Upstream absorbs a create with an existing ID and the same source and destination: no second
+  row, event or wake. A different destination is `409 qitem_id_reuse`
+  (`packages/daemon/src/domain/queue-repository.ts:1730`–`:1757`). The fork pins this in
+  `fork/test/contract/upstream-queue-contract.test.mjs:52`–`:64`.
+- A crash after create and before claim, and a crash between reserve and create, each end with
+  exactly one qitem claimed for the reserving seat
+  (`fork/src/broker/recovery.test.ts:76`, `:102`).
+
 `repo`, `contextBudget`, and `origin` are additive fork-defined fields pending HarnessHG
 acknowledgement. `repo` is an `owner/name` string, `contextBudget` a positive integer, and `origin`
 an opaque non-empty `{ "kind", "ref" }` pair. `priority`, when present, is `urgent`, `high`,
