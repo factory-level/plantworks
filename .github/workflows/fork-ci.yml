@@ -57,12 +57,16 @@ jobs:
       # session is listed, never the rest of the runner.
       - name: Fork tests
         working-directory: fork
+        # A test process still alive 2 minutes in records its live handles here (scripts/linger-report.mjs).
+        env:
+          LINGER_REPORT_DIR: ${{ runner.temp }}/linger
         run: |
           setsid npm test & pid=$!
           for _ in $(seq 600); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
           if kill -0 "$pid" 2>/dev/null; then
             echo "::error::fork tests still running after 10 minutes; their processes:"
             ps -s "$pid" -o pid,ppid,etimes,args --forest
+            for f in "$LINGER_REPORT_DIR"/*.json; do [ -f "$f" ] && { echo "--- live handles, $f"; cat "$f"; }; done
             pkill -TERM -s "$pid"; sleep 5; pkill -KILL -s "$pid"
             exit 1
           fi
