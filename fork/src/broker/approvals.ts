@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Approvals (PW-23, ADR 0204): a job in a class with `approval` other than `never` starts `held`.
-// The broker posts plantworks.approval.requested with a decision URL; whoever the front door asks
-// (Hermes, then a person in Slack) POSTs a decision there. Approved goes held -> queued; denied
-// or a run-out TTL goes held -> cancelled. Hooks only: the broker knows nothing about Slack.
+// The broker posts plantworks.approval.requested with a decision URL, and an external trusted
+// caller POSTs a decision there (none exists yet). Approved goes held -> queued; denied or a
+// run-out TTL goes held -> cancelled. Hooks only: no consumer, decider or Slack code here.
 import type { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { parseJobId } from "../contract/job.ts";

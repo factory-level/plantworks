@@ -97,8 +97,14 @@ decision, by?, reason?}`:
 | TTL runs out | `held -> cancelled` | `{reason: "approval-expired"}` | `expired` |
 
 Event ids are `<jobId>:approval.requested` and `<jobId>:approval.resolved`, so a consumer
-deduplicates them as it does job.state events. There is no Slack code here. The front door
-(Hermes) turns `approval.requested` into a prompt and POSTs the person's answer.
+deduplicates them as it does job.state events.
+
+**These are hooks only. No approval consumer or decider exists yet.** Nothing in Plantworks
+turns `approval.requested` into a prompt or POSTs a decision. There is no Slack code, PW-24's
+MCP server has no event push and never decides, and the ADR's Hermes approval path is not built.
+Until an external trusted caller of the decision endpoint exists, a held job is either cancelled
+as `approval-expired` when its TTL runs out, or stays `held` indefinitely if its class has no
+TTL.
 
 ## For other cards
 
@@ -132,7 +138,8 @@ deduplicates them as it does job.state events. There is no Slack code here. The 
   for it, and adding one would change the PW-09 contract, so no job in such a class runs
   unapproved.
 - Approval events go to the team's `callbackDefault`. `events.approvalConsumer` must be
-  `frontdoor`, the ADR's default (Hermes). Any other value stops the broker.
+  `frontdoor`, the ADR's default. Any other value stops the broker. Nothing consumes them yet
+  (see Approvals).
 - The broker does not check who may decide (ADR open decision 8, approvers). `by` is recorded in
   the resolved event, not verified. Anyone holding the broker token can decide. **That includes
   the submitter**: Hermes, or PW-24's MCP server, holds the same token and could approve its own
@@ -149,6 +156,9 @@ deduplicates them as it does job.state events. There is no Slack code here. The 
   `front-door`) but no `approval.resolved`. Any token holder can cancel, not only the front door.
   **Consumer rule:** close any open approval prompt on `job.state cancelled`, whatever the
   reason. A decision that arrives later gets `409 not_held`, so nothing revives the job.
+- **No integrated approval consumer or decider.** Held jobs need an external trusted caller of
+  `/decision`. Otherwise they expire at their TTL, or stay held forever in a class without one,
+  such as `per-job` without `approvalTtlSeconds`.
 - The TTL sweep runs every second inside the broker. A broker that is down when a TTL runs out
   expires that job at its next sweep, or when a decision for it arrives.
 - **Nothing moves a job from `failed` to `retried` yet.** The ADR names the transition, but the
