@@ -4,7 +4,7 @@
 This is how an **unmodified** upstream Hermes Agent (pinned at v0.22.5) hands work to one
 Plantworks team. It has two parts, and needs no Hermes code:
 
-- **`plantworks pw mcp serve`**: an MCP server with three tools: submit, inspect and cancel.
+- **`plantworks pw mcp serve`**: an MCP server with four tools: submit, inspect, cancel and stats.
   It is a separate server next to upstream's `rig mcp serve` (`plantworks mcp serve`), not
   part of it. It shares no tools, tokens or grant files with it, and does not talk to the
   OpenRig daemon. It is a thin client of one team's broker.
@@ -66,11 +66,11 @@ mcp_servers:
     headers:
       Authorization: "Bearer ${PLANTWORKS_MCP_TOKEN}"
     tools:
-      include: [job_submit, job_inspect, job_cancel]
+      include: [job_submit, job_inspect, job_cancel, job_stats]
 ```
 
 Hermes shows the tools to the model as `mcp_plantworks_job_submit`,
-`mcp_plantworks_job_inspect` and `mcp_plantworks_job_cancel`. It refuses to connect if a
+`mcp_plantworks_job_inspect`, `mcp_plantworks_job_cancel` and `mcp_plantworks_job_stats`. It refuses to connect if a
 `${VAR}` in `url` or `headers` is unset, so a missing token fails closed.
 
 ## Authentication
@@ -168,11 +168,32 @@ answer is then `code: "not_cancellable"` with the current `state`, and nothing c
 Cancelling a job that is already `cancelled` returns it unchanged, so the call is
 idempotent.
 
+### `job_stats`
+
+No inputs. Counts this team's jobs by state, from the broker's `GET /plantworks/v1/stats`:
+
+```jsonc
+{ "team": "social-media", "active": 2, "held": 1, "queued": 2, "reserved": 0, "claimed": 0, "running": 0,
+  "classes": { "quick": { "active": 2, "held": 0, ... }, "long": { ... } } }
+```
+
+- **Only this team.** The broker's stats cover every team it serves, its shared slot budgets
+  (`slots`) and its draining seats. The kit copies this team's six counts and its classes,
+  field by field, and passes on nothing else.
+- **Fails closed.** A reply of any other shape is `broker_unavailable`, with no partial counts:
+  a missing or negative count, a fraction, text instead of a number, or missing classes. A
+  broker that doesn't serve this team is `team_not_served`, a setup fault. Either answer names
+  no other team.
+- **Lifecycle counts, not execution.** These are broker job states (`active` = queued +
+  claimed + running), the same counts the broker's slot cap uses. They say nothing about which
+  Pi processes are running.
+
 ### Error codes
 
 | Code | When |
 |---|---|
 | `invalid_envelope` | the inputs fail `validateEnvelope()`. The message names the field |
+| `team_not_served` | `job_stats` only: the broker reports no entry for this server's team. A setup fault |
 | `not_found` | no job with that `jobId` exists **in this team** |
 | `not_cancellable` | cancel on a job that is not `queued`, `held` or `cancelled` (broker 409) |
 | `job_conflict` | submit reuses a `jobId` with a different envelope (broker 409), possibly another team's. It carries only the `jobId`. Nothing changes |

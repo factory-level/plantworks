@@ -12,8 +12,8 @@ metadata:
 # Plantworks bridge
 
 This profile's team has a Plantworks worker queue. The `plantworks` MCP server gives you
-three tools: `mcp_plantworks_job_submit`, `mcp_plantworks_job_inspect` and
-`mcp_plantworks_job_cancel`. The server is bound to this team. You never name a team.
+four tools: `mcp_plantworks_job_submit`, `mcp_plantworks_job_inspect`,
+`mcp_plantworks_job_cancel` and `mcp_plantworks_job_stats`. The server is bound to this team. You never name a team.
 
 ## When to Use
 
@@ -54,6 +54,27 @@ Do not use it for questions you can answer yourself in the conversation.
      waiting for no longer applies.
 5. **Cancel.** `job_cancel` works only before the job starts (`queued` or `held`). For a
    running job it returns `not_cancellable`. Say so; the job will end on its own timeout.
+
+## Card status from job state
+
+Move the card from the state your latest `job_inspect` reported, within the same budget as
+step 3. This is a mapping for you to apply: nothing pushes events to you, and the tools never
+edit the board.
+
+| Last inspected state | Card |
+|---|---|
+| `queued`, `claimed`, `running` | in progress. Note the `jobId` and state |
+| `held` | blocked: pending an external approval decision. Say it can't be approved from here |
+| `done`, outcome `succeeded` | done, with the summary from step 4 |
+| `done`, outcome `rejected-by-checks` | blocked, with the checks' reason |
+| `done`, closure `handoff-sre` | blocked: needs a human to bring in the SRE agent |
+| `failed` | blocked, with the reason. A retry is a new attempt, and only on request |
+| `cancelled` | closed as cancelled, with the reason. Don't reopen it |
+
+When the budget runs out first, leave the card as it is and report the job as pending.
+
+`job_stats` gives this team's counts by state (queued, held, running and so on). Use it to
+answer "how busy is the team", not to follow one card.
 
 ## Pitfalls
 

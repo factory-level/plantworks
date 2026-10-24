@@ -193,7 +193,7 @@ export function hermesProfileConfig(spec: TeamSpec): string {
     "    headers:\n" +
     '      Authorization: "Bearer ${PLANTWORKS_MCP_TOKEN}"\n' +
     "    tools:\n" +
-    "      include: [job_submit, job_inspect, job_cancel]\n";
+    "      include: [job_submit, job_inspect, job_cancel, job_stats]\n";
 }
 
 export function validatePlatform(input: unknown): string[] {
