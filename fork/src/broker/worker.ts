@@ -33,7 +33,7 @@ export async function governSeat(opts: { team: string; seat: string; class?: str
     onFail: (reason) => log(`plantworks worker: ${opts.seat} hit ${reason} (consecutive model calls cut at the ${workerClass.deadlineSeconds}s deadline); the broker job is left as it is`),
   });
   try {
-    const agentDir = writeSeatFiles({ openrigHome: opts.openrigHome, session: opts.seat, className, governorUrl: governor.url, workerClass });
+    const agentDir = writeSeatFiles({ openrigHome: opts.openrigHome, session: opts.seat, className, governorUrl: governor.url, workerClass, toolProfile: spec.classes[className]!.toolProfile });
     return { governor, agentDir, className, timeoutSeconds: spec.classes[className]!.timeoutSeconds };
   } catch (e) {
     await governor.close();

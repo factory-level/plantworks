@@ -13,12 +13,12 @@ import { PHASE_0_1 } from "../team/spec.ts";
 // Team `t`, whose one class has limits unlike either built-in class, so the tests show the
 // worker path enforces the team spec's own perCall/context.
 const PER_CALL = { maxOutputTokens: 700, deadlineSeconds: 1 };
-function teamsDir() {
+function teamsDir(toolProfile?: "trimmed") {
   const dir = mkdtempSync(join(tmpdir(), "pw-worker-teams-"));
   const emitted = emitTeam({
     team: "t", trains: 1, perTrain: { orchestrators: 1, workers: { small: 1 } },
     endpoint: { url: "${PLANTWORKS_LLM_URL}", slotBudgetKey: "t" }, defaultClass: "small",
-    classes: { small: { slots: 1, model: "qwen3.5:9b", context: { maxContextTokens: 8192, thinkingTokens: 0 }, perCall: PER_CALL, approval: "never", timeoutSeconds: 900, maxAttempts: 1 } },
+    classes: { small: { slots: 1, model: "qwen3.5:9b", context: { maxContextTokens: 8192, thinkingTokens: 0 }, perCall: PER_CALL, ...(toolProfile ? { toolProfile } : {}), approval: "never", timeoutSeconds: 900, maxAttempts: 1 } },
     events: { callbackDefault: "${PLANTWORKS_FRONTDOOR_CALLBACK}", approvalConsumer: "frontdoor" },
   }, dir, { ...PHASE_0_1, slotCaps: { t: 1 } });
   assert.ok("files" in emitted);
@@ -288,4 +288,17 @@ test("at the job's timeout the seat's model calls are cut off, but the job and i
   await until(() => handed >= 2);
   assert.equal(await call(), 200, "once the broker records done, the seat's calls go through again");
   await w.stop();
+});
+
+test("the worker renders the team class's trimmed tool profile and compaction into the seat's Pi files", async (t) => {
+  const { governSeat } = await import("./worker.ts");
+  const home = mkdtempSync(join(tmpdir(), "pw-worker-home-"));
+  const platform = join(home, "platform.json");
+  writeFileSync(platform, JSON.stringify({ ...PHASE_0_1, slotCaps: { t: 1 } }));
+  const { governor, agentDir } = await governSeat({ team: "t", seat: "s", teamsDir: teamsDir("trimmed"), platform, port: 0, openrigHome: home, env: { PLANTWORKS_LLM_URL: "http://127.0.0.1:9/v1" } });
+  t.after(() => governor.close());
+  const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"));
+  assert.deepEqual(settings.defaultTools, ["read", "edit", "bash"]);
+  assert.deepEqual(settings.compaction, { reserveTokens: 2048, keepRecentTokens: 3072 }, "from the team class's 8K window");
+  assert.ok(readFileSync(join(agentDir, "SYSTEM.md"), "utf8").startsWith("<!-- Written by Plantworks"));
 });
