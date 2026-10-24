@@ -92,7 +92,8 @@ for the front door. The broker path doesn't collect any of this yet.
   a fixed neutral identity. Untracked files are taken with the standard excludes, so ignored files
   such as `.env` never reach it. `files` lists the added or changed paths (not deletions) with the
   sha256 of their committed content, streamed whatever the size. The branch is written last, so a
-  snapshot that fails leaves none.
+  snapshot that fails leaves none. Under sparse checkout, files outside the cone (skip-worktree in the
+  user's index) keep HEAD's version, so they don't read as deleted.
 - **The snapshot runs nothing the job could have planted.** Pi ran as this user in this work tree,
   so it could have written the repository's config and `.gitattributes`. So there is no `git add`
   (clean filters), files are hashed with `--no-filters`, fsmonitor, hooks and the untracked cache are

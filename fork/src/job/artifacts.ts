@@ -87,7 +87,10 @@ export async function snapshotWork(cwd: string, jobId: string, message: string):
     // Submodules keep HEAD's entry; a nested repository (a path ending in /) isn't descended into.
     const tracked = nul(git(top, ["ls-files", "-z", "-s"], index)).map((l) => ({ mode: l.slice(0, 6), path: l.slice(l.indexOf("\t") + 1) }));
     const untracked = nul(git(top, ["ls-files", "-z", "--others", "--exclude-standard"], index)).filter((p) => !p.endsWith("/"));
-    const paths = [...tracked.filter((e) => e.mode !== "160000").map((e) => e.path), ...untracked];
+    // Paths the user's own index marks skip-worktree (sparse checkout) aren't in the work tree on
+    // purpose: they keep HEAD's entry rather than reading as deleted. The real index is only read.
+    const sparse = new Set(nul(git(top, ["ls-files", "-z", "-t"])).filter((l) => l.startsWith("S ")).map((l) => l.slice(2)));
+    const paths = [...tracked.filter((e) => e.mode !== "160000" && !sparse.has(e.path)).map((e) => e.path), ...untracked];
     const zero = "0".repeat(git(top, ["rev-parse", "HEAD"]).length);
     const regular: string[] = [];
     const lines: string[] = [];

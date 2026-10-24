@@ -148,3 +148,17 @@ test("large files, deletions, symlinks and the executable bit are kept as they a
   assert.doesNotMatch(tree, /README\.md/, "the deleted file is gone from the snapshot");
   assert.equal(readFileSync(join(dir, ".gitignore"), "utf8"), ".env\n");
 });
+
+test("under sparse checkout, files outside the cone keep HEAD's version instead of reading as deleted", async () => {
+  const dir = repo();
+  for (const d of ["keep", "far"]) { execFileSync("mkdir", ["-p", join(dir, d)]); writeFileSync(join(dir, d, "x.txt"), `${d}\n`); }
+  git(dir, "add", "-A");
+  git(dir, "commit", "-q", "-m", "two dirs");
+  git(dir, "sparse-checkout", "set", "keep");
+  assert.equal(existsSync(join(dir, "far", "x.txt")), false, "far/ is outside the cone");
+  writeFileSync(join(dir, "keep", "new.txt"), "new\n");
+  const result = await snapshotWork(dir, jobId, "m");
+  assert.ok(result.branch, JSON.stringify(result));
+  assert.deepEqual(result.files.map((f) => f.path), ["keep/new.txt"]);
+  assert.equal(git(dir, "cat-file", "blob", `${result.commit}:far/x.txt`), "far", "kept from HEAD");
+});
