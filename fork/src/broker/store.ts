@@ -150,9 +150,12 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
       return db.prepare("SELECT * FROM jobs WHERE state = 'held' AND approval_expires_at IS NOT NULL AND approval_expires_at <= ? ORDER BY seq").all(iso()) as JobRow[];
     },
 
-    /** Drops a reservation, if it is still the given seat's. */
-    release(jobId: string, seat: string): void {
-      db.prepare("UPDATE jobs SET reserved_by = NULL, reserved_at = NULL, reserved_qitem_id = NULL WHERE job_id = ? AND reserved_by = ?").run(jobId, seat);
+    /**
+     * Drops a reservation, only if it is still this seat's with this qitem. The qitem fences it:
+     * the same seat may hold a newer reservation on the job after its own lease ran out.
+     */
+    release(jobId: string, seat: string, qitemId: string): void {
+      db.prepare("UPDATE jobs SET reserved_by = NULL, reserved_at = NULL, reserved_qitem_id = NULL WHERE job_id = ? AND reserved_by = ? AND reserved_qitem_id = ?").run(jobId, seat, qitemId);
     },
 
     close: () => db.close(),

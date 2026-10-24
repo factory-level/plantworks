@@ -5,9 +5,10 @@ import type { Command } from "commander";
 import { loadPlatform } from "../team/command.ts";
 import { loadTeams, startBroker } from "./server.ts";
 import { openStore } from "./store.ts";
+import { claimNextRoutes, daemonQueue } from "./claim.ts";
 
 /** The daemon's port is 7533 (PW-16); the broker sits next to it. */
-export const BROKER_DEFAULTS = { host: "127.0.0.1", port: 7534 } as const;
+export const BROKER_DEFAULTS = { host: "127.0.0.1", port: 7534, daemonUrl: "http://127.0.0.1:7533", session: "plantworks-broker" } as const;
 
 export function brokerVerb(pw: Command): void {
   const broker = pw.command("broker").description("The Plantworks job broker (ADR 0204)");
@@ -27,7 +28,11 @@ export function brokerVerb(pw: Command): void {
         if (!dir) throw new Error("no team specs: pass --teams or set PLANTWORKS_TEAMS_DIR");
         const teams = loadTeams(dir, loadPlatform(opts.platform));
         store = openStore(opts.db ?? join(process.env.OPENRIG_HOME!, "plantworks", "broker.sqlite"));
-        const server = await startBroker({ store, teams, token: process.env.PLANTWORKS_BROKER_TOKEN?.trim() || undefined, host: opts.host, port: Number(opts.port), publicUrl: opts.publicUrl ?? (process.env.PLANTWORKS_BROKER_PUBLIC_URL?.trim() || undefined) });
+        // claim-next (PW-18) hands jobs to seats through the daemon's queue: PLANTWORKS_DAEMON_URL, with
+        // the daemon's own OPENRIG_AUTH_BEARER_TOKEN when it has one.
+        const daemon = daemonQueue({ url: process.env.PLANTWORKS_DAEMON_URL?.trim() || BROKER_DEFAULTS.daemonUrl, token: process.env.OPENRIG_AUTH_BEARER_TOKEN?.trim() || undefined });
+        const routes = [claimNextRoutes({ daemon, brokerSession: process.env.PLANTWORKS_BROKER_SESSION?.trim() || BROKER_DEFAULTS.session })];
+        const server = await startBroker({ store, teams, routes, token: process.env.PLANTWORKS_BROKER_TOKEN?.trim() || undefined, host: opts.host, port: Number(opts.port), publicUrl: opts.publicUrl ?? (process.env.PLANTWORKS_BROKER_PUBLIC_URL?.trim() || undefined) });
         console.log(`plantworks broker listening on ${server.url} for ${[...teams.keys()].join(", ")}`);
         const stop = async () => { await server.close(); store!.close(); };
         process.once("SIGINT", stop);
