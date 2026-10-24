@@ -229,6 +229,40 @@ test("plantworks pw broker serve: submit over HTTP, the event is delivered, and 
   await consumer.close();
 });
 
+// PW-19 platform limits through the real binary: a bad or violated limit means no listening socket.
+test("plantworks pw broker serve: a class over an env ceiling, a bad ceiling or classes over PLANTWORKS_SLOT_CAP refuse to start", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pw-broker-"));
+  const platformFile = join(home, "platform.json");
+  writeFileSync(platformFile, JSON.stringify(platform));
+  const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
+  const base = { ...process.env, OPENRIG_HOME: home, PLANTWORKS_TEAMS_DIR: teamsDir(), PLANTWORKS_FRONTDOOR_CALLBACK: "http://127.0.0.1:9/cb", PLANTWORKS_BROKER_TOKEN: "t0k" };
+  for (const k of ["PLANTWORKS_MAX_CALL_SECONDS", "PLANTWORKS_MAX_CALL_OUTPUT", "PLANTWORKS_SLOT_CAP"]) delete (base as Record<string, unknown>)[k];
+  /** Serves with `extra` env; resolves "listening" or the exit code and stderr. */
+  const serve = (extra: Record<string, string>) => new Promise<{ listening: boolean; code: number | null; stderr: string }>((resolve) => {
+    const child = spawn(process.execPath, [bin, "pw", "broker", "serve", "--platform", platformFile, "--port", "0"], { env: { ...base, ...extra } });
+    let out = "", err = "";
+    child.stderr.on("data", (d) => { err += d; });
+    child.stdout.on("data", (d) => { out += d; if (/listening on /.test(out)) { child.once("exit", () => resolve({ listening: true, code: null, stderr: err })); child.kill("SIGTERM"); } });
+    child.on("exit", (code) => { if (!/listening on /.test(out)) resolve({ listening: false, code, stderr: err }); });
+  });
+  const refused: [Record<string, string>, RegExp][] = [
+    [{ PLANTWORKS_MAX_CALL_SECONDS: "30" }, /classes\.quick exceeds a platform ceiling: deadline 60s > 30s/],
+    [{ PLANTWORKS_MAX_CALL_OUTPUT: "1024" }, /classes\.quick exceeds a platform ceiling: output 1536 > 1024 tokens/],
+    [{ PLANTWORKS_MAX_CALL_SECONDS: "0" }, /PLANTWORKS_MAX_CALL_SECONDS: "0" is not a positive integer/],
+    [{ PLANTWORKS_MAX_CALL_OUTPUT: "4096" }, /above the platform ceiling/],
+    [{ PLANTWORKS_SLOT_CAP: "social-media=0" }, /slot budget social-media: the teams' classes ask for 1 slots, over PLANTWORKS_SLOT_CAP's 0/],
+  ];
+  for (const [extra, re] of refused) {
+    const r = await serve(extra);
+    assert.deepEqual([r.listening, r.code], [false, 1], JSON.stringify(extra));
+    assert.match(r.stderr, re);
+  }
+  for (const ok of [{}, { PLANTWORKS_MAX_CALL_SECONDS: "60", PLANTWORKS_MAX_CALL_OUTPUT: "1536/1024", PLANTWORKS_SLOT_CAP: "social-media=1" }]) {
+    const r = await serve(ok);
+    assert.equal(r.listening, true, `${JSON.stringify(ok)}: ${r.stderr}`);
+  }
+});
+
 // --- Approvals (PW-23) -----------------------------------------------------------------------
 
 const approvals = (t: { sent: CloudEvent[] }) => t.sent.filter((e) => e.type.startsWith("plantworks.approval.")).map((e) => {

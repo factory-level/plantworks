@@ -50,3 +50,17 @@ export function inFlight(store: Store, teams: Map<string, TeamSpec>, key: string
     .get(...sharing) as { n: number };
   return row.n;
 }
+
+/**
+ * Startup check: the classes of every team sharing a slot budget key ask for no more slots than
+ * the cap claim-next will enforce for that key (the same `SlotCaps`). A team spec's own rule 1
+ * checks the platform file's `slotCaps`; this checks the runtime cap, so the two can't disagree.
+ */
+export function slotCapProblems(teams: Map<string, TeamSpec>, caps: SlotCaps): string[] {
+  const asked = new Map<string, number>();
+  for (const t of teams.values()) {
+    const slots = Object.values(t.classes).reduce((n, c) => n + c.slots, 0);
+    asked.set(t.endpoint.slotBudgetKey, (asked.get(t.endpoint.slotBudgetKey) ?? 0) + slots);
+  }
+  return [...asked].filter(([key, n]) => n > capFor(caps, key)).map(([key, n]) => `slot budget ${key}: the teams' classes ask for ${n} slots, over PLANTWORKS_SLOT_CAP's ${capFor(caps, key)}`);
+}

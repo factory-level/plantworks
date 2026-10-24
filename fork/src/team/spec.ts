@@ -4,7 +4,7 @@
 // Hermes profile. The fork only reads a team definition and emits files; registration (#991)
 // and deployment (#993) read them. Nothing here knows about Kubernetes or Pulumi.
 import { DNS_NAME } from "../contract/job.ts";
-import { ceilingProblems } from "../llm/classes.ts";
+import { ceilingProblems, type Ceilings } from "../llm/classes.ts";
 
 export const SPEC_VERSION = "plantworks/v1";
 export const APPROVALS = ["never", "per-job", "always"] as const;
@@ -49,6 +49,8 @@ export interface Platform {
   /** Measured Pi prompt baseline and a reserve, in tokens. Rule 3's second half applies once the baseline is measured. */
   piBaselineTokens?: number;
   reserveTokens?: number;
+  /** Per-call ceilings delivered by the platform's environment (`pw broker serve`); not a platform-file field. Absent means the ADR values. */
+  callCeilings?: Ceilings;
 }
 export const PHASE_0_1: Platform = { slotCaps: {}, models: ["qwen3.5:9b"], maxContextTokens: 32768 };
 
@@ -133,7 +135,7 @@ export function validateSpec(spec: unknown, platform: Platform = PHASE_0_1): str
     // Rule 8: perCall is set and within the platform ceilings. Rule 3: context within the platform maximum.
     if (!int(call.maxOutputTokens, 1) || !int(call.deadlineSeconds, 1)) errors.push(`${at}.perCall must set maxOutputTokens and deadlineSeconds`);
     else if (int(ctx.maxContextTokens, 1)) {
-      const problems = ceilingProblems({ model: String(c.model), maxContextTokens: ctx.maxContextTokens as number, maxOutputTokens: call.maxOutputTokens as number, deadlineSeconds: call.deadlineSeconds as number });
+      const problems = ceilingProblems({ model: String(c.model), maxContextTokens: ctx.maxContextTokens as number, maxOutputTokens: call.maxOutputTokens as number, deadlineSeconds: call.deadlineSeconds as number }, platform.callCeilings);
       for (const p of problems) errors.push(`${at} exceeds a platform ceiling: ${p}`);
       if ((ctx.maxContextTokens as number) > platform.maxContextTokens) errors.push(`${at}.context.maxContextTokens exceeds the platform maximum ${platform.maxContextTokens}`);
       if (platform.piBaselineTokens !== undefined) {
