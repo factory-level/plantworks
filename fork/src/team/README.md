@@ -45,8 +45,15 @@ plantworks pw team validate out/<team>/team.json [--platform platform.json]
 | 7 | Names are DNS-safe and unique | |
 | 8 | Every class sets `perCall`, within the ceilings: 60 s, and 1536 output tokens (≤16K) or 1024 (32K) | `../llm/classes.ts` |
 
-Without `--platform`, the Phase 0–1 platform applies: `qwen3.5:9b`, a 32768-token maximum and
-**no slot caps**. So any team that wants a slot needs a platform file that grants one.
+Without `--platform`, the Phase 0–1 platform applies: `qwen3.5:9b` and a 32768-token maximum.
+It grants no slot caps, and rule 1 counts a missing cap as 0, so **validation refuses any class
+with `slots` > 0**. That is the opposite of unlimited: the emitter can't approve slots against
+platform limits nobody stated, so a team that wants a slot needs a platform file that grants one.
+
+**Validation caps and runtime caps are separate.** The platform file only decides whether a spec
+is valid. How many jobs actually run at once is the broker's cap (PW-19): `PLANTWORKS_SLOT_CAP`
+per `slotBudgetKey`. When that is unset, the Phase 0–1 default is **1 in flight** per key, never
+unlimited. Nothing in this directory selects runtime concurrency.
 
 ## Hermes profile: what the file does and doesn't do
 
