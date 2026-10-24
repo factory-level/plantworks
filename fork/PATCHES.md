@@ -32,7 +32,7 @@ start with `fork-` so they never collide with an upstream file.
 
 ## Upstream sync checklist
 
-After syncing upstream, review `fork/test/upstream-contracts.test.mjs` for CLI and Pi model contracts, and `fork/test/upstream-contract-source.test.mjs` for daemon options, queue routes and sender identity, Pi seat paths, and no-kernel boot. These tests name the upstream source locations they pin; run them through the Fork CI test step after the upstream build.
+After syncing upstream, review `fork/test/contract/` for CLI and Pi model contracts, daemon options, queue routes and sender identity, Pi seat paths, and no-kernel boot. Re-check and update upstream file:line citations when those constructs move. Run these tests through the Fork CI test step after the upstream build.
 
 ## Never
 
