@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runJob, type RunOptions } from "./run.ts";
 import { stubConsumer, stubModel } from "./fixtures/stubs.ts";
+import { classByName } from "../llm/classes.ts";
 
 const fakePi = [process.execPath, fileURLToPath(new URL("./fixtures/fake-pi.mjs", import.meta.url))];
 const envelope = { jobId: "kb-social-media-t_5030c01e-a1", team: "social-media", task: { prompt: "Say hi" } };
@@ -109,4 +110,26 @@ test("real Pi: one busy period (503, 503, then 200) costs Pi a single call", { s
   assert.equal(result.state, "done", JSON.stringify(result));
   assert.equal(f.posts(), 3);
   assert.equal(f.model.requests.length, 1);
+});
+
+// The full deadline chain with real Pi: an endpoint that never answers, and a 2 s class deadline
+// (the workerClass hook) so it takes seconds instead of minutes. One stuck logical call: the
+// governor's deadline 504, then Pi's own retries, each a new governor call, until 3 in a row.
+test("real Pi: one stuck call exhausts the 3-consecutive deadline rule through Pi's own retries, ending call-deadline", { skip: !process.env.PLANTWORKS_PI_BIN && "PLANTWORKS_PI_BIN not set" }, async () => {
+  const pi = process.env.PLANTWORKS_PI_BIN!;
+  const at: number[] = [];
+  const server = createServer((req, res) => {
+    if (req.method === "POST" && (req.url ?? "").endsWith("/chat/completions")) { at.push(Date.now()); return; }
+    res.writeHead(404).end();
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  open.add(() => new Promise<void>((r) => { server.closeAllConnections(); server.close(() => r()); }));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`;
+  const { result, states } = await job(url, /\.m?js$/.test(pi) ? [process.execPath, pi] : [pi], { envelope: { ...envelope, timeoutSeconds: 120 }, workerClass: { ...classByName("quick"), deadlineSeconds: 2 } });
+  const gaps = at.slice(1).map((t, i) => t - at[i]!);
+  process.stderr.write(`pi deadline chain: ${at.length} calls, gaps ${JSON.stringify(gaps)} ms\n`);
+  assert.deepEqual([result.state, result.detail], ["failed", { reason: "call-deadline", message: "3 consecutive model calls hit the deadline" }]);
+  assert.deepEqual(states, ["queued", "claimed", "running", "failed"]);
+  assert.equal(at.length, 3, "Pi's first call and 2 retries; its third retry never runs");
+  assert.ok(gaps[0]! >= 3500 && gaps[1]! >= 5500, `deadline + Pi backoff (2 s, then 4 s): ${gaps}`);
 });

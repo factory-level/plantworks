@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
 # LLM endpoint, classes and the per-call governor (PW-11)
 
 - `endpoint.ts` reads `PLANTWORKS_LLM_URL` and `PLANTWORKS_LLM_API_KEY`, and implements
@@ -30,8 +31,9 @@ with an endpoint that never answers within `deadlineSeconds`, the sequence is:
 Pi's third retry never runs. With the quick class, that takes about 3 × 60 s + 6 s. In effect,
 the 3-consecutive rule counts Pi's retries of one prompt, not 3 distinct prompts. Each of the 3
 calls did miss the deadline. Whether that is the intended reading of PW-11 is a product decision.
-This sequence is inferred from `governor.ts` and the observed Pi retry. It has **not** been run
-end to end with real deadlines: the gated tests use a stub that answers `504` directly.
+The gated test "real Pi: one stuck call exhausts the 3-consecutive deadline rule…" runs this
+chain end to end with real Pi and a 2 s class deadline. It observed 3 calls, with gaps of about
+4.0 s and 6.0 s (deadline plus Pi's 2 s, then 4 s backoff), ending `failed`/`call-deadline`.
 
 "The call is retried after backoff" (PW-11) is Pi's retry. The governor only counts deadlines and
 stops the job at 3 in a row.
