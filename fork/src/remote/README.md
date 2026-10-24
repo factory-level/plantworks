@@ -34,6 +34,7 @@ plantworks pw remote daemon --routes routes.json [--port <port>]
 - **The transport is `POST /exec`** (`http.ts`): `{argv, stdin?}` in, `{code, stdout, stderr}` out.
 - **The token is never written in config.** Both sides name the environment variable that holds
   it. An unset or blank variable refuses to start.
+- **The agent binds only an address you name.** An empty or wildcard host (`0.0.0.0`, `::`) is refused, so `--bind :port` never listens on every interface.
 - **The agent refuses** a missing or wrong bearer (401, compared in constant time), any other
   route or method, a malformed body, and a body over 4 MiB. It binds loopback unless told
   otherwise.

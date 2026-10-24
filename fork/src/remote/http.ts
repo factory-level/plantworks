@@ -34,6 +34,10 @@ export interface ServeOptions {
 export async function serveSeatAgent(opts: ServeOptions): Promise<{ url: string; close: () => Promise<void> }> {
   const want = digest(tokenFrom(opts.tokenEnv, opts.env));
   const host = opts.host ?? "127.0.0.1";
+  // An empty or wildcard host listens on every interface. A seat agent runs tmux commands: it binds only an address
+  // the operator names (loopback, or the one interface the daemon reaches it on).
+  if (!host.trim()) throw new Error("seat agent bind host is empty; name an address, for example 127.0.0.1");
+  if (["0.0.0.0", "::", "[::]", "0:0:0:0:0:0:0:0"].includes(host.trim())) throw new Error(`seat agent bind host ${host} is a wildcard; name the one address to listen on`);
   const server = http.createServer(async (req, res) => {
     const send = (status: number, body: unknown) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
     const got = /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1];

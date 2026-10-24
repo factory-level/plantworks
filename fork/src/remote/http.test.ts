@@ -4,6 +4,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { execFile } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { MAX_EXEC_BYTES, httpTransport, serveSeatAgent, tokenFrom } from "./http.ts";
 import { createSeatRouter, ROUTER_ERROR } from "./router.ts";
 import type { SeatRequest } from "./transport.ts";
@@ -45,6 +51,23 @@ test("/exec needs the bearer; other routes, methods and malformed bodies are ref
     await server.close();
   }
   await assert.rejects(serveSeatAgent({ agent, tokenEnv: "SEAT_TOKEN", env: {} }), /SEAT_TOKEN is not set/);
+  // A blank host would listen on every interface: refused, through the function and through the CLI.
+  for (const [host, why] of [["", /bind host is empty/], [" ", /bind host is empty/], ["0.0.0.0", /is a wildcard/], ["::", /is a wildcard/]] as const) {
+    const started = await serveSeatAgent({ agent, tokenEnv: "SEAT_TOKEN", env, host }).catch((e: Error) => e);
+    if (!(started instanceof Error)) { await started.close(); assert.fail(`bind host ${JSON.stringify(host)} was served`); }
+    assert.match(started.message, why);
+  }
+  const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
+  const home = mkdtempSync(join(tmpdir(), "pw32-bind-"));
+  try {
+    const cli = await promisify(execFile)(process.execPath, [bin, "pw", "seat-agent", "serve", "--prefix", "rs-", "--bind", ":0"],
+      { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, PLANTWORKS_HOME: home, PLANTWORKS_SEAT_AGENT_TOKEN: "t" }, timeout: 15_000, killSignal: "SIGKILL" })
+      .then(() => ({ code: 0, stderr: "" }), (e) => ({ code: e.code as number, stderr: e.stderr as string }));
+    assert.equal(cli.code, 2, "`--bind :port` is refused, not served on every interface");
+    assert.match(cli.stderr, /bind host is empty/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("the transport answers only a well-formed 200; a wrong token, redirect, malformed reply or timeout rejects, and the router fails closed", async () => {
