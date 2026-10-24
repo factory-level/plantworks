@@ -109,6 +109,11 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
     tx,
     get,
 
+    /** Persisted upstream work that may still own a logical slot. */
+    unresolved(limit = 64, afterSeq = 0): JobRow[] {
+      return db.prepare("SELECT * FROM jobs WHERE seq > ? AND state IN ('queued','claimed','running') AND (qitem_id IS NOT NULL OR reserved_qitem_id IS NOT NULL) ORDER BY seq LIMIT ?").all(afterSeq, limit) as JobRow[];
+    },
+
     /** Inserts a new job, or returns the existing row for that jobId (`created` says which). A held job may carry its approval TTL. */
     insert(envelope: JobEnvelope, cls: string, state: JobState, approvalTtlSeconds?: number): { row: JobRow; created: boolean } {
       return tx(() => {

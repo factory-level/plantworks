@@ -9,7 +9,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { emitTeam } from "../team/command.ts";
 import { PHASE_0_1 } from "../team/spec.ts";
-import { DaemonRefused, claimNextRoutes, daemonQueue, newQitemId, type DaemonQueue } from "./claim.ts";
+import { DaemonRefused, claimNextRoutes, daemonQueue, newQitemId, type DaemonQueue, type QueueObservation } from "./claim.ts";
+import { createReconciler } from "./reconcile.ts";
 import { API, createBroker, loadTeams, type Send } from "./server.ts";
 import { openStore } from "./store.ts";
 import { parseSlotCaps, type SlotCaps } from "./slots.ts";
@@ -30,11 +31,12 @@ const definition = {
 const platform = { ...PHASE_0_1, slotCaps: { "social-media": 2 } };
 
 type Call = [string, ...unknown[]];
-function fakeDaemon(hooks: { create?: () => void | Promise<void>; claim?: () => void | Promise<void> } = {}) {
+function fakeDaemon(hooks: { create?: () => void | Promise<void>; claim?: () => void | Promise<void>; inspect?: (id: string) => QueueObservation | Promise<QueueObservation> } = {}) {
   const calls: Call[] = [];
   const daemon: DaemonQueue = {
     async create(i) { calls.push(["create", i.qitemId, i.destination, i.source]); await hooks.create?.(); },
     async claim(q, seat) { calls.push(["claim", q, seat]); await hooks.claim?.(); },
+    async inspect(q) { if (!hooks.inspect) throw new Error("qitem unavailable"); return hooks.inspect(q); },
   };
   return { daemon, calls };
 }
@@ -191,17 +193,22 @@ test("daemonQueue speaks the daemon's queue API, and only a non-409 4xx counts a
   const server = createServer(async (req, res) => {
     let b = "";
     for await (const c of req) b += c;
-    seen.push({ url: req.url!, auth: req.headers.authorization, session: req.headers["x-openrig-session"] as string | undefined, body: JSON.parse(b) });
-    res.writeHead(status, { "content-type": "application/json" }).end("{}");
+    seen.push({ url: req.url!, auth: req.headers.authorization, session: req.headers["x-openrig-session"] as string | undefined, body: b ? JSON.parse(b) : null });
+    const result = req.method === "GET" && req.url?.endsWith("/transitions") ? "[]" : req.method === "GET" ? JSON.stringify({ qitemId: "qitem-1", state: "done", destinationSession: "dev-a@team" }) : "{}";
+    res.writeHead(status, { "content-type": "application/json" }).end(result);
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   try {
     const q = daemonQueue({ url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/`, token: "daemon-token" });
     await q.create({ qitemId: "qitem-1", source: "plantworks-broker", destination: "dev-a@team", body: "b", summary: "s", tags: ["plantworks"] });
     await q.claim("qitem-1", "dev-a@team");
+    const inspected = await q.inspect("qitem-1");
+    assert.deepEqual([inspected.qitemId, inspected.destinationSession, inspected.transitions], ["qitem-1", "dev-a@team", []]);
     assert.deepEqual(seen.map((s) => [s.url, s.auth, s.session]), [
       ["/api/queue/create", "Bearer daemon-token", undefined],
       ["/api/queue/qitem-1/claim", "Bearer daemon-token", undefined],
+      ["/api/queue/qitem-1", "Bearer daemon-token", undefined],
+      ["/api/queue/qitem-1/transitions", "Bearer daemon-token", undefined],
     ]);
     assert.deepEqual(seen[0].body, { qitemId: "qitem-1", sourceSession: "plantworks-broker", destinationSession: "dev-a@team", body: "b", summary: "s", tags: ["plantworks"] });
     assert.deepEqual(seen[1].body, { destinationSession: "dev-a@team" });
@@ -279,4 +286,49 @@ test("two broker connections on one SQLite file: a side transition can't free an
     a.close();
     b.close();
   }
+});
+
+test("reconciliation keeps a dead worker's slot through ambiguity and releases it only on authenticated no-follow-on completion", async () => {
+  let observation: QueueObservation = { qitemId: "qitem-test-1", state: "in-progress", destinationSession: "dev-a@team", transitions: [] };
+  let readable = true;
+  const daemon = fakeDaemon({ inspect: () => { if (!readable) throw new Error("daemon unavailable"); return observation; } }).daemon;
+  const t = setup(daemon, undefined, undefined, parseSlotCaps(undefined));
+  await t.submit("t_1"); await t.submit("t_2");
+  assert.equal((await t.claim("dev-a@team")).status, 200);
+  const row = t.store.get("kb-social-media-t_1-a1")!;
+  const reconcile = createReconciler(t.store, daemon, (r, s) => t.events.push([r.job_id, s]), () => {});
+  await reconcile();
+  assert.equal(t.store.get(row.job_id)!.state, "running", "active daemon work does not complete");
+  assert.equal((await t.claim("dev-b@team")).status, 429);
+  readable = false;
+  await reconcile();
+  assert.equal(t.store.get(row.job_id)!.state, "running", "unreadable completion evidence fails closed");
+  assert.equal((await t.claim("dev-b@team")).status, 429);
+  readable = true;
+
+  for (const ambiguous of [
+    { ...observation, state: "done", closureReason: "canceled", closingTransition: { transitionId: 1, state: "done", closureReason: "canceled", closureTarget: null, actorSession: "admin" }, transitions: [{ transitionId: 1, state: "done", closureReason: "canceled", closureTarget: null, actorSession: "admin", identityProvenance: "transport:v1" }] },
+    { ...observation, state: "handed-off", closureReason: "no-follow-on" },
+    { ...observation, qitemId: "different-qitem", state: "done", closureReason: "no-follow-on" },
+    { ...observation, state: "done", closureReason: "no-follow-on", closingTransition: { transitionId: 2, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-b@team" }, transitions: [{ transitionId: 2, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-b@team", identityProvenance: "transport:v1" }] },
+    { ...observation, state: "done", closureReason: "no-follow-on", closingTransition: { transitionId: 2, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-a@team" }, transitions: [{ transitionId: 2, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-a@team", identityProvenance: "claimed:v1" }] },
+    { ...observation, state: "done", closureReason: "no-follow-on", closingTransition: { transitionId: 4, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-a@team" }, transitions: [{ transitionId: 3, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-a@team", identityProvenance: "transport:v1" }] },
+    { ...observation, state: "done", closureReason: "no-follow-on", closingTransition: { transitionId: 5, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-a@team" }, transitions: [
+      { transitionId: 5, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-a@team", identityProvenance: "transport:v1" },
+      { transitionId: 6, state: "in-progress", closureReason: null, closureTarget: null, actorSession: "dev-a@team", identityProvenance: "transport:v1" },
+    ] },
+  ] as QueueObservation[]) {
+    observation = ambiguous;
+    await reconcile();
+    assert.equal(t.store.get(row.job_id)!.state, "running");
+    assert.equal((await t.claim("dev-b@team")).status, 429);
+  }
+
+  observation = { ...observation, qitemId: "qitem-test-1", state: "done", closureReason: "no-follow-on", closureTarget: null,
+    closingTransition: { transitionId: 5, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-a@team" },
+    transitions: [{ transitionId: 5, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-a@team", identityProvenance: "transport:v1" }] };
+  await reconcile();
+  assert.equal(t.store.get(row.job_id)!.state, "done");
+  assert.deepEqual(JSON.parse(t.store.get(row.job_id)!.result!), { text: null, artifacts: [] }, "empty worker output uses the published result contract");
+  assert.equal((await t.claim("dev-b@team")).status, 200, "only authenticated logical completion frees the slot");
 });

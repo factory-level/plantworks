@@ -72,6 +72,7 @@ export interface BrokerOptions {
   /** Where `${NAME}` placeholders in a spec's callbackDefault are read from. Defaults to process.env. */
   env?: Record<string, string | undefined>;
   log?: (line: string) => void;
+  onListen?: (ctx: BrokerContext) => () => void;
 }
 
 const fail = (status: 400 | 401 | 404 | 409 | 413, error: string, message: string, extra: Record<string, unknown> = {}) =>
@@ -173,18 +174,21 @@ export function startBroker(opts: BrokerOptions & { host: string; port: number }
   if (!isLoopbackBind(opts.host) && !opts.publicUrl) {
     throw new Error(`refusing to bind the broker on ${opts.host} without --public-url or PLANTWORKS_BROKER_PUBLIC_URL (decision URLs must be reachable)`);
   }
-  const live = { ...opts }; // publicUrl is filled in once the port is known; createBroker reads it per request
+  const live = { ...opts, send: opts.send ?? teamSenders(opts.teams, opts.env ?? process.env, opts.log ?? ((l) => process.stderr.write(`${l}\n`))) }; // publicUrl is filled in once the port is known; createBroker reads it per request
   const app = createBroker(live);
   return new Promise((resolve) => {
     const server = serve({ fetch: app.fetch, hostname: opts.host, port: opts.port }, (info) => {
       const host = info.address.includes(":") ? `[${info.address}]` : info.address;
       const url = `http://${host}:${info.port}`;
       live.publicUrl ??= url;
+      const emit: Emit = (row, state, detail = {}) => live.send!(row.team, jobStateEvent({ jobId: row.job_id, team: row.team }, state, detail));
+      const decisionUrl = (jobId: string) => `${live.publicUrl!.replace(/\/$/, "")}${API}/jobs/${encodeURIComponent(jobId)}/decision`;
+      const stop = opts.onListen?.({ store: opts.store, teams: opts.teams, emit, send: live.send!, decisionUrl });
       // A store error in the sweep (a busy file, a lost conditional update) is logged and retried next tick, never a crash.
       const sweep = setInterval(() => {
         try { app.sweepApprovals(); } catch (e) { (opts.log ?? ((l) => process.stderr.write(`${l}\n`)))(`approval sweep failed: ${(e as Error).message}`); }
       }, SWEEP_MS);
-      resolve({ url, close: () => new Promise((r) => { clearInterval(sweep); server.close(() => r()); }) });
+      resolve({ url, close: () => new Promise((r) => { clearInterval(sweep); stop?.(); server.close(() => r()); }) });
     });
   });
 }
