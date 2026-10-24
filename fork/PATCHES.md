@@ -25,6 +25,7 @@ start with `fork-` so they never collide with an upstream file.
 
 | File | Reason | Card |
 |---|---|---|
+| `.github/workflows/fork-ci.yml` | GitHub Actions reads workflows only from `.github/workflows/`. Runs the seam check, upstream build, fork tests and header check on every PR | PW-04 |
 
 ## Never
 
