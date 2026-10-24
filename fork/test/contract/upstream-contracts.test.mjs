@@ -4,12 +4,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createProgram } from "../../packages/cli/dist/index.js";
-import { COMMAND_LOADERS } from "../../packages/cli/dist/lazy-program.js";
-import { parsePiModelsJson } from "../../packages/daemon/dist/adapters/pi-readiness.js";
-import { piSeatPinReadings } from "../../packages/daemon/dist/domain/model-divergence/effective-model-readers.js";
+import { createProgram } from "../../../packages/cli/dist/index.js";
+import { COMMAND_LOADERS } from "../../../packages/cli/dist/lazy-program.js";
+import { parsePiModelsJson } from "../../../packages/daemon/dist/adapters/pi-readiness.js";
+import { piSeatPinReadings } from "../../../packages/daemon/dist/domain/model-divergence/effective-model-readers.js";
 
-test("upstream CLI exposes createProgram and its lazy loader map matches the eager command names", () => {
+test("upstream CLI createProgram() at packages/cli/src/index.ts:174-273 and COMMAND_LOADERS at packages/cli/src/lazy-program.ts:15-106 stay in sync", () => {
   const program = createProgram();
   assert.equal(typeof createProgram, "function");
   assert.equal(typeof program.commands, "object");
@@ -21,7 +21,7 @@ test("upstream CLI exposes createProgram and its lazy loader map matches the eag
   assert.deepEqual([...COMMAND_LOADERS.keys()], names);
 });
 
-test("Pi model configuration keeps the provider model contract readable", () => {
+test("Pi models.json parsing at packages/daemon/src/adapters/pi-readiness.ts:55-60 and seat reader at packages/daemon/src/domain/model-divergence/effective-model-readers.ts:225-254 stay compatible", () => {
   const text = `\uFEFF{
     // Pi accepts comments and trailing commas in models.json.
     "providers": { "local": { "models": [

@@ -50,9 +50,41 @@ jobs:
         run: npm run build
       - name: tmux (the daemon boot test starts a real daemon)
         run: command -v tmux || (sudo apt-get update && sudo apt-get install -y tmux)
+      # The suite takes a minute or two. A test file whose process doesn't exit after its tests
+      # (an open server, timer or child) stops the runner's output silently until the job's
+      # 30-minute timeout. So after 10 minutes this prints the suite's own processes, which names
+      # the file still running and anything it started, then fails the step. Only the suite's own
+      # session is listed, never the rest of the runner.
       - name: Fork tests
         working-directory: fork
-        run: npm test
+        run: |
+          setsid npm test & pid=$!
+          for _ in $(seq 600); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+          if kill -0 "$pid" 2>/dev/null; then
+            echo "::error::fork tests still running after 10 minutes; their processes:"
+            ps -s "$pid" -o pid,ppid,etimes,args --forest
+            pkill -TERM -s "$pid"; sleep 5; pkill -KILL -s "$pid"
+            exit 1
+          fi
+          wait "$pid"
       - name: Licence headers
         working-directory: fork
         run: npm run check:headers
+
+  # PW-25: the image builds from this commit and passes its smoke. The tag stays local: no
+  # registry login and no push (publication waits on approval).
+  image-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build fork-runtime (fork/container/build.sh, local tag only)
+        id: build
+        run: echo "tag=$(fork/container/build.sh HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Smoke every role (fork/container/smoke.sh)
+        run: fork/container/smoke.sh "${{ steps.build.outputs.tag }}"

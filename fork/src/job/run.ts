@@ -3,6 +3,8 @@
 // mode behind the per-seat call governor, and plantworks.job.state events for each step. No
 // OpenRig daemon and no broker: the runner plays the broker's part for exactly one job.
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { DEFAULT_CLASS, classByName, type WorkerClass } from "../llm/classes.ts";
 import { readEndpoint } from "../llm/endpoint.ts";
 import { startGovernor, type Governor } from "../llm/governor.ts";
@@ -38,6 +40,9 @@ export interface RunResult {
   undelivered: string[];
 }
 
+/** Project files Pi reads ahead of the seat's own system prompt. */
+export const PROJECT_PROMPT_FILES = ["SYSTEM.md", "APPEND_SYSTEM.md"];
+
 /** Thrown before any event is emitted: the envelope or its class/timeout is not acceptable. */
 export class RejectedJob extends Error {}
 
@@ -60,6 +65,9 @@ export async function runJob(opts: RunOptions): Promise<RunResult> {
   const ceiling = JOB_TIMEOUT_SECONDS[className] ?? JOB_TIMEOUT_SECONDS.quick!;
   const timeoutSeconds = job.timeoutSeconds ?? ceiling;
   if (timeoutSeconds > ceiling) throw new RejectedJob(`timeoutSeconds ${timeoutSeconds} exceeds the ${className} ceiling of ${ceiling}`);
+  // A trusted project's own system prompt takes precedence over the seat's (Pi 1.4.0
+  // dist/core/resource-loader.js:944-965), so a job repo that ships one is refused (PW-12).
+  for (const name of PROJECT_PROMPT_FILES) if (existsSync(join(opts.cwd, ".pi", name))) throw new RejectedJob(`the job's repository ships .pi/${name}, which would replace the seat's system prompt; refusing it`);
 
   const log = opts.log ?? ((line) => process.stderr.write(`${line}\n`));
   const undelivered: string[] = [];
@@ -69,11 +77,13 @@ export async function runJob(opts: RunOptions): Promise<RunResult> {
   });
   const sent: Promise<void>[] = [];
   let state: JobState = "queued";
+  let transitionSeq = 0;
   const enter = (to: JobState, detail: Record<string, unknown> = {}) => {
     const checked = to === "queued" ? {} : transition(state, to, detail);
     state = to;
+    transitionSeq++;
     // Delivery runs alongside the job; a slow consumer never holds the seat.
-    sent.push(emitter.emit(jobStateEvent(job, to, checked)).catch(() => {}));
+    sent.push(emitter.emit(jobStateEvent({ ...job, transitionSeq }, to, checked)).catch(() => {}));
   };
 
   enter("queued");

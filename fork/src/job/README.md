@@ -10,7 +10,9 @@ plantworks pw job run job.json --cwd ./workspace --pi /path/to/pi
 ```
 
 1. Validates the envelope (`../contract/`). A bad envelope, an unknown class or a `timeoutSeconds`
-   over the class ceiling is rejected (exit 2) before any event.
+   over the class ceiling is rejected (exit 2) before any event. So is a working directory that
+   ships `.pi/SYSTEM.md` or `.pi/APPEND_SYSTEM.md`: Pi 1.4.0 prefers a trusted project's prompt
+   files over the seat's own.
 2. Emits `queued`, then `claimed`.
 3. Starts the per-seat call governor (`../llm/`), writes the seat's `models.json` and
    `settings.json` pointing at it (`../seat/`), and starts Pi with

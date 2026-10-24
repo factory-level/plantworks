@@ -44,6 +44,13 @@ RUN set -eux; \
 
 # --- runtime ---
 FROM ${BASE_IMAGE}
+ARG BASE_IMAGE
+ARG SOURCE_COMMIT=unknown
+# OCI metadata. base.name is the digest-pinned base reference build.sh passed in.
+LABEL org.opencontainers.image.source="https://github.com/factory-level/plantworks" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.base.name="${BASE_IMAGE}" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}"
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates tini tmux git procps; \
@@ -53,12 +60,18 @@ COPY --from=build /app /app
 RUN set -eux; \
     ln -s /app/fork/bin/plantworks.mjs /usr/local/bin/plantworks; \
     ln -s /app/fork/bin/plantworks.mjs /usr/local/bin/pwctl; \
+    chmod +x /app/packages/cli/dist/bin-wrapper.js; \
+    ln -s /app/packages/cli/dist/bin-wrapper.js /usr/local/bin/rig; \
     useradd --uid 10001 --create-home --shell /bin/bash fork; \
     mkdir -p /var/lib/fork /etc/fork/teams; \
     chown fork:fork /var/lib/fork
 # All state lives under one explicit path: mount a volume here. Team specs are read from
 # /etc/fork/teams (mount emitted <team>/team.json files read-only).
+# Upstream `rig` (the CLI Pi seats use, for example to close their qitems) reaches the same
+# Pi-only daemon as `plantworks`: the same home, the PW-16 port and no kernel.
 ENV OPENRIG_HOME=/var/lib/fork \
+    OPENRIG_PORT=7533 \
+    OPENRIG_NO_KERNEL=1 \
     PLANTWORKS_TEAMS_DIR=/etc/fork/teams \
     NODE_ENV=production
 USER fork

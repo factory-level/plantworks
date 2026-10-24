@@ -16,8 +16,20 @@ const TEAM = "social-media";
 const BROKER_TOKEN = "broker-secret-value";
 type Rec = Record<string, unknown> & { envelope?: unknown };
 
+const counts = (n: number) => ({ active: n, held: 0, queued: n, reserved: 0, claimed: 0, running: 0 });
+/** The broker's stats shape (PW-22 runtime.ts) for two teams sharing a slot budget, with a draining seat. */
+const TWO_TEAM_STATS = {
+  active: 7,
+  teams: {
+    [TEAM]: { ...counts(2), held: 1, classes: { quick: counts(2), long: { ...counts(0), held: 1 } }, note: "not a count" },
+    "other-team": { ...counts(5), classes: { quick: counts(5) } },
+  },
+  slots: { "shared-budget": { inFlight: 3, cap: 4 } },
+  drainingSeats: ["other-team-worker-0"],
+};
+
 /** A stub of the PW-17 jobs API, with knobs for the cases a real broker should never produce. */
-async function stubBroker(opts: { token?: string; foreignReplay?: boolean; status?: number } = {}) {
+async function stubBroker(opts: { token?: string; foreignReplay?: boolean; status?: number; stats?: unknown } = {}) {
   const jobs = new Map<string, Rec>();
   const calls: Array<{ method: string; path: string; auth?: string }> = [];
   const record = (r: Rec) => { const { envelope: _, ...rest } = r; return rest; };
@@ -29,6 +41,7 @@ async function stubBroker(opts: { token?: string; foreignReplay?: boolean; statu
     calls.push({ method: req.method!, path, auth: req.headers.authorization });
     if (opts.status) return send(opts.status, { error: "boom", message: "stub status" });
     if (opts.token && req.headers.authorization !== `Bearer ${opts.token}`) return send(401, { error: "unauthorized", message: "no" });
+    if (req.method === "GET" && path === "/stats") return send(200, opts.stats ?? TWO_TEAM_STATS);
     const m = /^\/jobs\/([^/]+)(\/cancel)?$/.exec(path);
     if (req.method === "POST" && path === "/jobs") {
       const env = JSON.parse(text);
@@ -81,7 +94,7 @@ test("submit is idempotent, fixes the team itself, and checks the envelope befor
   const broker = await stubBroker();
   const { call, client } = await connect(broker.url);
   const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-  assert.deepEqual(tools, ["job_cancel", "job_inspect", "job_submit"]);
+  assert.deepEqual(tools, ["job_cancel", "job_inspect", "job_stats", "job_submit"]);
 
   const first = await call("job_submit", submitArgs({ team: "other-team" }));
   assert.deepEqual(first.data, { jobId: "kb-social-media-t_3fa9c01e-a1", state: "queued", created: true });
@@ -217,7 +230,7 @@ test("over HTTP every request needs the bearer token", async () => {
   await broker.close();
 });
 
-test("`plantworks pw mcp serve` over stdio needs a team and serves the three tools", async () => {
+test("`plantworks pw mcp serve` over stdio needs a team and serves the four tools", async () => {
   assert.throws(() => kitOptions({}), /PLANTWORKS_TEAM/);
   assert.equal(kitOptions({ PLANTWORKS_TEAM: TEAM }).brokerUrl, "http://127.0.0.1:7534");
   const broker = await stubBroker();
@@ -229,14 +242,14 @@ test("`plantworks pw mcp serve` over stdio needs a team and serves the three too
     env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PLANTWORKS_TEAM: TEAM, PLANTWORKS_BROKER_URL: broker.url },
     stderr: "ignore",
   }));
-  assert.deepEqual((await client.listTools()).tools.map((t) => t.name).sort(), ["job_cancel", "job_inspect", "job_submit"]);
+  assert.deepEqual((await client.listTools()).tools.map((t) => t.name).sort(), ["job_cancel", "job_inspect", "job_stats", "job_submit"]);
   const r = await client.callTool({ name: "job_submit", arguments: submitArgs() });
   assert.equal((r.structuredContent as { jobId: string }).jobId, "kb-social-media-t_3fa9c01e-a1");
   await client.close();
   await broker.close();
 });
 
-test("the kit calls only the three jobs routes, never an approval decision URL", async () => {
+test("the kit calls only the jobs routes and stats, never an approval decision URL", async () => {
   const broker = await stubBroker();
   const { call } = await connect(broker.url);
   broker.put("kb-b-t_1-a1", TEAM, { state: "held", detail: { decisionUrl: `${broker.url}/plantworks/v1/approvals/x` } });
@@ -245,7 +258,52 @@ test("the kit calls only the three jobs routes, never an approval decision URL",
   assert.equal(held.data.note, HELD_NOTE, "a held job says approval is outside the kit");
   await call("job_cancel", { jobId: "kb-b-t_1-a1" });
   await call("job_cancel", { jobId: "kb-social-media-t_3fa9c01e-a1" });
+  await call("job_stats", {});
   const routes = broker.calls.map((c) => `${c.method} ${c.path.replace(/^\/jobs\/[^/]+/, "/jobs/{id}")}`);
-  assert.deepEqual([...new Set(routes)].sort(), ["GET /jobs/{id}", "POST /jobs", "POST /jobs/{id}/cancel"]);
+  assert.deepEqual([...new Set(routes)].sort(), ["GET /jobs/{id}", "GET /stats", "POST /jobs", "POST /jobs/{id}/cancel"]);
   await broker.close();
+});
+
+test("stats: exactly this team's counts, field by field; other teams, slot budgets and draining seats never pass", async () => {
+  const broker = await stubBroker();
+  const { call } = await connect(broker.url);
+  const r = await call("job_stats", {});
+  assert.equal(r.error, false);
+  assert.deepEqual(r.data, { team: TEAM, ...counts(2), held: 1, classes: { quick: counts(2), long: { ...counts(0), held: 1 } } });
+  for (const leak of ["other-team", "shared-budget", "inFlight", "cap", "drainingSeats", "not a count"]) assert.ok(!r.text.includes(leak), leak);
+  await broker.close();
+});
+
+test("stats: a team the broker doesn't serve is a setup error, and any other shape fails closed with nothing passed on", async () => {
+  const absent = await stubBroker({ stats: { ...TWO_TEAM_STATS, teams: { "other-team": TWO_TEAM_STATS.teams["other-team"] } } });
+  const a = await (await connect(absent.url)).call("job_stats", {});
+  assert.deepEqual([a.error, a.data.code], [true, "team_not_served"]);
+  assert.ok(!a.text.includes("other-team"), "the teams the broker does serve are not named");
+  await absent.close();
+
+  const mine = TWO_TEAM_STATS.teams[TEAM];
+  const malformed: Record<string, unknown> = {
+    "no teams": { active: 1 },
+    "teams is a list": { teams: [mine] },
+    "negative count": { teams: { [TEAM]: { ...mine, queued: -1 } } },
+    "fractional count": { teams: { [TEAM]: { ...mine, running: 0.5 } } },
+    "missing count": { teams: { [TEAM]: { held: 0, classes: {} } } },
+    "count as text": { teams: { [TEAM]: { ...mine, active: "2" } } },
+    "no classes": { teams: { [TEAM]: counts(1) } },
+    "bad class": { teams: { [TEAM]: { ...counts(1), classes: { quick: { active: 1 } } } } },
+    "team is null": { teams: { [TEAM]: null } },
+  };
+  for (const [name, stats] of Object.entries(malformed)) {
+    const broker = await stubBroker({ stats });
+    const r = await (await connect(broker.url)).call("job_stats", {});
+    assert.deepEqual([r.error, r.data.code], [true, "broker_unavailable"], name);
+    assert.deepEqual(Object.keys(r.data).sort(), ["code", "message", "ok"], `${name}: no partial counts`);
+    await broker.close();
+  }
+  for (const status of [401, 503]) {
+    const broker = await stubBroker({ status });
+    const r = await (await connect(broker.url)).call("job_stats", {});
+    assert.equal(r.data.code, status === 401 ? "broker_auth_failed" : "broker_unavailable");
+    await broker.close();
+  }
 });

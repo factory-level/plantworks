@@ -4,7 +4,7 @@
 // Hermes profile. The fork only reads a team definition and emits files; registration (#991)
 // and deployment (#993) read them. Nothing here knows about Kubernetes or Pulumi.
 import { DNS_NAME } from "../contract/job.ts";
-import { ceilingProblems } from "../llm/classes.ts";
+import { ceilingProblems, type Ceilings } from "../llm/classes.ts";
 
 export const SPEC_VERSION = "plantworks/v1";
 export const APPROVALS = ["never", "per-job", "always"] as const;
@@ -21,6 +21,8 @@ export interface QueueClass {
   approvalTtlSeconds?: number;
   timeoutSeconds: number;
   maxAttempts: number;
+  /** Base priority of the class's jobs, -100..100; lower is claimed first. Absent means 0. */
+  priority?: number;
 }
 
 /**
@@ -36,7 +38,7 @@ export interface TeamSpec {
   endpoint: { url: string; slotBudgetKey: string };
   defaultClass: string;
   classes: Record<string, QueueClass>;
-  events: { callbackDefault: string; approvalConsumer: string };
+  events: { callbackDefault: string; approvalConsumer: string; auth?: { secretRef: string } };
   hermesProfile: { name: string; kanban: { max_in_progress_per_profile: number } };
 }
 
@@ -49,6 +51,8 @@ export interface Platform {
   /** Measured Pi prompt baseline and a reserve, in tokens. Rule 3's second half applies once the baseline is measured. */
   piBaselineTokens?: number;
   reserveTokens?: number;
+  /** Per-call ceilings delivered by the platform's environment (`pw broker serve`); not a platform-file field. Absent means the ADR values. */
+  callCeilings?: Ceilings;
 }
 export const PHASE_0_1: Platform = { slotCaps: {}, models: ["qwen3.5:9b"], maxContextTokens: 32768 };
 
@@ -110,8 +114,16 @@ export function validateSpec(spec: unknown, platform: Platform = PHASE_0_1): str
   const events = obj(spec.events) ? spec.events : null;
   if (!events) errors.push("events must be an object");
   else {
-    unknownFields(errors, "events.", events, ["callbackDefault", "approvalConsumer"]);
+    unknownFields(errors, "events.", events, ["callbackDefault", "approvalConsumer", "auth"]);
     for (const k of ["callbackDefault", "approvalConsumer"]) if (typeof events[k] !== "string" || events[k] === "") errors.push(`events.${k} must be a non-empty string`);
+    if (typeof events.callbackDefault === "string" && !/^\$\{[A-Za-z_][A-Za-z0-9_]*_CALLBACK\}$/.test(events.callbackDefault)) errors.push("events.callbackDefault must be exactly one operator callback reference (${NAME_CALLBACK})");
+    if (events.auth !== undefined) {
+      if (!obj(events.auth)) errors.push("events.auth must be an object");
+      else {
+        unknownFields(errors, "events.auth.", events.auth, ["secretRef"]);
+        if (typeof events.auth.secretRef !== "string" || !/^[A-Z][A-Z0-9_]*$/.test(events.auth.secretRef)) errors.push("events.auth.secretRef must name a configured credential");
+      }
+    }
   }
 
   let slotTotal = 0;
@@ -119,7 +131,7 @@ export function validateSpec(spec: unknown, platform: Platform = PHASE_0_1): str
     const at = `classes.${name}`;
     if (!DNS_NAME.test(name)) errors.push(`${at}: class names must be DNS-safe`);
     if (!obj(c)) { errors.push(`${at} must be an object`); continue; }
-    unknownFields(errors, `${at}.`, c, ["slots", "model", "context", "perCall", "toolProfile", "approval", "approvalTtlSeconds", "timeoutSeconds", "maxAttempts"]);
+    unknownFields(errors, `${at}.`, c, ["slots", "model", "context", "perCall", "toolProfile", "approval", "approvalTtlSeconds", "timeoutSeconds", "maxAttempts", "priority"]);
     const ctx = obj(c.context) ? c.context : {};
     const call = obj(c.perCall) ? c.perCall : {};
     unknownFields(errors, `${at}.context.`, ctx, ["maxContextTokens", "thinkingTokens"]);
@@ -133,7 +145,7 @@ export function validateSpec(spec: unknown, platform: Platform = PHASE_0_1): str
     // Rule 8: perCall is set and within the platform ceilings. Rule 3: context within the platform maximum.
     if (!int(call.maxOutputTokens, 1) || !int(call.deadlineSeconds, 1)) errors.push(`${at}.perCall must set maxOutputTokens and deadlineSeconds`);
     else if (int(ctx.maxContextTokens, 1)) {
-      const problems = ceilingProblems({ model: String(c.model), maxContextTokens: ctx.maxContextTokens as number, maxOutputTokens: call.maxOutputTokens as number, deadlineSeconds: call.deadlineSeconds as number });
+      const problems = ceilingProblems({ model: String(c.model), maxContextTokens: ctx.maxContextTokens as number, maxOutputTokens: call.maxOutputTokens as number, deadlineSeconds: call.deadlineSeconds as number }, platform.callCeilings);
       for (const p of problems) errors.push(`${at} exceeds a platform ceiling: ${p}`);
       if ((ctx.maxContextTokens as number) > platform.maxContextTokens) errors.push(`${at}.context.maxContextTokens exceeds the platform maximum ${platform.maxContextTokens}`);
       if (platform.piBaselineTokens !== undefined) {
@@ -148,6 +160,7 @@ export function validateSpec(spec: unknown, platform: Platform = PHASE_0_1): str
     if (c.approvalTtlSeconds !== undefined && !int(c.approvalTtlSeconds, 1)) errors.push(`${at}.approvalTtlSeconds must be a positive integer`);
     if (!int(c.timeoutSeconds, 1)) errors.push(`${at}.timeoutSeconds must be a positive integer`);
     if (!int(c.maxAttempts, 1)) errors.push(`${at}.maxAttempts must be a positive integer`);
+    if (c.priority !== undefined && !(int(c.priority, -100) && (c.priority as number) <= 100)) errors.push(`${at}.priority must be an integer from -100 to 100`);
     // Rule 4: there are at least as many worker seats as slots.
     const seats = perTrain && obj(perTrain.workers) && int(spec.trains, 1) ? (spec.trains as number) * (Number(perTrain.workers[name]) || 0) : 0;
     if (int(c.slots) && seats < (c.slots as number)) errors.push(`${at}: ${c.slots} slots but only ${seats} worker seats (trains × perTrain.workers.${name})`);
@@ -188,7 +201,7 @@ export function hermesProfileConfig(spec: TeamSpec): string {
     "    headers:\n" +
     '      Authorization: "Bearer ${PLANTWORKS_MCP_TOKEN}"\n' +
     "    tools:\n" +
-    "      include: [job_submit, job_inspect, job_cancel]\n";
+    "      include: [job_submit, job_inspect, job_cancel, job_stats]\n";
 }
 
 export function validatePlatform(input: unknown): string[] {

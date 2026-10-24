@@ -30,7 +30,7 @@ const problems = (edit: (d: any) => void, p = platform) => validateSpec(spec(edi
 // The kit's references stay literal: Hermes resolves them, and refuses to connect while one is unset.
 const PROFILE_CONFIG = "kanban:\n  max_in_progress_per_profile: 1\n" +
   'mcp_servers:\n  plantworks:\n    url: "${PLANTWORKS_MCP_URL}"\n    headers:\n      Authorization: "Bearer ${PLANTWORKS_MCP_TOKEN}"\n' +
-  "    tools:\n      include: [job_submit, job_inspect, job_cancel]\n";
+  "    tools:\n      include: [job_submit, job_inspect, job_cancel, job_stats]\n";
 
 test("the ADR sample is valid, and its profile carries trains × orchestrators as an integer", () => {
   const s = spec();
@@ -38,6 +38,14 @@ test("the ADR sample is valid, and its profile carries trains × orchestrators a
   assert.deepEqual(s.hermesProfile, { name: "social-media", kanban: { max_in_progress_per_profile: 1 } });
   assert.equal(buildSpec({ ...definition(), trains: 3 }).hermesProfile.kanban.max_in_progress_per_profile, 3);
   assert.equal(hermesProfileConfig(s as TeamSpec), PROFILE_CONFIG);
+});
+
+test("callback auth accepts only an optional configured secret reference", () => {
+  assert.deepEqual(problems((d) => { d.events.auth = { secretRef: "FRONTDOOR_TOKEN" }; }), []);
+  assert.match(problems((d) => { d.events.auth = { secretRef: "missing-lowercase" }; }).join("\n"), /secretRef must name a configured credential/);
+  assert.match(problems((d) => { d.events.auth = { secretRef: "FRONTDOOR_TOKEN", token: "inline-secret" }; }).join("\n"), /unknown field events\.auth\.token/);
+  assert.match(problems((d) => { d.events.callbackDefault = "https://untrusted.invalid/events"; }).join("\n"), /callbackDefault must be exactly one operator callback reference/);
+  assert.match(problems((d) => { d.events.callbackDefault = "${FRONTDOOR_CALLBACK}/events"; }).join("\n"), /callbackDefault must be exactly one operator callback reference/);
 });
 
 test("the ADR's map form of max_in_progress_per_profile is rejected (Hermes 0.22.5 would read it as no cap)", () => {
@@ -114,9 +122,11 @@ test("the published fleet.schema.json names exactly the validator's fields", () 
   assert.deepEqual(keys(schema), Object.keys(s).sort());
   assert.deepEqual(schema.required.sort(), Object.keys(s).sort());
   const cls = schema.properties.classes.additionalProperties;
-  assert.deepEqual(keys(cls), ["approval", "approvalTtlSeconds", "context", "maxAttempts", "model", "perCall", "slots", "timeoutSeconds", "toolProfile"]);
+  assert.deepEqual(keys(cls), ["approval", "approvalTtlSeconds", "context", "maxAttempts", "model", "perCall", "priority", "slots", "timeoutSeconds", "toolProfile"]);
   assert.deepEqual(keys(cls.properties.context), Object.keys(s.classes.quick.context).sort());
   assert.deepEqual(keys(cls.properties.perCall), Object.keys(s.classes.quick.perCall).sort());
   assert.equal(schema.properties.hermesProfile.properties.kanban.properties.max_in_progress_per_profile.type, "integer");
-  for (const part of ["perTrain", "endpoint", "events", "hermesProfile"]) assert.deepEqual(keys(schema.properties[part]), Object.keys(s[part]).sort(), part);
+  for (const part of ["perTrain", "endpoint", "hermesProfile"]) assert.deepEqual(keys(schema.properties[part]), Object.keys(s[part]).sort(), part);
+  assert.deepEqual(keys(schema.properties.events), [...Object.keys(s.events), "auth"].sort());
+  assert.deepEqual(schema.properties.events.required, ["callbackDefault", "approvalConsumer"]);
 });

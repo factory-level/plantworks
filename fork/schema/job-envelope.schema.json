@@ -35,6 +35,30 @@
       "type": "integer",
       "minimum": 1,
       "description": "Requested job timeout. The broker rejects values above the class ceiling."
+    },
+    "repo": {
+      "type": "string",
+      "pattern": "^[^/]+/[^/]+$",
+      "description": "Optional fork-defined repository scope; pending HarnessHG acknowledgement."
+    },
+    "contextBudget": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Optional token budget. When absent, the selected class context applies; pending HarnessHG acknowledgement."
+    },
+    "origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "ref"],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1 },
+        "ref": { "type": "string", "minLength": 1 }
+      },
+      "description": "Opaque origin reference; pending HarnessHG acknowledgement."
+    },
+    "priority": {
+      "enum": ["urgent", "high", "normal", "low"],
+      "description": "Absent means normal. Effective priority is the class's priority plus urgent -3, high -1, normal 0, low +2; claim-next takes the lowest effective priority first, then the oldest."
     }
   }
 }

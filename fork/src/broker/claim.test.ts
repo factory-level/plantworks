@@ -19,16 +19,16 @@ import { parseSlotCaps, type SlotCaps } from "./slots.ts";
 const definition = {
   team: "social-media",
   trains: 1,
-  perTrain: { orchestrators: 1, workers: { quick: 1, deep: 1 } },
+  perTrain: { orchestrators: 1, workers: { quick: 4, deep: 2 } },
   endpoint: { url: "${PLANTWORKS_LLM_URL}", slotBudgetKey: "social-media" },
   defaultClass: "quick",
   classes: {
-    quick: { slots: 1, model: "qwen3.5:9b", context: { maxContextTokens: 16384, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1536, deadlineSeconds: 60 }, approval: "never", timeoutSeconds: 900, maxAttempts: 2 },
-    deep: { slots: 1, model: "qwen3.5:9b", context: { maxContextTokens: 32768, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1024, deadlineSeconds: 60 }, approval: "never", timeoutSeconds: 3600, maxAttempts: 1 },
+    quick: { slots: 4, model: "qwen3.5:9b", context: { maxContextTokens: 16384, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1536, deadlineSeconds: 60 }, approval: "never", timeoutSeconds: 900, maxAttempts: 2 },
+    deep: { slots: 2, model: "qwen3.5:9b", context: { maxContextTokens: 32768, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1024, deadlineSeconds: 60 }, approval: "never", timeoutSeconds: 3600, maxAttempts: 1, priority: 5 },
   },
   events: { callbackDefault: "${PLANTWORKS_FRONTDOOR_CALLBACK}", approvalConsumer: "frontdoor" },
 };
-const platform = { ...PHASE_0_1, slotCaps: { "social-media": 2 } };
+const platform = { ...PHASE_0_1, slotCaps: { "social-media": 6 } };
 
 type Call = [string, ...unknown[]];
 function fakeDaemon(hooks: { create?: () => void | Promise<void>; claim?: () => void | Promise<void>; inspect?: (id: string) => QueueObservation | Promise<QueueObservation> } = {}) {
@@ -258,6 +258,62 @@ test("cap 0 stops claims for a key", async () => {
   const t = setup(fakeDaemon().daemon, undefined, undefined, parseSlotCaps("5,social-media=0"));
   await t.submit("t_1");
   assert.equal((await t.claim("dev-a@team")).status, 429);
+});
+
+test("priority: claim-next takes the lowest effective priority first (class priority + urgent -3, high -1, normal 0, low +2), then the oldest", async () => {
+  const t = setup(fakeDaemon().daemon);
+  for (const [card, priority] of [["t_low", "low"], ["t_norm1", undefined], ["t_urg", "urgent"], ["t_high", "high"], ["t_norm2", "normal"]] as const) {
+    assert.equal((await t.submit(card, priority ? { priority } : {})).status, 201);
+  }
+  assert.equal((await t.submit("t_bad", { priority: "asap" })).status, 400);
+  const order: string[] = [];
+  for (let i = 0; i < 5; i++) {
+    const { job } = await (await t.claim(`dev-${i}@team`)).json();
+    order.push(job.jobId.split("-")[3]);
+    t.store.transition(job.jobId, "running");
+    t.store.transition(job.jobId, "done", { outcome: "succeeded" });
+  }
+  assert.deepEqual(order, ["t_urg", "t_high", "t_norm1", "t_norm2", "t_low"]);
+  await t.submit("t_deep", { class: "deep", priority: "urgent" });
+  assert.equal(t.store.get("kb-social-media-t_deep-a1")!.priority, 2, "deep's class priority 5 plus urgent's -3");
+});
+
+test("class slots: claim-next never has more than the class's slots in flight; other classes and a finished job free nothing else", async () => {
+  const t = setup(fakeDaemon().daemon);
+  for (const card of ["t_d1", "t_d2", "t_d3"]) await t.submit(card, { class: "deep" });
+  await t.submit("t_q1");
+  assert.equal((await t.claim("dev-a@team", "deep")).status, 200);
+  assert.equal((await t.claim("dev-b@team", "deep")).status, 200);
+  const full = await t.claim("dev-c@team", "deep");
+  assert.equal(full.status, 429);
+  assert.deepEqual(await full.json(), { error: "class_slots_reached", message: "class deep of social-media has 2 of 2 slots in flight; ask again later", class: "deep", slots: 2, inFlight: 2 });
+  assert.equal(t.store.get("kb-social-media-t_d3-a1")!.reserved_by, null, "the refused claim reserved nothing");
+  assert.equal((await t.claim("dev-c@team", "quick")).status, 200, "quick has its own slots");
+  t.store.transition("kb-social-media-t_d1-a1", "running");
+  t.store.transition("kb-social-media-t_d1-a1", "done", { outcome: "succeeded" });
+  assert.equal((await (await t.claim("dev-c@team", "deep")).json()).job.jobId, "kb-social-media-t_d3-a1");
+});
+
+test("cap 1 with 5 queued jobs across 2 classes: never more than 1 in flight", async () => {
+  const t = setup(fakeDaemon().daemon, undefined, undefined, parseSlotCaps("social-media=1"));
+  for (const card of ["t_q1", "t_q2", "t_q3"]) await t.submit(card);
+  for (const card of ["t_d1", "t_d2"]) await t.submit(card, { class: "deep" });
+  const inFlight = () => t.store.db.prepare("SELECT COUNT(*) AS n FROM jobs WHERE state IN ('claimed', 'running') OR reserved_by IS NOT NULL").get() as { n: number };
+  const done: string[] = [];
+  while (done.length < 5) {
+    // Every seat of both classes asks at once; at most one wins.
+    const res = await Promise.all(["quick", "deep", "quick", "deep"].map((cls, i) => t.claim(`dev-${i}@team`, cls)));
+    const won = res.filter((r) => r.status === 200);
+    assert.equal(won.length, 1, `exactly one claim wins (got ${res.map((r) => r.status)})`);
+    assert.ok(res.every((r) => [200, 204, 429].includes(r.status)));
+    assert.equal(inFlight().n, 1);
+    const { job } = await won[0]!.json();
+    t.store.transition(job.jobId, "running");
+    assert.equal(inFlight().n, 1);
+    t.store.transition(job.jobId, "done", { outcome: "succeeded" });
+    done.push(job.jobId);
+  }
+  assert.equal(new Set(done).size, 5);
 });
 
 test("two broker connections on one SQLite file: a side transition can't free another's reservation", () => {

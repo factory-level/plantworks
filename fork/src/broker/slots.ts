@@ -41,12 +41,33 @@ export function parseSlotCaps(value: string | undefined): SlotCaps {
 
 export const capFor = (caps: SlotCaps, key: string): number => (Object.hasOwn(caps.byKey, key) ? caps.byKey[key] : caps.fallback);
 
+const IN_FLIGHT = "(state IN ('claimed', 'running') OR (state = 'queued' AND reserved_by IS NOT NULL))";
+
 /** Jobs in flight for a slot budget key: claimed, running, or queued under a reservation of any age. */
 export function inFlight(store: Store, teams: Map<string, TeamSpec>, key: string): number {
   const sharing = [...teams.values()].filter((t) => t.endpoint.slotBudgetKey === key).map((t) => t.team);
   if (!sharing.length) return 0;
   const row = store.db
-    .prepare(`SELECT COUNT(*) AS n FROM jobs WHERE team IN (${sharing.map(() => "?").join(",")}) AND (state IN ('claimed', 'running') OR (state = 'queued' AND reserved_by IS NOT NULL))`)
+    .prepare(`SELECT COUNT(*) AS n FROM jobs WHERE team IN (${sharing.map(() => "?").join(",")}) AND ${IN_FLIGHT}`)
     .get(...sharing) as { n: number };
   return row.n;
+}
+
+/** PW-18: jobs in flight for one team's class, counted the same way. claim-next keeps this at or below the class's `slots`. */
+export function classInFlight(store: Store, team: string, cls: string): number {
+  return (store.db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE team = ? AND class = ? AND ${IN_FLIGHT}`).get(team, cls) as { n: number }).n;
+}
+
+/**
+ * Startup check: the classes of every team sharing a slot budget key ask for no more slots than
+ * the cap claim-next will enforce for that key (the same `SlotCaps`). A team spec's own rule 1
+ * checks the platform file's `slotCaps`; this checks the runtime cap, so the two can't disagree.
+ */
+export function slotCapProblems(teams: Map<string, TeamSpec>, caps: SlotCaps): string[] {
+  const asked = new Map<string, number>();
+  for (const t of teams.values()) {
+    const slots = Object.values(t.classes).reduce((n, c) => n + c.slots, 0);
+    asked.set(t.endpoint.slotBudgetKey, (asked.get(t.endpoint.slotBudgetKey) ?? 0) + slots);
+  }
+  return [...asked].filter(([key, n]) => n > capFor(caps, key)).map(([key, n]) => `slot budget ${key}: the teams' classes ask for ${n} slots, over PLANTWORKS_SLOT_CAP's ${capFor(caps, key)}`);
 }

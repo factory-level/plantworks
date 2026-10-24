@@ -8,8 +8,9 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { serve } from "@hono/node-server";
 import { isLoopbackBind } from "../../../packages/daemon/dist/middleware/auth-bearer-token.js";
-import { canTransition, validateEnvelope, type JobEnvelope, type JobState } from "../contract/job.ts";
-import { createEmitter, jobStateEvent, type CloudEvent } from "../events/job-state.ts";
+import { canTransition, JOB_PRIORITIES, validateEnvelope, type JobEnvelope, type JobState } from "../contract/job.ts";
+import { createEmitter, type CloudEvent } from "../events/job-state.ts";
+import { createJobStateOutbox, eventForTransition, transitionColumns } from "../events/outbox.ts";
 import { SWEEP_MS, decisionRoute, requestApproval, sweepApprovals } from "./approvals.ts";
 import { PHASE_0_1, validateSpec, type Platform, type TeamSpec } from "../team/spec.ts";
 import type { JobRow, Store } from "./store.ts";
@@ -67,6 +68,8 @@ export interface BrokerOptions {
   routes?: BrokerRoutes[];
   /** Test hook; defaults to one PW-10 emitter per team, posting to its events.callbackDefault. */
   send?: Send;
+  /** Internal hook used by startBroker to wake the durable job-state outbox. */
+  emitJobState?: Emit;
   /** The broker's address as callers reach it, for decision URLs (PLANTWORKS_BROKER_PUBLIC_URL). startBroker defaults it to the listen address. */
   publicUrl?: string;
   /** Where `${NAME}` placeholders in a spec's callbackDefault are read from. Defaults to process.env. */
@@ -81,8 +84,13 @@ const fail = (status: 400 | 401 | 404 | 409 | 413, error: string, message: strin
 export function createBroker(opts: BrokerOptions): Hono & { sweepApprovals: () => number } {
   const { store, teams } = opts;
   const log = opts.log ?? ((l) => process.stderr.write(`${l}\n`));
-  const send = opts.send ?? teamSenders(teams, opts.env ?? process.env, log);
-  const emit: Emit = (row, state, detail = {}) => send(row.team, jobStateEvent({ jobId: row.job_id, team: row.team }, state, detail));
+  const send = opts.send ?? teamDelivery(teams, opts.env ?? process.env, log).send;
+  const emit: Emit = opts.emitJobState ?? ((row, state) => {
+    const job = store.get(row.job_id);
+    const transition = store.db.prepare("SELECT * FROM job_transitions WHERE job_id = ? ORDER BY id DESC LIMIT 1").get(row.job_id) as import("./store.ts").TransitionRow | undefined;
+    if (!job || !transition || transition.to_state !== state) throw new Error(`missing persisted ${state} transition for ${row.job_id}`);
+    send(row.team, eventForTransition(job, transition, transitionColumns(store, transition)));
+  });
   const decisionUrl = (jobId: string) => {
     if (!opts.publicUrl) throw new Error("no publicUrl for decision URLs");
     return `${opts.publicUrl.replace(/\/$/, "")}${API}/jobs/${encodeURIComponent(jobId)}/decision`;
@@ -117,12 +125,15 @@ export function createBroker(opts: BrokerOptions): Hono & { sweepApprovals: () =
     const cls = job.class ?? spec.defaultClass;
     const qc = spec.classes[cls];
     if (!qc) return fail(400, "unknown_class", `team ${job.team} has no class ${cls}`);
+    // claim-next never has more than `slots` of a class in flight, so a 0-slot class could never run the job.
+    if (qc.slots === 0) return fail(400, "class_disabled", `class ${cls} of ${job.team} has 0 slots, so nothing in it can run; raise its slots in the team spec first`);
     if (job.timeoutSeconds !== undefined && job.timeoutSeconds > qc.timeoutSeconds) {
       return fail(400, "timeout_over_ceiling", `timeoutSeconds ${job.timeoutSeconds} exceeds the ${cls} ceiling of ${qc.timeoutSeconds}`);
     }
     // A class that needs approval (per-job or always) holds every job until it is decided.
     const held = qc.approval !== "never";
-    const { row, created } = store.insert(job, cls, held ? "held" : "queued", held ? qc.approvalTtlSeconds : undefined);
+    const priority = (qc.priority ?? 0) + JOB_PRIORITIES[job.priority ?? "normal"];
+    const { row, created } = store.insert(job, cls, held ? "held" : "queued", held ? qc.approvalTtlSeconds : undefined, priority);
     if (!created) return replay(row, job);
     emit(row, row.state);
     if (held) requestApproval(row, ctx);
@@ -174,53 +185,79 @@ export function startBroker(opts: BrokerOptions & { host: string; port: number }
   if (!isLoopbackBind(opts.host) && !opts.publicUrl) {
     throw new Error(`refusing to bind the broker on ${opts.host} without --public-url or PLANTWORKS_BROKER_PUBLIC_URL (decision URLs must be reachable)`);
   }
-  const live = { ...opts, send: opts.send ?? teamSenders(opts.teams, opts.env ?? process.env, opts.log ?? ((l) => process.stderr.write(`${l}\n`))) }; // publicUrl is filled in once the port is known; createBroker reads it per request
+  const log = opts.log ?? ((l: string) => process.stderr.write(`${l}\n`));
+  const delivery = opts.send ? undefined : teamDelivery(opts.teams, opts.env ?? process.env, log);
+  const outbox = delivery ? createJobStateOutbox(opts.store, delivery.deliver, log) : undefined;
+  const send = opts.send ?? delivery!.send;
+  const emit: Emit = outbox?.wake ?? ((row, state) => {
+    const job = opts.store.get(row.job_id);
+    const transition = opts.store.db.prepare("SELECT * FROM job_transitions WHERE job_id = ? ORDER BY id DESC LIMIT 1").get(row.job_id) as import("./store.ts").TransitionRow | undefined;
+    if (!job || !transition || transition.to_state !== state) throw new Error(`missing persisted ${state} transition for ${row.job_id}`);
+    send(row.team, eventForTransition(job, transition, transitionColumns(opts.store, transition)));
+  });
+  const live = { ...opts, send, emitJobState: emit }; // publicUrl is filled in once the port is known; createBroker reads it per request
   const app = createBroker(live);
   return new Promise((resolve) => {
     const server = serve({ fetch: app.fetch, hostname: opts.host, port: opts.port }, (info) => {
       const host = info.address.includes(":") ? `[${info.address}]` : info.address;
       const url = `http://${host}:${info.port}`;
       live.publicUrl ??= url;
-      const emit: Emit = (row, state, detail = {}) => live.send!(row.team, jobStateEvent({ jobId: row.job_id, team: row.team }, state, detail));
       const decisionUrl = (jobId: string) => `${live.publicUrl!.replace(/\/$/, "")}${API}/jobs/${encodeURIComponent(jobId)}/decision`;
       const stop = opts.onListen?.({ store: opts.store, teams: opts.teams, emit, send: live.send!, decisionUrl });
       // A store error in the sweep (a busy file, a lost conditional update) is logged and retried next tick, never a crash.
       const sweep = setInterval(() => {
-        try { app.sweepApprovals(); } catch (e) { (opts.log ?? ((l) => process.stderr.write(`${l}\n`)))(`approval sweep failed: ${(e as Error).message}`); }
+        try { app.sweepApprovals(); } catch (e) { log(`approval sweep failed: ${(e as Error).message}`); }
       }, SWEEP_MS);
-      resolve({ url, close: () => new Promise((r) => { clearInterval(sweep); stop?.(); server.close(() => r()); }) });
+      const replay = setInterval(() => { void outbox?.pump(); }, 1000);
+      void outbox?.pump();
+      resolve({ url, close: () => new Promise((r) => { clearInterval(sweep); clearInterval(replay); stop?.(); server.close(() => r()); }) });
     });
   });
 }
 
 /**
- * `${NAME}` in a spec's callbackDefault, from the broker's environment. Only names ending in
- * `_CALLBACK` resolve, so a team spec cannot copy a broker secret (its token, an endpoint key) into
- * the URL every event is posted to. Throws on any other or unset name: the broker refuses to start.
+ * `callbackDefault` is one operator-supplied `${NAME_CALLBACK}` reference. Literal or mixed URLs
+ * would let a team spec choose where broker-held credentials are sent.
  */
 export function expand(value: string, env: Record<string, string | undefined>): string {
-  return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name: string) => {
-    if (!name.endsWith("_CALLBACK")) throw new Error(`only \${..._CALLBACK} names may be used in callbackDefault, not ${name}`);
-    const v = env[name]?.trim();
-    if (!v) throw new Error(`${name} is not set (used in ${value})`);
-    return v;
-  });
+  const match = /^\$\{([A-Za-z_][A-Za-z0-9_]*_CALLBACK)\}$/.exec(value);
+  if (!match) throw new Error("callbackDefault must be an operator callback reference (${NAME_CALLBACK})");
+  const name = match[1]!;
+  const v = env[name]?.trim();
+  if (!v) throw new Error(`${name} is not set (used in callbackDefault)`);
+  return v;
+}
+
+const CALLBACK_CREDENTIAL_PREFIX = "PLANTWORKS_CALLBACK_TOKEN_";
+
+function callbackCredentials(env: Record<string, string | undefined>): Map<string, string> {
+  return new Map(Object.entries(env)
+    .filter(([name, value]) => name.startsWith(CALLBACK_CREDENTIAL_PREFIX) && value?.trim())
+    .map(([name, value]) => [name.slice(CALLBACK_CREDENTIAL_PREFIX.length), value!.trim()]));
 }
 
 /**
  * One PW-10 emitter per team, posting to its callbackDefault. Approval events go there too: the
  * front door is the only approval consumer this broker knows (`events.approvalConsumer: frontdoor`).
  */
-function teamSenders(teams: Map<string, TeamSpec>, env: Record<string, string | undefined>, log: (l: string) => void): Send {
+function teamDelivery(teams: Map<string, TeamSpec>, env: Record<string, string | undefined>, log: (l: string) => void) {
+  const credentials = callbackCredentials(env);
   const emitters = new Map([...teams].map(([name, spec]) => {
     if (spec.events.approvalConsumer !== "frontdoor") throw new Error(`team ${name}: events.approvalConsumer ${spec.events.approvalConsumer} is not supported (only frontdoor)`);
+    const bearerToken = spec.events.auth ? credentials.get(spec.events.auth.secretRef) : undefined;
+    if (spec.events.auth && !bearerToken) throw new Error(`team ${name}: configured callback credential is unavailable`);
     return [name, createEmitter({
       url: expand(spec.events.callbackDefault, env),
-      onDeliveryError: (err) => log(`${err.event.type} not delivered: ${err.message}`),
+      ...(bearerToken ? { bearerToken } : {}),
+      onDeliveryError: (err) => { if (err.event.type !== "plantworks.job.state") log(`${err.event.type} not delivered: ${err.message}`); },
     })];
   }));
+  const deliver = (team: string, event: CloudEvent): Promise<void> => {
+    const emitter = emitters.get(team);
+    return emitter ? emitter.emit(event) : Promise.reject(new Error(`no event callback for team ${team}`));
+  };
   // Delivery runs alongside the request; a slow consumer never holds the API.
-  return (team, event) => { emitters.get(team)?.emit(event).catch(() => {}); };
+  return { deliver, send: (team: string, event: CloudEvent) => { void deliver(team, event).catch(() => {}); } };
 }
 
 const digest = (s: string) => createHash("sha256").update(s).digest();

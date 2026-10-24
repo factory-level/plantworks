@@ -5,6 +5,7 @@ import { readEndpoint } from "../llm/endpoint.ts";
 import { startGovernor, type Governor } from "../llm/governor.ts";
 import { writeSeatFiles } from "../seat/pi-seat-files.ts";
 import { loadPlatform } from "../team/command.ts";
+import { seatLiveness } from "../seat/liveness.ts";
 import { loadTeams } from "./server.ts";
 
 /** The seat's governor port: loopback, next to the broker (7534). Fixed, so a restarted worker keeps the seat's baseUrl valid. */
@@ -33,7 +34,7 @@ export async function governSeat(opts: { team: string; seat: string; class?: str
     onFail: (reason) => log(`plantworks worker: ${opts.seat} hit ${reason} (consecutive model calls cut at the ${workerClass.deadlineSeconds}s deadline); the broker job is left as it is`),
   });
   try {
-    const agentDir = writeSeatFiles({ openrigHome: opts.openrigHome, session: opts.seat, className, governorUrl: governor.url, workerClass });
+    const agentDir = writeSeatFiles({ openrigHome: opts.openrigHome, session: opts.seat, className, governorUrl: governor.url, workerClass, toolProfile: spec.classes[className]!.toolProfile });
     return { governor, agentDir, className, timeoutSeconds: spec.classes[className]!.timeoutSeconds };
   } catch (e) {
     await governor.close();
@@ -136,6 +137,18 @@ export function workerVerb(pw: Command): void {
         // Pi's model calls stop working with the governor: none goes to the endpoint ungoverned.
         await governor.close();
       }
+    });
+
+  // PW-22: the liveness probe, from the seat's runner-state.json. Only a recorded Pi exit fails it.
+  worker.command("live")
+    .description("Is the seat's Pi alive, by its runner-state.json? Exit 1 only when the runner recorded that Pi exited; starting or unreadable state is not a failure")
+    .requiredOption("--seat <session>")
+    .action((opts: { seat: string }) => {
+      if (!process.env.OPENRIG_HOME) throw new Error("OPENRIG_HOME is not set, so the seat's state directory is unknown");
+      const { verdict, detail } = seatLiveness(process.env.OPENRIG_HOME, opts.seat);
+      process.stdout.write(`${opts.seat}: ${verdict}: ${detail}\n`);
+      // Nothing here touches the broker: a dead Pi frees no slot and fails no job.
+      if (verdict === "exited") process.exitCode = 1;
     });
 
   // PW-22: the preStop hook. Stops new work for the seat, then waits for what it still holds.

@@ -4,7 +4,7 @@
 // that seat asks for work, so a job is never bound to a seat that isn't ready for it.
 //
 // One claim, in order:
-// 1. reserve: the oldest unreserved queued job of (team, class), held for this seat, with a qitem
+// 1. reserve: the unreserved queued job of (team, class) with the lowest effective priority, then oldest, held for this seat, with a qitem
 //    id chosen up front. The job stays `queued` and nothing is emitted.
 // 2. Create the qitem with that id, then claim it for the seat. The daemon delivers (wakes the
 //    seat) when it creates the qitem, so from that point Pi may be working.
@@ -17,7 +17,8 @@
 // verified evidence. Nothing here closes a qitem as if that stopped Pi.
 import { randomBytes } from "node:crypto";
 import { API, jobRecord, type BrokerRoutes } from "./server.ts";
-import { capFor, inFlight, parseSlotCaps, type SlotCaps } from "./slots.ts";
+import { capFor, classInFlight, inFlight, parseSlotCaps, type SlotCaps } from "./slots.ts";
+import { RESERVATION_LEASE_MS, type JobRow, type Store } from "./store.ts";
 import type { JobEnvelope } from "../contract/job.ts";
 
 /** A seat session as OpenRig names it, for example `dev-worker@team`. */
@@ -35,6 +36,9 @@ export interface QueueObservation {
 
 /** The daemon answered and refused the request: for `create`, proof that no qitem was persisted. */
 export class DaemonRefused extends Error {}
+
+/** The daemon answered 404 for a qitem id: it has no qitem with that id. */
+export class QitemNotFound extends Error {}
 
 /** The two daemon queue calls claim-next makes. */
 export interface DaemonQueue {
@@ -65,9 +69,13 @@ export function daemonQueue(opts: { url: string; token?: string; fetch?: typeof 
     const message = `daemon ${path} returned ${res.status}: ${(await res.text()).slice(0, 300)}`;
     throw res.status >= 400 && res.status < 500 && res.status !== 409 ? new DaemonRefused(message) : new Error(message);
   };
-  const read = async (path: string) => {
+  /** `item`: this is the qitem itself, so a 404 means the daemon has no such qitem. */
+  const read = async (path: string, item = false) => {
     const res = await f(`${opts.url.replace(/\/+$/, "")}/api/queue${path}`, { headers: { ...(opts.token ? { authorization: `Bearer ${opts.token}` } : {}) }, signal: AbortSignal.timeout(opts.timeoutMs ?? 10_000) });
-    if (!res.ok) throw new Error(`daemon ${path} returned ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    if (!res.ok) {
+      const message = `daemon ${path} returned ${res.status}: ${(await res.text()).slice(0, 300)}`;
+      throw item && res.status === 404 ? new QitemNotFound(message) : new Error(message);
+    }
     return res.json();
   };
   return {
@@ -75,7 +83,9 @@ export function daemonQueue(opts: { url: string; token?: string; fetch?: typeof 
     claim: (qitemId, seat) => call(`/${encodeURIComponent(qitemId)}/claim`, { destinationSession: seat }),
     async inspect(qitemId) {
       const id = encodeURIComponent(qitemId);
-      const [item, transitions] = await Promise.all([read(`/${id}`), read(`/${id}/transitions`)]);
+      // The item first: a 404 there is the daemon saying it has no such qitem.
+      const item = await read(`/${id}`, true);
+      const transitions = await read(`/${id}/transitions`);
       return { ...(item as object), transitions } as QueueObservation;
     },
   };
@@ -98,7 +108,8 @@ export interface ClaimNextOptions {
 
 /**
  * POST /plantworks/v1/claim-next {team, class?, seat}: 200 with the claimed job, 204 when nothing is
- * claimable, 429 when the team's slot budget key is at its cap (PW-19).
+ * claimable, 429 when the team's slot budget key is at its cap (PW-19) or the class has all its
+ * `slots` in flight (PW-18).
  */
 export function claimNextRoutes(opts: ClaimNextOptions): BrokerRoutes {
   const log = opts.log ?? ((l) => process.stderr.write(`${l}\n`));
@@ -127,7 +138,10 @@ export function claimNextRoutes(opts: ClaimNextOptions): BrokerRoutes {
         // PW-22: a draining seat gets no new work. Checked in the same transaction as the reserve.
         if (store.isDraining(seat)) return { draining: true } as const;
         const used = inFlight(store, teams, key);
-        return used >= cap ? { capped: used } : store.reserve(team, cls, seat, qitemId);
+        if (used >= cap) return { capped: used };
+        // PW-18: the class's own `slots` bound, counted the same way as the key's cap.
+        const classUsed = classInFlight(store, team, cls);
+        return classUsed >= spec.classes[cls]!.slots ? { classFull: classUsed } : store.reserve(team, cls, seat, qitemId);
       }).immediate();
       if (reserved && "draining" in reserved) {
         return c.json({ error: "seat_draining", message: `${seat} is draining and takes no new work; DELETE ${API}/seats/${seat}/drain resumes it`, seat }, 409);
@@ -135,19 +149,16 @@ export function claimNextRoutes(opts: ClaimNextOptions): BrokerRoutes {
       if (reserved && "capped" in reserved) {
         return c.json({ error: "slot_cap_reached", message: `slot budget ${key} has ${reserved.capped} of ${cap} jobs in flight; ask again later`, slotBudgetKey: key, cap, inFlight: reserved.capped }, 429);
       }
+      if (reserved && "classFull" in reserved) {
+        const slots = spec.classes[cls]!.slots;
+        return c.json({ error: "class_slots_reached", message: `class ${cls} of ${team} has ${reserved.classFull} of ${slots} slots in flight; ask again later`, class: cls, slots, inFlight: reserved.classFull }, 429);
+      }
       if (!reserved) return c.body(null, 204);
       const job = reserved;
       const envelope = JSON.parse(job.envelope) as JobEnvelope;
 
       try {
-        await opts.daemon.create({
-          qitemId,
-          source: opts.brokerSession,
-          destination: seat,
-          body: `Plantworks job ${job.job_id} (team ${job.team}, class ${cls})\n\n${envelope.task.prompt}`,
-          summary: envelope.task.title ?? `Plantworks job ${job.job_id}`,
-          tags: ["plantworks", `plantworks-job:${job.job_id}`, `plantworks-team:${job.team}`, `plantworks-class:${cls}`],
-        });
+        await opts.daemon.create(qitemFor(job, opts.brokerSession));
       } catch (e) {
         if (e instanceof DaemonRefused) {
           // The daemon refused the create, so no qitem exists and nothing was delivered: safe to release.
@@ -178,4 +189,52 @@ export function claimNextRoutes(opts: ClaimNextOptions): BrokerRoutes {
       }
     });
   };
+}
+
+/** The qitem claim-next creates for a reserved job: the same id, seat and body on every attempt. */
+function qitemFor(job: JobRow, brokerSession: string) {
+  const envelope = JSON.parse(job.envelope) as JobEnvelope;
+  return {
+    qitemId: job.reserved_qitem_id!,
+    source: brokerSession,
+    destination: job.reserved_by!,
+    body: `Plantworks job ${job.job_id} (team ${job.team}, class ${job.class})\n\n${envelope.task.prompt}`,
+    summary: envelope.task.title ?? `Plantworks job ${job.job_id}`,
+    tags: ["plantworks", `plantworks-job:${job.job_id}`, `plantworks-team:${job.team}`, `plantworks-class:${job.class}`],
+  };
+}
+
+/**
+ * W3-A: finishes a claim-next handoff that a broker crash or failed call left between reserve and
+ * confirmClaim. It does this by retrying the same steps with the same qitem id for the same seat.
+ * Only a reservation older than RESERVATION_LEASE_MS is touched, so a claim-next still in flight
+ * is never raced. Then:
+ * - the daemon has no qitem with that id (404): create it. A retried create is idempotent upstream,
+ *   so a create that did land answers as the same qitem. If the daemon refuses (4xx), nothing was
+ *   delivered and the reservation is released, the same rule claim-next applies;
+ * - the qitem is still pending and addressed to the reserving seat: claim it for that seat;
+ * - any other answer, or no answer: change nothing.
+ * Nothing here releases on age, moves the job to another seat, or closes a qitem. The caller then
+ * settles the broker side (confirmClaim) from what the daemon shows.
+ */
+export async function recoverHandoff(store: Store, daemon: DaemonQueue, brokerSession: string, row: JobRow, now = Date.now()): Promise<"recovered" | "released" | "untouched"> {
+  if (row.state !== "queued" || !row.reserved_by || !row.reserved_qitem_id || !row.reserved_at) return "untouched";
+  if (now - Date.parse(row.reserved_at) < RESERVATION_LEASE_MS) return "untouched";
+  const item = await daemon.inspect(row.reserved_qitem_id).catch((e) => {
+    if (e instanceof QitemNotFound) return null;
+    throw e;
+  });
+  // Only this seat's own pending qitem is claimed; anything else is left to reconciliation's rules.
+  if (item && (item.state !== "pending" || item.destinationSession !== row.reserved_by)) return "untouched";
+  if (!item) {
+    try {
+      await daemon.create(qitemFor(row, brokerSession));
+    } catch (e) {
+      if (!(e instanceof DaemonRefused)) throw e;
+      store.release(row.job_id, row.reserved_by, row.reserved_qitem_id);
+      return "released";
+    }
+  }
+  await daemon.claim(row.reserved_qitem_id, row.reserved_by);
+  return "recovered";
 }

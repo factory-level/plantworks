@@ -28,11 +28,12 @@ plantworks pw broker serve --teams <dir> [--platform platform.json] [--db file] 
 - **Auth.** With `PLANTWORKS_BROKER_TOKEN` set, every request under `/plantworks/v1/` needs
   `Authorization: Bearer <token>`, including routes other cards add under `/plantworks/v1/`. Without it (loopback, Phase
   0-1 dev only), the API is open.
-- **Events.** `plantworks.job.state` (PW-10) is posted to the team's `events.callbackDefault`.
-  `${NAME}` placeholders in that value are read from the broker's environment at start, so the
-  sample spec's `${PLANTWORKS_FRONTDOOR_CALLBACK}` works. Only names ending in `_CALLBACK` resolve,
-  so a spec cannot copy a broker secret (its token, an endpoint key) into the URL events go to.
-  Any other name, or an unset one, stops the broker.
+- **Events.** `plantworks.job.state` (PW-10) is posted to the team's `events.callbackDefault`,
+  which must be exactly an operator environment reference such as `${PLANTWORKS_FRONTDOOR_CALLBACK}`.
+  Literal and mixed callback URLs are rejected. Optional `events.auth.secretRef: FRONTDOOR` resolves
+  only `PLANTWORKS_CALLBACK_TOKEN_FRONTDOOR`; arbitrary broker and daemon variables are not
+  addressable. An unknown or unset callback reference stops the broker. Without `events.auth`, the
+  callback remains unauthenticated.
 
 ## API
 
@@ -53,7 +54,7 @@ Errors are `{error, message}`, plus `errors` for an invalid envelope and `job` f
 
 | Status | `error` |
 |---|---|
-| 400 | `invalid_envelope`, `unknown_team`, `unknown_class`, `timeout_over_ceiling`, `invalid_decision` |
+| 400 | `invalid_envelope`, `unknown_team`, `unknown_class`, `timeout_over_ceiling`, `class_disabled`, `invalid_decision` |
 | 401 | `unauthorized` |
 | 404 | `not_found` |
 | 409 | `job_conflict`, `not_cancellable`, `already_decided`, `approval_expired`, `not_held` |
@@ -113,17 +114,18 @@ will do the work, for example `dev-worker@team`. No `class` means the team's `de
 
 | Response | When |
 |---|---|
-| `200 {job, qitemId, seat, envelope}` | The oldest queued job of that class is now `claimed` by the seat. Its upstream qitem `qitemId` is addressed to the seat and claimed for it |
+| `200 {job, qitemId, seat, envelope}` | The next queued job of that class (lowest effective priority, then oldest) is now `claimed` by the seat. Its upstream qitem `qitemId` is addressed to the seat and claimed for it |
 | `204` | Nothing claimable in that class |
 | `400` | `invalid_claim`, `unknown_team`, `unknown_class` |
 | `429 slot_cap_reached` | The team's `slotBudgetKey` already has its cap of jobs in flight (PW-19). The body has `{slotBudgetKey, cap, inFlight}`. Ask again later |
+| `429 class_slots_reached` | The class already has its `slots` of jobs in flight, counted like the cap. The body has `{class, slots, inFlight}`. Ask again later |
 | `503 daemon_refused` | The daemon answered and refused to create the qitem (a 4xx other than 409), so nothing was delivered. The reservation is released and the job is claimable again |
 | `503 handoff_unconfirmed {jobId, qitemId, seat}` | The outcome is unknown: a timeout, a 5xx or 409 on create, or a failed claim after the create. The qitem may exist and may have been delivered, so the job **stays reserved and counted** and can't be claimed again until reconciliation (PW-21) settles it |
 | `409 reservation_lost` | Shouldn't happen: reservations are never taken over, and cancel refuses a reserved job. Left for reconciliation |
 
 This is **late binding**: the upstream qitem exists only from the moment a seat claims, and its
 destination is that seat. Steps:
-1. `reserve` the oldest unreserved queued job, with a qitem id chosen first.
+1. `reserve` the next unreserved queued job, with a qitem id chosen first.
 2. Create the qitem with that id. The daemon delivers (wakes the seat) when it creates the qitem,
    so from here on Pi may be working. Upstream treats a retried create with the same id as
    idempotent.
@@ -139,6 +141,43 @@ the qitem, because a closed qitem doesn't prove Pi never started. Only `confirmC
 verified evidence could be that the daemon has no qitem with that id. Nothing is ever emitted
 for a claim that didn't happen.
 
+**Order.** Each job stores an effective priority when it is submitted: its class's `priority`
+(default 0) plus the envelope's `priority` offset (`urgent` -3, `high` -1, `normal` 0, `low` +2;
+absent is `normal`). `reserve` takes the lowest, then the oldest. claim-next serves one class
+per call, so within a call only the job offsets reorder anything.
+
+**Class slots.** claim-next also keeps each class at or below its own `slots` in flight, counted
+like the slot cap below and checked in the same transaction. The key's cap is checked first. A
+class with `slots: 0` could never run a job, so submit refuses its jobs (`400 class_disabled`)
+rather than queue them. A spec may still declare one, like the ADR sample's `long`, and raising
+its `slots` enables it.
+
+**Recovery (W3-A, `recoverHandoff`).** A handoff that a crash or a failed call left between
+`reserve` and `confirmClaim` is finished by retrying the same steps with the same stored qitem
+id, for the same seat. Reconciliation does this once a reservation is older than
+`RESERVATION_LEASE_MS`, so a claim-next that is still in flight is never raced.
+- **The daemon answers 404:** the broker creates the qitem. A retried create is idempotent
+  upstream, so a create that did land answers as the same qitem. A refused create (4xx) releases
+  the reservation, the same rule claim-next applies.
+- **The qitem is pending for that seat:** the broker claims it.
+- **After that,** reconciliation confirms the broker-side claim only once the daemon shows the
+  qitem claimed. A pending qitem is never confirmed.
+- **Anything else** leaves the reservation as it is: no answer, a 5xx, a qitem addressed to
+  another seat, or one in another state.
+
+**Precondition: the daemon's queue outlives a broker crash.** A 404 counts as "never created" only
+while the daemon's `$OPENRIG_HOME` is persistent. If it is lost (an emptyDir, or a daemon restart
+without its volume), a qitem that was delivered, and possibly worked on, would 404, and recovery
+would deliver it again. Mount the volume that `fork/container/README.md` asks for at
+`OPENRIG_HOME=/var/lib/fork`. A failing retry past the lease is tried again on every
+reconciliation pass (2 s), with no backoff.
+
+Age only decides when a retry is attempted. Nothing releases on age, moves the job to another
+seat, or closes a qitem.
+
+A draining seat still gets its own reserved job delivered: that job was reserved before the
+drain, and the drain waits for it.
+
 ### Slot cap (PW-19, `slots.ts`)
 
 `PLANTWORKS_SLOT_CAP` caps the jobs in flight per `slotBudgetKey`, counted across every team that
@@ -153,8 +192,53 @@ shares the key.
 - **A slot frees** when the job reaches a terminal state.
 - **Never exceeded.** claim-next counts and reserves in one immediate SQLite transaction, so
   concurrent claims, or another broker on the same file, can't exceed the cap.
-- **Separate from other caps.** This runtime cap is independent of the team spec's validation
-  caps (`pw team validate --platform`) and of Hermes' `kanban.max_in_progress_per_profile`.
+- **Separate from other caps.** This runtime cap is independent of Hermes'
+  `kanban.max_in_progress_per_profile`.
+- **Checked at start against the specs.** `pw broker serve` refuses to start when the classes of
+  the teams sharing a key ask for more `slots` than `PLANTWORKS_SLOT_CAP` gives that key. This is
+  the same parsed cap that claim-next enforces. Each spec's rule 1 still checks the `--platform`
+  file's `slotCaps`, so both must agree with the specs.
+
+**Per-call ceilings (PW-19).** The platform delivers the per-call ceilings with the cap. Classes
+are checked against them when the broker starts, and a class over a ceiling stops the start.
+
+| Variable | Format | Unset |
+|---|---|---|
+| `PLANTWORKS_MAX_CALL_SECONDS` | positive integer, at most 60 | 60 |
+| `PLANTWORKS_MAX_CALL_OUTPUT` | `<up to 16K context>/<above 16K>` tokens, or one number for both; at most `1536/1024` | `1536/1024` |
+
+A value can only tighten the ADR ceilings, never loosen them. A malformed, zero, negative or
+larger value stops the broker. The ceilings bind the broker's start check only. The worker's
+governor still enforces the ADR values and the class's own `perCall`. `pw team validate` also
+uses the ADR values, so a spec that validates can still be refused at broker start where the
+platform has tightened a ceiling.
+
+#### Runbook: moving the Phase 1 slot between teams
+
+The move is a config change only, with no code change and no broker endpoint. The example moves
+the single slot from team `a` (key `a`) to team `b` (key `b`). Nothing in this procedure releases
+a job on a timeout.
+
+1. **Stop new work for `a`.** Drain `a`'s worker seats (`plantworks pw worker drain --seat …`).
+2. **Wait until `a` is idle.** Wait for `GET /plantworks/v1/stats` to show `slots.a.inFlight: 0`.
+   That is the logical count. A drain timeout, or an `a` job that never settles, is not a reason
+   to go on. The keys are separate, so `b` would start while `a` may still be using the shared
+   lane. Settle a stuck job through the PW-21 operator procedure, which first verifies that the
+   work stopped.
+3. **Change the config, in one GitOps commit:**
+   - `PLANTWORKS_SLOT_CAP` changes from `a=1,b=0` to `a=0,b=1`;
+   - the platform file's `slotCaps` gets the same values;
+   - `a`'s class `slots` become 0;
+   - `b`'s class `slots` total 1, within its worker seats (rule 4).
+4. **Roll the broker.** The start refuses a change where any key's classes ask for more slots than
+   its cap, in `PLANTWORKS_SLOT_CAP` or in the platform file. It does **not** catch a cap left
+   higher than the slots, for example `PLANTWORKS_SLOT_CAP` still `a=1`. So after the roll, check
+   that `GET /plantworks/v1/stats` shows `slots.a.cap: 0` and `slots.b.cap: 1`. With no slots, nothing in `a`'s classes is claimed again. Once the
+   per-class slot check from #58 is on main, they also refuse new jobs (`400 class_disabled`).
+5. **Resume `b`'s seats.** A starting `worker run` resumes its own seat. `a`'s seats can stay
+   drained.
+
+Moving the slot back is the same procedure with `a` and `b` swapped.
 
 **What the cap enforces: broker job states, not physical execution.** The cap counts jobs by
 their state in this broker. A slot frees when the broker records a terminal state for the job,
@@ -184,7 +268,13 @@ as the broker does) and starts the seat's call governor with the limits of the c
 (`--class`, else the team's `defaultClass`): `perCall.maxOutputTokens`, `perCall.deadlineSeconds`
 and `context.maxContextTokens`, not the built-in classes. It then renders the seat's Pi
 `models.json`/`settings.json` into `$OPENRIG_HOME/state/pi/<seat>/agent`, the directory the
-daemon's Pi seat reads, with the governor as the only `baseUrl`. The endpoint key stays in the
+daemon's Pi seat reads, with the governor as the only `baseUrl`. The settings lower Pi's
+compaction to the class window (a quarter reserved and three eighths kept: 4096/6144 at 16K,
+8192/12288 at 32K). A class with `toolProfile: trimmed` also gets `defaultTools` `read, edit, bash`
+and the fork's short `SYSTEM.md`. The seat's `SYSTEM.md` is replaced or removed only when it is
+exactly the fork's own file: any other content there makes the worker refuse to start, and nothing
+is changed. The broker path has no per-job workspace yet, so a job repository's `.pi/SYSTEM.md` is
+not checked here (only `pw job run` refuses one). The endpoint key stays in the
 worker. The governor listens on `127.0.0.1:7535` (`--governor-port`/`PLANTWORKS_GOVERNOR_PORT`),
 a fixed port so a restarted worker keeps the seat's `baseUrl` valid. So:
 - start the worker before the daemon launches the seat: Pi reads these files when it starts, and a
@@ -261,6 +351,13 @@ closes a job.
 
 These are lifecycle counts, not observed execution. A job counts until the broker records its end.
 
+**Seat liveness.** `plantworks pw worker live --seat <session>` reads the seat's
+`$OPENRIG_HOME/state/pi/<seat>/runner-state.json`, the sidecar upstream's pi-runner writes, with
+upstream's own path and parser. It exits 1 only when the runner recorded that Pi exited. A missing
+sidecar or a launch not yet ready (`starting`) and an unreadable one (`unknown`) exit 0. The
+runner writes the sidecar on events, not on a timer, so `live` doesn't tell a hung runner from an
+idle one. A recorded exit is about the Pi process: it doesn't fail a job or free a slot.
+
 **Drain.** A seat's in-flight jobs are the ones claimed or running for it, plus any queued job
 under its reservation, of any age: once the daemon may have delivered the qitem, the seat may be
 working on it. Draining a seat changes none of those jobs. It only stops new claims. The flag is
@@ -303,6 +400,14 @@ kept in the broker's SQLite file (`seat_drains`), so it survives a broker restar
        with this qitem. Call it only on evidence that the qitem was never delivered.
 
   A reservation leaves the job `queued` and emits nothing. Any transition clears it.
+- **History.** `transitions({afterId?, jobId?, limit?})` reads `job_transitions`, oldest first:
+  one row per state a job enters. That is its initial `queued` or `held` (`from_state` null) and
+  then every transition. Each row has the checked PW-09 `detail` and the row `columns` it set. A
+  row is written in the same transaction as the state change, so the table never disagrees with
+  `jobs`. Ids are monotonic across the store, so a reader can resume after the last id it saw.
+  Reservations and releases are not state changes and are not recorded. A broker file created
+  before this table has no rows for the earlier states of its existing jobs. There is no HTTP
+  route for it yet.
 
 ## Defaults open for review
 
@@ -327,8 +432,8 @@ kept in the broker's SQLite file (`seat_drains`), so it survives a broker restar
 - Drain is per seat. There is no broker-wide drain, and a seat that is never drained or resumed
   explicitly keeps whatever state it last had. `/healthz` checks only the broker's own file, not
   the daemon.
-- Event delivery is in memory (PW-10). A broker that stops while an event is still retrying
-  loses that event. The job row is kept. The persistent outbox remains a follow-up.
+- Job-state event delivery uses a durable per-team outbox and resumes after broker restart.
+  Approval events remain in memory and can be lost if the broker stops while they are retrying.
 - Worker reconciliation does not capture the worker's output; until that reporting path exists, it
   stores `{text: null, artifacts: []}` after authenticated logical completion. It does not infer
   process exit.

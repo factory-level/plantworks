@@ -20,6 +20,32 @@ export type ClassName = keyof typeof CLASSES;
 export const DEFAULT_CLASS: ClassName = "quick";
 
 export const CEILINGS = { maxContextTokens: 32768, deadlineSeconds: 60, outputTokensUpTo16K: 1536, outputTokensAbove16K: 1024 };
+export type Ceilings = typeof CEILINGS;
+
+/**
+ * The per-call ceilings the platform delivers (PW-19): PLANTWORKS_MAX_CALL_SECONDS (seconds) and
+ * PLANTWORKS_MAX_CALL_OUTPUT (`<up to 16K>/<above 16K>` tokens, or one number for both). Unset
+ * means the ADR values above. A value may tighten a ceiling, never loosen it: anything above the
+ * ADR value, malformed or not positive throws, and the broker refuses to start.
+ */
+export function callCeilingsFromEnv(env: Record<string, string | undefined>): Ceilings {
+  const n = (name: string, raw: string, max: number) => {
+    if (!/^[1-9]\d{0,6}$/.test(raw)) throw new Error(`${name}: "${raw}" is not a positive integer`);
+    if (Number(raw) > max) throw new Error(`${name}: ${raw} is above the platform ceiling of ${max}; it may only lower it`);
+    return Number(raw);
+  };
+  const c = { ...CEILINGS };
+  const seconds = env.PLANTWORKS_MAX_CALL_SECONDS?.trim();
+  if (seconds) c.deadlineSeconds = n("PLANTWORKS_MAX_CALL_SECONDS", seconds, CEILINGS.deadlineSeconds);
+  const output = env.PLANTWORKS_MAX_CALL_OUTPUT?.trim();
+  if (output) {
+    const parts = output.split("/").map((p) => p.trim());
+    if (parts.length > 2) throw new Error(`PLANTWORKS_MAX_CALL_OUTPUT: "${output}" is not <n> or <up to 16K>/<above 16K>`);
+    c.outputTokensUpTo16K = n("PLANTWORKS_MAX_CALL_OUTPUT", parts[0]!, CEILINGS.outputTokensUpTo16K);
+    c.outputTokensAbove16K = n("PLANTWORKS_MAX_CALL_OUTPUT", parts[1] ?? parts[0]!, CEILINGS.outputTokensAbove16K);
+  }
+  return c;
+}
 
 /** A team spec queue class's limits (ADR 0204 `context` and `perCall`) as the governor and the seat files take them. */
 export function classFromSpec(c: { model: string; context: { maxContextTokens: number }; perCall: { maxOutputTokens: number; deadlineSeconds: number } }): WorkerClass {
@@ -32,11 +58,11 @@ export function classByName(name: string): WorkerClass {
 }
 
 /** Problems with a class against the platform ceilings; empty means it is within them. */
-export function ceilingProblems(c: WorkerClass): string[] {
-  const outputCap = c.maxContextTokens <= 16384 ? CEILINGS.outputTokensUpTo16K : CEILINGS.outputTokensAbove16K;
+export function ceilingProblems(c: WorkerClass, ceilings: Ceilings = CEILINGS): string[] {
+  const outputCap = c.maxContextTokens <= 16384 ? ceilings.outputTokensUpTo16K : ceilings.outputTokensAbove16K;
   const problems: string[] = [];
-  if (c.maxContextTokens > CEILINGS.maxContextTokens) problems.push(`context ${c.maxContextTokens} > ${CEILINGS.maxContextTokens}`);
-  if (c.deadlineSeconds > CEILINGS.deadlineSeconds) problems.push(`deadline ${c.deadlineSeconds}s > ${CEILINGS.deadlineSeconds}s`);
+  if (c.maxContextTokens > ceilings.maxContextTokens) problems.push(`context ${c.maxContextTokens} > ${ceilings.maxContextTokens}`);
+  if (c.deadlineSeconds > ceilings.deadlineSeconds) problems.push(`deadline ${c.deadlineSeconds}s > ${ceilings.deadlineSeconds}s`);
   if (c.maxOutputTokens > outputCap) problems.push(`output ${c.maxOutputTokens} > ${outputCap} tokens`);
   return problems;
 }

@@ -49,10 +49,11 @@ export async function stubModel(reply = "stub reply", mode: { value: StubModelMo
 /** Collects plantworks.job.state events; answers each with `status` (default 204). */
 export async function stubConsumer(status = 204) {
   const events: any[] = [];
+  const authorization: (string | undefined)[] = [];
   const server = createServer((req, res) => {
     let raw = "";
-    req.on("data", (c) => (raw += c)).on("end", () => { events.push(JSON.parse(raw)); res.writeHead(status).end(); });
+    req.on("data", (c) => (raw += c)).on("end", () => { events.push(JSON.parse(raw)); authorization.push(req.headers.authorization); res.writeHead(status).end(); });
   });
   const { base, close } = await listen(server);
-  return { url: `${base}/events`, events, states: () => events.map((e) => e.data.state), close };
+  return { url: `${base}/events`, events, authorization, states: () => events.map((e) => e.data.state), close };
 }
