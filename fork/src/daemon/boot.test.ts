@@ -31,19 +31,37 @@ test("explicit home, port and config-file values win over the defaults", () => {
   assert.equal(fromFile.OPENRIG_PORT, undefined, "a config-file port is left to upstream");
 });
 
-test("any non-loopback bind needs a bearer token, Tailscale addresses included", () => {
+test("daemon start refuses any non-loopback bind without a bearer token, Tailscale addresses included", () => {
   const cases: [string[], Record<string, string | undefined>, { host?: string }][] = [
     [argv("daemon", "start", "--host", "0.0.0.0"), {}, {}],
     [argv("daemon", "start", "--host=100.100.1.1"), {}, {}],
-    [argv("ps"), { OPENRIG_BIND_HOST: "192.0.2.10" }, {}],
-    [argv("up", "x"), {}, { host: "::" }],
+    // commander keeps the last --host, so the check must too
+    [argv("daemon", "start", "--host", "127.0.0.1", "--host", "100.100.1.1"), {}, {}],
+    [argv("daemon", "start", "--host=127.0.0.1", "--host=100.100.1.1"), {}, {}],
+    [argv("daemon", "start"), { OPENRIG_BIND_HOST: "192.0.2.10" }, {}],
+    [argv("daemon", "start"), {}, { host: "::" }],
   ];
   for (const [args, env, file] of cases) {
-    assert.throws(() => applyDaemonDefaults(env, args, file), /without a bearer token/, args.join(" "));
+    assert.throws(() => applyDaemonDefaults(env, args, file), /refusing: binding the daemon on .* needs a bearer token/, args.join(" "));
   }
   for (const host of ["127.0.0.1", "localhost", "::1"]) applyDaemonDefaults({}, argv("daemon", "start", "--host", host));
+  applyDaemonDefaults({}, argv("daemon", "start", "--host", "100.100.1.1", "--host", "127.0.0.1"));
+});
+
+test("other commands only warn, and pin any daemon they auto-start to loopback", () => {
+  for (const [args, env, file] of [
+    [argv("config", "set", "daemon.host", "127.0.0.1"), {}, { host: "0.0.0.0" }],
+    [argv("up", "x"), { OPENRIG_BIND_HOST: "100.100.1.1" }, {}],
+  ] as [string[], Record<string, string | undefined>, { host?: string }][]) {
+    const warnings: string[] = [];
+    applyDaemonDefaults(env, args, file, (m) => warnings.push(m));
+    assert.equal(env.OPENRIG_BIND_HOST, "127.0.0.1", args.join(" "));
+    assert.match(warnings.join(), /needs a bearer token/);
+  }
   // `--host` on other commands names a remote host id, not a bind address.
-  applyDaemonDefaults({}, argv("send", "--host", "box2", "x", "hi"));
+  const send: Record<string, string | undefined> = {};
+  applyDaemonDefaults(send, argv("send", "--host", "box2", "x", "hi"), {}, () => assert.fail("no warning"));
+  assert.equal(send.OPENRIG_BIND_HOST, "127.0.0.1");
 });
 
 test("with a token, a non-loopback bind also closes the terminal routes with it", () => {
@@ -69,7 +87,7 @@ test("plantworks daemon start boots a no-kernel loopback daemon in the fork home
 
   const refused = await pw("daemon", "start", "--host", "0.0.0.0");
   assert.equal(refused.code, 2);
-  assert.match(refused.stderr, /without a bearer token/);
+  assert.match(refused.stderr, /refusing: binding the daemon on 0.0.0.0 needs a bearer token/);
 
   const started = await pw("daemon", "start");
   try {
