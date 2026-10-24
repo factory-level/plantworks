@@ -126,7 +126,10 @@ describe("config routes (User Settings v0)", () => {
     // + 1 skills.router_line.enabled (the seat-skills bootstrap line; default off).
     // + 1 instance-wide Claude compaction preparation root (#1445).
     // + 3 decisions.enabled / consumers / template_dir (slice 22 typed decisions; default off, none, shipped).
-    expect(Object.keys(body.settings).length).toBe(88);
+    // + 2 retention.stream_days / stream_max_items (slice 22 outcome 9 stream retention; default 30, 20000).
+    expect(Object.keys(body.settings).length).toBe(90);
+    expect(body.settings["retention.stream_days"]).toMatchObject({ value: 30, source: "default", defaultValue: 30 });
+    expect(body.settings["retention.stream_max_items"]).toMatchObject({ value: 20000, source: "default", defaultValue: 20000 });
     expect(body.settings["decisions.enabled"]).toMatchObject({ value: false, source: "default", defaultValue: false });
     expect(body.settings["terminal.history_limit"]).toMatchObject({ value: 10000, source: "default", defaultValue: 10000 });
     expect(body.settings).not.toHaveProperty("provider.subscription_moves");
