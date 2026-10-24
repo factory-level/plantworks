@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // PW-20: `plantworks pw team render`, the fleet view of a set of team specs. For each team: per
 // class workers.max (trains × perTrain.workers[class]), its seat names (<class>-NN@<team>) and each
-// seat's Pi files through PW-12's writeSeatFiles. Output goes only to a fresh --out directory: it
+// seat's Pi files through PW-12's writeSeatFiles, with the class's toolProfile. Output goes only to a fresh --out directory: it
 // never writes into a live OpenRig home and never touches a file it did not create.
 import { existsSync, lstatSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -66,8 +66,10 @@ export function renderFleet(teams: Map<string, TeamSpec>, out: string, governorU
     mkdirSync(home, { recursive: true });
     for (const [name, c] of Object.entries(fleet.classes)) {
       for (const seat of c.seats) {
-        writeSeatFiles({ openrigHome: home, session: seat, className: name, governorUrl, workerClass: classFromSpec(spec.classes[name]!) });
-        files.push(join(seatAgentDir(home, seat), "models.json"), join(seatAgentDir(home, seat), "settings.json"));
+        const toolProfile = spec.classes[name]!.toolProfile;
+        writeSeatFiles({ openrigHome: home, session: seat, className: name, governorUrl, workerClass: classFromSpec(spec.classes[name]!), toolProfile });
+        const dir = seatAgentDir(home, seat);
+        files.push(join(dir, "models.json"), join(dir, "settings.json"), ...(toolProfile === "trimmed" ? [join(dir, "SYSTEM.md")] : []));
       }
     }
     const fleetFile = join(home, "fleet.json");

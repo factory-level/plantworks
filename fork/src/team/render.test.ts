@@ -12,6 +12,7 @@ import { promisify } from "node:util";
 import { emitTeam } from "./command.ts";
 import { PHASE_0_1 } from "./spec.ts";
 import { fleetFor, renderFleet, seatNames } from "./render.ts";
+import { TRIMMED_SYSTEM_MD, TRIMMED_TOOLS } from "../seat/pi-seat-files.ts";
 import { API, createBroker, loadTeams } from "../broker/server.ts";
 import { openStore } from "../broker/store.ts";
 
@@ -22,7 +23,7 @@ const definition = (team: string) => ({
   perTrain: { orchestrators: 1, workers: { quick: 2, long: 1 } },
   endpoint: { url: "${PLANTWORKS_LLM_URL}", slotBudgetKey: team },
   defaultClass: "quick",
-  classes: { quick: cls({ slots: 1 }), long: cls({ slots: 0, context: { maxContextTokens: 32768, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1024, deadlineSeconds: 45 } }) },
+  classes: { quick: cls({ slots: 1 }), long: cls({ slots: 0, toolProfile: "trimmed", context: { maxContextTokens: 32768, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1024, deadlineSeconds: 45 } }) },
   events: { callbackDefault: "${PLANTWORKS_FRONTDOOR_CALLBACK}", approvalConsumer: "frontdoor" },
 });
 const platform = (...teams: string[]) => ({ ...PHASE_0_1, slotCaps: Object.fromEntries(teams.map((t) => [t, 1])) });
@@ -52,11 +53,17 @@ test("render writes fleet.json and each seat's Pi files from the team's class, u
   const teams = loadTeams(teamsDir("social-media"), platform("social-media"));
   const out = fresh();
   const files = renderFleet(teams, out, GOVERNOR, env);
-  assert.equal(files.length, 6 * 2 + 1);
+  assert.equal(files.length, 4 * 2 + 2 * 3 + 1, "trimmed long seats also get SYSTEM.md");
   assert.deepEqual(JSON.parse(readFileSync(join(out, "social-media", "fleet.json"), "utf8")), fleetFor(teams.get("social-media")!));
   const models = JSON.parse(readFileSync(join(out, "social-media", "state", "pi", "long-02@social-media", "agent", "models.json"), "utf8"));
   const [model] = models.providers.plantworks.models;
   assert.deepEqual([models.providers.plantworks.baseUrl, model.contextWindow, model.maxTokens], [GOVERNOR, 32768, 1024], "the spec class, not the built-in one");
+  // The class's toolProfile reaches the seat files: trimmed long seats, default quick seats.
+  const agent = (seat: string) => join(out, "social-media", "state", "pi", seat, "agent");
+  assert.deepEqual(JSON.parse(readFileSync(join(agent("long-01@social-media"), "settings.json"), "utf8")).defaultTools, TRIMMED_TOOLS);
+  assert.equal(readFileSync(join(agent("long-01@social-media"), "SYSTEM.md"), "utf8"), TRIMMED_SYSTEM_MD);
+  assert.equal(JSON.parse(readFileSync(join(agent("quick-01@social-media"), "settings.json"), "utf8")).defaultTools, undefined);
+  assert.equal(existsSync(join(agent("quick-01@social-media"), "SYSTEM.md")), false);
   assert.deepEqual(readdirSync(join(out, "social-media", "state", "pi")).sort(), [...fleetFor(teams.get("social-media")!).classes.long.seats, ...fleetFor(teams.get("social-media")!).classes.quick.seats].sort());
 
   // An existing team directory, with a user's file in it, is refused and left exactly as it was.
