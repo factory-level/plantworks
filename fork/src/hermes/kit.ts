@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// The Hermes integration kit's MCP server (PW-24): job_submit, job_inspect and job_cancel for
+// The Hermes integration kit's MCP server (PW-24): job_submit, job_inspect, job_cancel and job_stats for
 // one team, as a thin client of the broker. It runs beside upstream's `rig mcp serve`, never
 // inside it, and shares nothing with it. Contract: ./README.md.
 import http from "node:http";
@@ -37,6 +37,20 @@ const err = (code: string, message: string, extra: Record<string, unknown> = {})
   const data = { ok: false, code, message, ...extra };
   return { content: [{ type: "text", text: JSON.stringify(data) }], structuredContent: data, isError: true };
 };
+
+const COUNT_FIELDS = ["active", "held", "queued", "reserved", "claimed", "running"] as const;
+type Counts = Record<(typeof COUNT_FIELDS)[number], number>;
+/** The six lifecycle counts, copied one by one, or null when any is missing or not a whole number ≥ 0. */
+function counts(v: unknown): Counts | null {
+  if (!v || typeof v !== "object") return null;
+  const out = {} as Counts;
+  for (const f of COUNT_FIELDS) {
+    const n = (v as Record<string, unknown>)[f];
+    if (!Number.isInteger(n) || (n as number) < 0) return null;
+    out[f] = n as number;
+  }
+  return out;
+}
 
 export function createKit(opts: KitOptions): McpServer {
   const { team } = opts;
@@ -167,6 +181,32 @@ export function createKit(opts: KitOptions): McpServer {
     }
     if (r.status !== 200) return rejected(r);
     return ok({ jobId, state: r.body.state });
+  });
+
+  server.registerTool("job_stats", {
+    description: `Count team ${team}'s jobs by state, in total and per class. Lifecycle counts only, not observed execution.`,
+    inputSchema: {},
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  }, async () => {
+    const r = await broker("GET", "/stats");
+    if (!isReply(r)) return r;
+    if (r.status !== 200) return rejected(r);
+    // Only this team's entry, field by field. The broker's other teams, its shared slot budgets and its draining
+    // seats never pass. A reply of any other shape is refused, never passed on in part.
+    const teams = r.body.teams as Record<string, unknown> | undefined;
+    if (!teams || typeof teams !== "object" || Array.isArray(teams)) return err("broker_unavailable", "the broker sent unreadable stats");
+    if (!Object.hasOwn(teams, team)) return err("team_not_served", `the broker reports no team ${team}; this server's team is misconfigured`);
+    const mine = counts(teams[team]);
+    if (!mine) return err("broker_unavailable", "the broker sent unreadable stats");
+    const classes = (teams[team] as { classes?: unknown }).classes;
+    if (!classes || typeof classes !== "object" || Array.isArray(classes)) return err("broker_unavailable", "the broker sent unreadable stats");
+    const perClass: Record<string, Counts> = {};
+    for (const [name, c] of Object.entries(classes)) {
+      const checked = counts(c);
+      if (!checked) return err("broker_unavailable", "the broker sent unreadable stats");
+      perClass[name] = checked;
+    }
+    return ok({ team, ...mine, classes: perClass });
   });
 
   return server;

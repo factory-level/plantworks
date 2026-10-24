@@ -30,7 +30,7 @@ const problems = (edit: (d: any) => void, p = platform) => validateSpec(spec(edi
 // The kit's references stay literal: Hermes resolves them, and refuses to connect while one is unset.
 const PROFILE_CONFIG = "kanban:\n  max_in_progress_per_profile: 1\n" +
   'mcp_servers:\n  plantworks:\n    url: "${PLANTWORKS_MCP_URL}"\n    headers:\n      Authorization: "Bearer ${PLANTWORKS_MCP_TOKEN}"\n' +
-  "    tools:\n      include: [job_submit, job_inspect, job_cancel]\n";
+  "    tools:\n      include: [job_submit, job_inspect, job_cancel, job_stats]\n";
 
 test("the ADR sample is valid, and its profile carries trains × orchestrators as an integer", () => {
   const s = spec();

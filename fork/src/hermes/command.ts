@@ -19,7 +19,7 @@ export function kitOptions(env: Record<string, string | undefined>): KitOptions 
 }
 
 export function mcpVerb(pw: Command): void {
-  const mcp = pw.command("mcp").description("The Hermes integration kit: job_submit, job_inspect and job_cancel for one team");
+  const mcp = pw.command("mcp").description("The Hermes integration kit: job_submit, job_inspect, job_cancel and job_stats for one team");
   mcp
     .command("serve")
     .description("Serve the kit over stdio, or over Streamable HTTP at /mcp with --http (needs PLANTWORKS_MCP_TOKEN). Reads PLANTWORKS_TEAM, PLANTWORKS_BROKER_URL and PLANTWORKS_BROKER_TOKEN")
