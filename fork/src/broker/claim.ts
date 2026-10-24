@@ -23,6 +23,16 @@ import type { JobEnvelope } from "../contract/job.ts";
 /** A seat session as OpenRig names it, for example `dev-worker@team`. */
 export const SEAT = /^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$/;
 
+export interface QueueObservation {
+  qitemId: string;
+  state: string;
+  destinationSession: string;
+  closureReason?: string | null;
+  closureTarget?: string | null;
+  closingTransition?: { state: string; closureReason: string | null; closureTarget: string | null; actorSession: string; transitionId: number };
+  transitions: { transitionId: number; state: string; closureReason: string | null; closureTarget: string | null; actorSession: string; identityProvenance: string | null }[];
+}
+
 /** The daemon answered and refused the request: for `create`, proof that no qitem was persisted. */
 export class DaemonRefused extends Error {}
 
@@ -30,6 +40,7 @@ export class DaemonRefused extends Error {}
 export interface DaemonQueue {
   create(item: { qitemId: string; source: string; destination: string; body: string; summary: string; tags: string[] }): Promise<void>;
   claim(qitemId: string, seat: string): Promise<void>;
+  inspect(qitemId: string): Promise<QueueObservation>;
 }
 
 /**
@@ -54,9 +65,19 @@ export function daemonQueue(opts: { url: string; token?: string; fetch?: typeof 
     const message = `daemon ${path} returned ${res.status}: ${(await res.text()).slice(0, 300)}`;
     throw res.status >= 400 && res.status < 500 && res.status !== 409 ? new DaemonRefused(message) : new Error(message);
   };
+  const read = async (path: string) => {
+    const res = await f(`${opts.url.replace(/\/+$/, "")}/api/queue${path}`, { headers: { ...(opts.token ? { authorization: `Bearer ${opts.token}` } : {}) }, signal: AbortSignal.timeout(opts.timeoutMs ?? 10_000) });
+    if (!res.ok) throw new Error(`daemon ${path} returned ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    return res.json();
+  };
   return {
     create: (i) => call("/create", { qitemId: i.qitemId, sourceSession: i.source, destinationSession: i.destination, body: i.body, summary: i.summary, tags: i.tags }),
     claim: (qitemId, seat) => call(`/${encodeURIComponent(qitemId)}/claim`, { destinationSession: seat }),
+    async inspect(qitemId) {
+      const id = encodeURIComponent(qitemId);
+      const [item, transitions] = await Promise.all([read(`/${id}`), read(`/${id}/transitions`)]);
+      return { ...(item as object), transitions } as QueueObservation;
+    },
   };
 }
 

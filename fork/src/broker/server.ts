@@ -59,6 +59,7 @@ export interface BrokerOptions {
   /** Where `${NAME}` placeholders in a spec's callbackDefault are read from. Defaults to process.env. */
   env?: Record<string, string | undefined>;
   log?: (line: string) => void;
+  onListen?: (ctx: BrokerContext) => () => void;
 }
 
 const fail = (status: 400 | 401 | 404 | 409 | 413, error: string, message: string, extra: Record<string, unknown> = {}) =>
@@ -150,11 +151,13 @@ export function startBroker(opts: BrokerOptions & { host: string; port: number }
   if (!isLoopbackBind(opts.host) && !opts.token) {
     throw new Error(`refusing to bind the broker on ${opts.host} without PLANTWORKS_BROKER_TOKEN`);
   }
-  const app = createBroker(opts);
+  const emit = opts.emit ?? teamEmitters(opts.teams, opts.env ?? process.env, opts.log ?? ((l) => process.stderr.write(`${l}\n`)));
+  const app = createBroker({ ...opts, emit });
   return new Promise((resolve) => {
     const server = serve({ fetch: app.fetch, hostname: opts.host, port: opts.port }, (info) => {
       const host = info.address.includes(":") ? `[${info.address}]` : info.address;
-      resolve({ url: `http://${host}:${info.port}`, close: () => new Promise((r) => server.close(() => r())) });
+      const stop = opts.onListen?.({ store: opts.store, teams: opts.teams, emit });
+      resolve({ url: `http://${host}:${info.port}`, close: () => { stop?.(); return new Promise((r) => server.close(() => r())); } });
     });
   });
 }

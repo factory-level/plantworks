@@ -135,7 +135,24 @@ The daemon is `PLANTWORKS_DAEMON_URL` (default `http://127.0.0.1:7533`, the PW-1
 `OPENRIG_AUTH_BEARER_TOKEN` when set. Qitems are created as `PLANTWORKS_BROKER_SESSION` (default
 `plantworks-broker`). The broker names the seat in the request body, so the daemon records it as
 a claimed identity (`claimed:v1`). It never sends `X-OpenRig-Session`, which would assert the
-seat's transport identity. Closing a qitem is `done` with `closureReason: canceled`.
+seat's transport identity. The broker does not close qitems during cleanup.
+
+### Worker lifecycle (PW-21)
+
+`plantworks pw worker run --team <team> --seat <session>` claims one job at a time and polls its
+broker record. It asks for another job only after the broker reports `done`. A worker process
+exit, timeout, unreadable qitem, daemon outage, generic failure/cancellation, administrative
+closure, or `handed-off` state does not release the slot. The broker reconciler polls persisted
+qitem IDs in bounded rotating batches and can continue after a worker or broker restart.
+
+The reconciler treats a qitem as logically complete only when the exact stored qitem ID is
+returned as `done` with `no-follow-on`, has no closure target, and its closing transition matches
+the latest terminal transition with actor equal to the qitem destination and
+`identityProvenance: transport:v1`. It first confirms any matching queued reservation, then
+records broker `running` and `done`. Ambiguous evidence stays in flight. This is authenticated
+logical completion; it does not prove the Pi process exited or bound physical execution
+concurrency. An unresolved job can therefore hold a slot indefinitely and requires an operator to
+verify that work stopped before any manual recovery.
 
 ## For other cards
 
@@ -171,8 +188,8 @@ seat's transport identity. Closing a qitem is `done` with `closureReason: cancel
 
 - Event delivery is in memory (PW-10). A broker that stops while an event is still retrying
   loses that event. The job row is kept. The persistent outbox remains a follow-up.
-- Nothing writes `result` yet. The worker report path (PW-21) adds it, and the bound on the
-  stored text goes there.
+- Worker reconciliation stores only the qitem ID as its result; it does not capture the worker's
+  output or infer process exit.
 - `held` and approvals are PW-23.
 - **Nothing moves a job from `failed` to `retried` yet.** The ADR names the transition, but the
   broker has no trustworthy link from an attempt to its predecessor. Inferring one from the

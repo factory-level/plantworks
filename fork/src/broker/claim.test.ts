@@ -9,7 +9,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { emitTeam } from "../team/command.ts";
 import { PHASE_0_1 } from "../team/spec.ts";
-import { DaemonRefused, claimNextRoutes, daemonQueue, newQitemId, type DaemonQueue } from "./claim.ts";
+import { DaemonRefused, claimNextRoutes, daemonQueue, newQitemId, type DaemonQueue, type QueueObservation } from "./claim.ts";
+import { createReconciler } from "./reconcile.ts";
 import { API, createBroker, loadTeams, type Emit } from "./server.ts";
 import { openStore } from "./store.ts";
 import { parseSlotCaps, type SlotCaps } from "./slots.ts";
@@ -278,4 +279,38 @@ test("two broker connections on one SQLite file: a side transition can't free an
     a.close();
     b.close();
   }
+});
+
+test("reconciliation keeps a dead worker's slot through ambiguity and releases it only on authenticated no-follow-on completion", async () => {
+  let observation: QueueObservation = { qitemId: "qitem-test-1", state: "in-progress", destinationSession: "dev-a@team", transitions: [] };
+  const daemon = fakeDaemon({ inspect: () => observation }).daemon;
+  const t = setup(daemon, undefined, undefined, parseSlotCaps(undefined));
+  await t.submit("t_1"); await t.submit("t_2");
+  assert.equal((await t.claim("dev-a@team")).status, 200);
+  const row = t.store.get("kb-social-media-t_1-a1")!;
+  const reconcile = createReconciler(t.store, daemon, (r, s) => t.events.push([r.job_id, s]), () => {});
+  await reconcile();
+  assert.equal(t.store.get(row.job_id)!.state, "running", "active daemon work does not complete");
+  assert.equal((await t.claim("dev-b@team")).status, 429);
+
+  for (const ambiguous of [
+    { ...observation, state: "done", closureReason: "canceled", closingTransition: { transitionId: 1, state: "done", closureReason: "canceled", closureTarget: null, actorSession: "admin" }, transitions: [{ transitionId: 1, state: "done", closureReason: "canceled", closureTarget: null, actorSession: "admin", identityProvenance: "transport:v1" }] },
+    { ...observation, state: "handed-off", closureReason: "no-follow-on" },
+    { ...observation, qitemId: "different-qitem", state: "done", closureReason: "no-follow-on" },
+    { ...observation, state: "done", closureReason: "no-follow-on", closingTransition: { transitionId: 2, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-b@team" }, transitions: [{ transitionId: 2, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-b@team", identityProvenance: "transport:v1" }] },
+    { ...observation, state: "done", closureReason: "no-follow-on", closingTransition: { transitionId: 2, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-a@team" }, transitions: [{ transitionId: 2, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-a@team", identityProvenance: "claimed:v1" }] },
+    { ...observation, state: "done", closureReason: "no-follow-on", closingTransition: { transitionId: 4, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-a@team" }, transitions: [{ transitionId: 3, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-a@team", identityProvenance: "transport:v1" }] },
+  ] as QueueObservation[]) {
+    observation = ambiguous;
+    await reconcile();
+    assert.equal(t.store.get(row.job_id)!.state, "running");
+    assert.equal((await t.claim("dev-b@team")).status, 429);
+  }
+
+  observation = { ...observation, qitemId: "qitem-test-1", state: "done", closureReason: "no-follow-on", closureTarget: null,
+    closingTransition: { transitionId: 5, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-a@team" },
+    transitions: [{ transitionId: 5, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-a@team", identityProvenance: "transport:v1" }] };
+  await reconcile();
+  assert.equal(t.store.get(row.job_id)!.state, "done");
+  assert.equal((await t.claim("dev-b@team")).status, 200, "only authenticated logical completion frees the slot");
 });
