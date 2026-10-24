@@ -12,7 +12,7 @@ names where it is read and checked. Processes, paths, ports and termination are 
 |---|---|---|
 | One OpenAI-compatible base URL | `PLANTWORKS_LLM_URL`, http or https, with no credentials in the URL. For example `http://127.0.0.1:11434/v1` | `fork/src/llm/endpoint.ts:9`–`:18`. Unset, malformed or credentialed values are refused |
 | Its key, if it needs one | `PLANTWORKS_LLM_API_KEY` | `fork/src/llm/endpoint.ts:19`. Only the per-seat governor sends it. Pi never sees the URL or the key |
-| It lists its models | `GET <url>/models` | `plantworks pw llm preflight [--class <c>]` checks reachability and that the class model is served. It makes no inference call (`fork/src/llm/endpoint.ts:26`) |
+| It lists its models | `GET <url>/models` | `plantworks pw llm preflight` checks reachability and that every model the team specs name is served. With `--teams <dir>`, or `$PLANTWORKS_TEAMS_DIR`, it reads the specs as the broker does (`--platform` passes the platform file). With `--class <c>` it checks one built-in class instead. It makes no inference call (`fork/src/llm/command.ts`, `fork/src/llm/endpoint.ts:26`) |
 
 Plantworks runs no model server and manages no GPUs. Whoever runs the endpoint owns it.
 
