@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { Command } from "commander";
+import { seatLiveness } from "../seat/liveness.ts";
 
 /** One seat loop: claim one daemon-backed job and wait for broker reconciliation before claiming again. */
 export function workerVerb(pw: Command): void {
@@ -41,6 +42,18 @@ export function workerVerb(pw: Command): void {
           if (record.state === "done") break;
         }
       }
+    });
+
+  // PW-22: the liveness probe, from the seat's runner-state.json. Only a recorded Pi exit fails it.
+  worker.command("live")
+    .description("Is the seat's Pi alive, by its runner-state.json? Exit 1 only when the runner recorded that Pi exited; starting or unreadable state is not a failure")
+    .requiredOption("--seat <session>")
+    .action((opts: { seat: string }) => {
+      if (!process.env.OPENRIG_HOME) throw new Error("OPENRIG_HOME is not set, so the seat's state directory is unknown");
+      const { verdict, detail } = seatLiveness(process.env.OPENRIG_HOME, opts.seat);
+      process.stdout.write(`${opts.seat}: ${verdict}: ${detail}\n`);
+      // Nothing here touches the broker: a dead Pi frees no slot and fails no job.
+      if (verdict === "exited") process.exitCode = 1;
     });
 
   // PW-22: the preStop hook. Stops new work for the seat, then waits for what it still holds.

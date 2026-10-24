@@ -37,7 +37,7 @@ fork/container/smoke.sh [image]    # checks every role against stubs (needs Dock
 - **Health is liveness only.** The image's `HEALTHCHECK` runs `entrypoint.sh health`, which checks by role:
   - broker: `GET /healthz` (PW-22, unauthenticated) answers 200, so the broker serves and its store answers;
   - daemon: `daemon status` reports it running and not UNHEALTHY;
-  - worker: the `pw worker run` process the role started (its recorded PID) is alive.
+  - worker: the `pw worker run` process the role started (its recorded PID) is alive, and `pw worker live` finds no Pi exit recorded in the seat's `runner-state.json`. That needs the daemon's state volume at `OPENRIG_HOME`. A seat that isn't launched or ready yet doesn't fail the check, and a failed check restarts only the worker: it doesn't relaunch Pi.
 
   It says nothing about jobs, slots or any Pi run.
 - **Drain doesn't stop termination.** Use `plantworks pw worker drain --seat <seat> --timeout-s <n>` as the worker's preStop hook. It exits 0 when drained, 3 on timeout and 4 when another worker resumed the seat. A non-zero exit doesn't stop Kubernetes (or `docker stop`) from terminating the container after the grace period. Termination after 3 or 4 doesn't prove that Pi stopped, so the slot cap still counts only broker job states.
