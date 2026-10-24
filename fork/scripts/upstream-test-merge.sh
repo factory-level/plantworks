@@ -7,6 +7,11 @@ set -euo pipefail
 
 fork_remote=${FORK_REMOTE:-origin}
 branch=${SYNC_BRANCH:-sync/$(date -u +%F)}
+# The branch is force-pushed, so it must be a disposable sync/ branch, never main or the mirror.
+if [[ "$branch" != sync/?* ]] || ! git check-ref-format "refs/heads/$branch"; then
+  echo "refusing sync branch '$branch': it must be a valid sync/<name> branch" >&2
+  exit 2
+fi
 
 git fetch --no-tags "$fork_remote" main upstream-main
 main=$(git rev-parse "refs/remotes/$fork_remote/main")

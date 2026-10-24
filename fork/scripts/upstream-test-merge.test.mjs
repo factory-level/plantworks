@@ -22,7 +22,7 @@ function setup() {
   edit("a.txt", "upstream\n", "upstream base");
   git(work, "push", "-q", "origin", "HEAD:main", "HEAD:upstream-main");
   const onBranch = (b, fn) => { git(work, "switch", "-q", "-C", b, `origin/${b}`); fn(); git(work, "push", "-q", "origin", `HEAD:${b}`); git(work, "fetch", "-q"); };
-  const run = () => spawnSync("bash", [script], { cwd: work, env, encoding: "utf8" });
+  const run = (extra = {}) => spawnSync("bash", [script], { cwd: work, env: { ...env, ...extra }, encoding: "utf8" });
   const remoteRef = (ref) => spawnSync("git", ["--git-dir", remote, "rev-parse", "--verify", "-q", ref], { encoding: "utf8" }).stdout.trim();
   return { work, edit, onBranch, run, remoteRef };
 }
@@ -55,4 +55,16 @@ test("a conflict fails and pushes nothing", () => {
   assert.equal(r.status, 1);
   assert.match(r.stderr, /does not merge cleanly[\s\S]*a\.txt/);
   assert.equal(t.remoteRef("sync/test"), "");
+});
+
+test("only a sync/ branch is ever pushed, so main and the mirror can't be rewritten", () => {
+  const t = setup();
+  t.onBranch("upstream-main", () => t.edit("b.txt", "new upstream\n", "upstream moves"));
+  const before = [t.remoteRef("main"), t.remoteRef("upstream-main")];
+  for (const SYNC_BRANCH of ["main", "upstream-main", "sync/", "sync/bad..name", "refs/heads/main", "feature/x"]) {
+    const r = t.run({ SYNC_BRANCH });
+    assert.equal(r.status, 2, SYNC_BRANCH);
+    assert.match(r.stderr, /refusing sync branch/);
+  }
+  assert.deepEqual([t.remoteRef("main"), t.remoteRef("upstream-main")], before);
 });
