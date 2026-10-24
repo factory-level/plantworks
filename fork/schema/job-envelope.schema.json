@@ -9,8 +9,8 @@
   "properties": {
     "jobId": {
       "type": "string",
-      "pattern": "^kb-([A-Za-z0-9]{1,64})-([A-Za-z0-9][A-Za-z0-9-]{0,127})-a([1-9][0-9]{0,5})$",
-      "description": "kb-<board>-<cardId>-a<attempt>. The board has no '-'; the card may. Only the front door creates a new attempt."
+      "pattern": "^kb-([a-z0-9][a-z0-9_-]{0,63})-([A-Za-z0-9_]{1,64})-a([1-9][0-9]{0,5})$",
+      "description": "kb-<board>-<cardId>-a<attempt>. The board is a Hermes kanban board slug (may contain - and _); the card is a Hermes task id (no -). Only the front door creates a new attempt."
     },
     "team": {
       "type": "string",
