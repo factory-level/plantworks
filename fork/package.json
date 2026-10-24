@@ -1,0 +1,13 @@
+{
+  "name": "plantworks-fork",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check:headers": "node scripts/check-headers.mjs"
+  }
+}
