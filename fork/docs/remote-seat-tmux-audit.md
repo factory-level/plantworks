@@ -25,7 +25,9 @@ way, and what each path would do for a remote seat.
 - **Control mode is off.** The control-mode client (`tmux-control.ts`, `spawnTmuxClient` at
   `tmux-exec.ts:112`) is built only when the argv exec is the default `execArgvCommand`
   (`startup.ts:514`–`:515`), so it never runs with the router.
-- **No other executor imports.** Only `startup.ts` imports the executors. `routes/rigspec.ts:14`,
+- **No other executor wiring.** Only `startup.ts` wires an executor. `adapters/preflight-exec.ts:5`
+  and `tmux-control.ts` wrap the defaults that `startup.ts` uses only as `??` fallbacks.
+  `routes/rigspec.ts:14`,
   `domain/bootstrap-orchestrator.ts:27` and `domain/rigspec-preflight.ts:6` import helpers from
   `preflight-exec.ts`, not executors.
 - **Two direct `tmux …` shell strings outside the adapter.** One is `runtime-verifier.ts:59`
@@ -61,7 +63,7 @@ are in routed code that assumes the tmux server is on this host. They are listed
 | `domain/session-transport.ts`, `routes/rigs.ts`, `transcript-rotation.ts`, `seat-structural-activity-service.ts`, `seat-activity-service.ts`, `pane-binding-observation.ts`, `node-inventory.ts` | adapter: send, capture, list | routed. `list-* -a` fans out and fails closed (tested) |
 | `routes/transcripts.ts`, `domain/self-attach-service.ts` | adapter: `pipe-pane` transcript capture | refused for a remote seat (finding 2) |
 | `domain/seat-switch-client-service.ts` | adapter: `list-clients`, `switch-client` | listing fans out. `switch-client` on a remote target is refused by the agent's allowlist |
-| `domain/tmux-option-defaults.ts` | adapter: session and server options | session options are routed. Server-wide (`-s`/`-g`) options have no target and stay local |
+| `domain/tmux-option-defaults.ts` | adapter: session and server options, plus a local `spawnSync` (`:162`–`:166`) that picks the clipboard `copy-command` | session options are routed. Server-wide (`-s`/`-g`) options have no target and stay local. The clipboard tool is probed on this host, not the seat's (finding 4) |
 | `context-monitor.ts`, `session-registry.ts`, `whoami-service.ts`, `rig-repository.ts`, `preview/preview-rate-limiter.ts`, `adapters/tmux-server.ts`, `routes/up.ts`, `cmux-layout-service.ts`, `terminal/view-composer.ts` | text only: labels, SQL literals, attach-command text | not tmux users. Attach commands print in the default-server form (`startup.ts:519`) |
 
 ## Findings and recommendations
@@ -90,7 +92,8 @@ are in routed code that assumes the tmux server is on this host. They are listed
    - **Why:** `show-options -g`, `show-environment -g` and the server options have no target
      (`tmux.ts:372`, `:375`, `:1210`, `:1289`, `:1549`, `:1564`).
    - **Effect, by inference:** defaults such as `default-shell` used for a remote seat come
-     from the daemon's server.
+     from the daemon's server. So does the clipboard `copy-command`, which
+     `tmux-option-defaults.ts:162`–`:166` chooses by probing this host for `wl-copy` or `xclip`.
    - **Recommendation:** accept and document this, or route per-seat reads when a seat needs
      its host's defaults.
 5. **Attach commands print the local default-server form** (`startup.ts:519`). An operator
