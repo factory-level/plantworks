@@ -102,6 +102,7 @@ describe("daemon startServer", () => {
       dbPath: "/tmp/caller.sqlite",
       bearerToken: "caller-token",
       terminalBearerToken: "caller-terminal-token",
+      bindPlan: { mode: "explicit", hosts: ["192.0.2.8"], tailscaleDetected: true },
     });
 
     expect(createDaemonMock).toHaveBeenCalledWith(expect.objectContaining({
@@ -109,6 +110,7 @@ describe("daemon startServer", () => {
       dbPath: expect.not.stringContaining("caller.sqlite"),
       bearerToken: null,
       terminalBearerToken: null,
+      bindPlan: expect.objectContaining({ mode: "default", hosts: expect.arrayContaining(["127.0.0.1"]) }),
     }));
   });
 });
