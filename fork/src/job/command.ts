@@ -30,13 +30,29 @@ export function jobVerb(pw: Command): void {
         } catch (e) {
           throw new RejectedJob(`cannot read envelope: ${(e as Error).message}`);
         }
-        const result = await runJob({
-          envelope,
-          callbackUrl,
-          cwd: opts.cwd,
-          openrigHome: process.env.OPENRIG_HOME ?? join(homedir(), ".openrig"),
-          piCommand: piCommand(opts.pi ?? process.env.PLANTWORKS_PI_BIN ?? "pi"),
-        });
+        // PW-13: the first Ctrl-C/SIGTERM stops Pi and ends the job `failed` (interrupted); a second
+        // one is the default action, so a stuck stop can still be killed.
+        const interrupt = new AbortController();
+        const onSignal = () => { console.error("interrupted: stopping Pi, then reporting the job failed (interrupted)"); interrupt.abort(); };
+        process.once("SIGINT", onSignal);
+        process.once("SIGTERM", onSignal);
+        const openrigHome = process.env.OPENRIG_HOME ?? join(homedir(), ".openrig");
+        let result;
+        try {
+          result = await runJob({
+            envelope,
+            callbackUrl,
+            cwd: opts.cwd,
+            openrigHome,
+            piCommand: piCommand(opts.pi ?? process.env.PLANTWORKS_PI_BIN ?? "pi"),
+            signal: interrupt.signal,
+            // One job per home by default; PLANTWORKS_JOB_LOCK names a lock shared by every home on the host.
+            lockPath: process.env.PLANTWORKS_JOB_LOCK?.trim() || join(openrigHome, "plantworks", "job.lock"),
+          });
+        } finally {
+          process.off("SIGINT", onSignal);
+          process.off("SIGTERM", onSignal);
+        }
         console.log(JSON.stringify(result));
         process.exitCode = result.state === "done" ? 0 : 1;
       } catch (e) {
