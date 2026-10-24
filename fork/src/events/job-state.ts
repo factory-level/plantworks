@@ -59,7 +59,8 @@ export interface EmitterOptions {
   maxDelayMs?: number;
   requestTimeoutMs?: number;
   fetch?: typeof fetch;
-  sleep?: (ms: number) => Promise<void>;
+  /** Waits between attempts; it should resolve early when `signal` aborts. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   /**
    * Called for every event that could not be delivered, whether or not the caller awaits emit().
    * The event is then the caller's to record and re-emit. Defaults to logging to stderr.
@@ -68,6 +69,16 @@ export interface EmitterOptions {
 }
 
 /** An event that could not be delivered: a permanent 3xx/4xx, or the retry budget ran out. */
+/** emit() was aborted by its caller (a stopping outbox): not a delivery failure, and nothing to record. */
+export class DeliveryAborted extends Error {
+  readonly event: CloudEvent;
+  constructor(event: CloudEvent) {
+    super(`${event.id}: delivery aborted`);
+    this.name = "AbortError";
+    this.event = event;
+  }
+}
+
 export class DeliveryError extends Error {
   readonly event: CloudEvent;
   readonly attempts: number;
@@ -104,13 +115,18 @@ export function createEmitter(opts: EmitterOptions) {
   if (!/^https?:\/\//.test(opts.url) || !URL.canParse(opts.url)) throw new Error("callback url must be http(s)");
   const {
     url, maxAttempts = 8, baseDelayMs = 500, maxDelayMs = 30_000, requestTimeoutMs = 10_000,
-    fetch: doFetch = fetch, sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+    fetch: doFetch = fetch,
+    sleep = (ms, signal) => new Promise<void>((r) => {
+      const timer = setTimeout(r, ms);
+      signal?.addEventListener("abort", () => { clearTimeout(timer); r(); }, { once: true });
+    }),
     onDeliveryError = (err) => console.error(`plantworks.job.state not delivered: ${err.message}`),
   } = opts;
   let tail: Promise<unknown> = Promise.resolve();
 
-  async function deliver(event: CloudEvent): Promise<void> {
+  async function deliver(event: CloudEvent, signal?: AbortSignal): Promise<void> {
     for (let attempt = 1; ; attempt++) {
+      if (signal?.aborted) throw new DeliveryAborted(event);
       let why: string;
       let wait: number | undefined;
       try {
@@ -118,7 +134,7 @@ export function createEmitter(opts: EmitterOptions) {
           method: "POST",
           headers: { "content-type": "application/cloudevents+json", ...(opts.bearerToken ? { authorization: `Bearer ${opts.bearerToken}` } : {}) },
           body: JSON.stringify(event),
-          signal: AbortSignal.timeout(requestTimeoutMs),
+          signal: signal ? AbortSignal.any([AbortSignal.timeout(requestTimeoutMs), signal]) : AbortSignal.timeout(requestTimeoutMs),
           redirect: "manual",
         });
         await res.body?.cancel();
@@ -128,17 +144,20 @@ export function createEmitter(opts: EmitterOptions) {
         wait = retryAfterMs(res.headers.get("retry-after"));
       } catch (err) {
         if (err instanceof DeliveryError) throw err;
+        if (signal?.aborted) throw new DeliveryAborted(event);
         why = (err as Error).message;
       }
       if (attempt >= maxAttempts) throw new DeliveryError(`${event.id}: ${why} after ${attempt} attempts`, event, attempt);
-      await sleep(Math.min(maxDelayMs, wait ?? baseDelayMs * 2 ** (attempt - 1)));
+      await sleep(Math.min(maxDelayMs, wait ?? baseDelayMs * 2 ** (attempt - 1)), signal);
     }
   }
 
   return {
-    emit(event: CloudEvent): Promise<void> {
-      const run = tail.then(() => deliver(event));
-      tail = run.catch((err: DeliveryError) => {
+    /** `signal` aborts the delivery, before or between attempts or mid-request, with DeliveryAborted. */
+    emit(event: CloudEvent, o: { signal?: AbortSignal } = {}): Promise<void> {
+      const run = tail.then(() => deliver(event, o.signal));
+      tail = run.catch((err: DeliveryError | DeliveryAborted) => {
+        if (err instanceof DeliveryAborted) return;
         try { onDeliveryError(err); } catch { /* a failing hook must not stall later events */ }
       });
       return run;

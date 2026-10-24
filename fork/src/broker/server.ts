@@ -214,7 +214,14 @@ export function startBroker(opts: BrokerOptions & { host: string; port: number }
       }, SWEEP_MS);
       const replay = setInterval(() => { void outbox?.pump(); }, 1000);
       void outbox?.pump();
-      resolve({ url, close: () => new Promise((r) => { clearInterval(sweep); clearInterval(replay); stop?.(); server.close(() => r()); }) });
+      resolve({ url, close: async () => {
+        clearInterval(sweep);
+        clearInterval(replay);
+        stop?.();
+        // Abort in-flight event deliveries before the caller closes the store.
+        await outbox?.stop();
+        await new Promise<void>((r) => server.close(() => r()));
+      } });
     });
   });
 }
@@ -256,9 +263,9 @@ function teamDelivery(teams: Map<string, TeamSpec>, env: Record<string, string |
       onDeliveryError: (err) => { if (err.event.type !== "plantworks.job.state") log(`${err.event.type} not delivered: ${err.message}`); },
     })];
   }));
-  const deliver = (team: string, event: CloudEvent): Promise<void> => {
+  const deliver = (team: string, event: CloudEvent, signal?: AbortSignal): Promise<void> => {
     const emitter = emitters.get(team);
-    return emitter ? emitter.emit(event) : Promise.reject(new Error(`no event callback for team ${team}`));
+    return emitter ? emitter.emit(event, { signal }) : Promise.reject(new Error(`no event callback for team ${team}`));
   };
   // Delivery runs alongside the request; a slow consumer never holds the API.
   return { deliver, send: (team: string, event: CloudEvent) => { void deliver(team, event).catch(() => {}); } };
