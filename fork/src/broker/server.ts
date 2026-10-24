@@ -158,6 +158,10 @@ export function startBroker(opts: BrokerOptions & { host: string; port: number }
   if (!isLoopbackBind(opts.host) && !opts.token) {
     throw new Error(`refusing to bind the broker on ${opts.host} without PLANTWORKS_BROKER_TOKEN`);
   }
+  // Off loopback the listen address (0.0.0.0, a pod IP) is not what callers reach; decision URLs need the real one.
+  if (!isLoopbackBind(opts.host) && !opts.publicUrl) {
+    throw new Error(`refusing to bind the broker on ${opts.host} without --public-url or PLANTWORKS_BROKER_PUBLIC_URL (decision URLs must be reachable)`);
+  }
   const live = { ...opts }; // publicUrl is filled in once the port is known; createBroker reads it per request
   const app = createBroker(live);
   return new Promise((resolve) => {

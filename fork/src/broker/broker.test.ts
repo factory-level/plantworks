@@ -191,6 +191,7 @@ test("team specs: an invalid spec, a misplaced one or an unset placeholder stops
   const store = openStore(":memory:");
   assert.throws(() => createBroker({ store, teams: loadTeams(teamsDir(), platform), env: {} }), /not set/);
   assert.throws(() => startBroker({ store, teams: loadTeams(teamsDir(), platform), host: "0.0.0.0", port: 0, env: {} }), /refusing to bind the broker on 0.0.0.0/);
+  assert.throws(() => startBroker({ store, teams: loadTeams(teamsDir(), platform), host: "0.0.0.0", port: 0, token: "t", env: {} }), /without --public-url/, "a wildcard listen address is no decision URL");
 });
 
 // End to end through the real binary: serve, submit over HTTP, the queued event reaches the

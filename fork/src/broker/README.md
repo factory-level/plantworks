@@ -80,7 +80,9 @@ data: {jobId, team, attempt, class, decisionUrl, expiresAt, title?}
 ```
 
 - `decisionUrl` is `<public url>/plantworks/v1/jobs/{jobId}/decision`. The public URL is
-  `--public-url` or `PLANTWORKS_BROKER_PUBLIC_URL`, else the listen address.
+  `--public-url` or `PLANTWORKS_BROKER_PUBLIC_URL`. On loopback it defaults to the listen
+  address. Off loopback it is required, because `0.0.0.0` or a pod IP is not what callers reach,
+  and the broker refuses to start without it.
 - `expiresAt` is `null` when the class has no `approvalTtlSeconds`.
 - A held job is not claimable.
 
@@ -132,7 +134,10 @@ deduplicates them as it does job.state events. There is no Slack code here. The 
 - Approval events go to the team's `callbackDefault`. `events.approvalConsumer` must be
   `frontdoor`, the ADR's default (Hermes). Any other value stops the broker.
 - The broker does not check who may decide (ADR open decision 8, approvers). `by` is recorded in
-  the resolved event, not verified. Anyone holding the broker token can decide.
+  the resolved event, not verified. Anyone holding the broker token can decide. **That includes
+  the submitter**: Hermes, or PW-24's MCP server, holds the same token and could approve its own
+  job. Until an approver policy exists, `held` records a decision but does not guarantee a person
+  made it.
 
 ## Limitations
 
@@ -140,8 +145,10 @@ deduplicates them as it does job.state events. There is no Slack code here. The 
   loses that event. The job row is kept. The persistent outbox remains a follow-up.
 - Nothing writes `result` yet. The worker report path (PW-21) adds it, and the bound on the
   stored text goes there.
-- A held job cancelled through `/cancel` gets `plantworks.job.state cancelled` but no
-  `approval.resolved`. The front door cancelled it, so it already knows to drop its prompt.
+- A held job cancelled through `/cancel` gets `plantworks.job.state cancelled` (reason
+  `front-door`) but no `approval.resolved`. Any token holder can cancel, not only the front door.
+  **Consumer rule:** close any open approval prompt on `job.state cancelled`, whatever the
+  reason. A decision that arrives later gets `409 not_held`, so nothing revives the job.
 - The TTL sweep runs every second inside the broker. A broker that is down when a TTL runs out
   expires that job at its next sweep, or when a decision for it arrives.
 - **Nothing moves a job from `failed` to `retried` yet.** The ADR names the transition, but the
