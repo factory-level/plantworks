@@ -116,7 +116,8 @@ seat's transport identity. Closing a qitem is `done` with `closureReason: cancel
        while the reservation is still this seat's with this qitem (a compare-and-set).
        Otherwise it returns `"lost"`, for example when a slow seat's lease was taken over or the
        job was cancelled, and the caller closes its own qitem.
-    3. `release(jobId, seat)` drops a reservation the seat still holds.
+    3. `release(jobId, seat, qitemId)` drops a reservation only while it is still this seat's
+       with this qitem. The same seat may hold a newer reservation after its own lease ran out.
 
   A reservation leaves the job `queued` and emits nothing. Any transition clears it.
 

@@ -102,7 +102,7 @@ export function claimNextRoutes(opts: ClaimNextOptions): BrokerRoutes {
         });
         await opts.daemon.claim(qitemId, seat);
       } catch (e) {
-        store.release(job.job_id, seat);
+        store.release(job.job_id, seat, qitemId);
         await closeQuietly(qitemId, `plantworks: claim of ${job.job_id} failed`);
         return c.json({ error: "daemon_unavailable", message: `could not hand ${job.job_id} to ${seat}: ${(e as Error).message}` }, 503);
       }

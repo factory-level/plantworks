@@ -146,7 +146,7 @@ test("store: transitions are checked and atomic; reservations take the oldest jo
   const takeover = store.reserve("social-media", "quick", "seat-c", "q-3", 1000)!;
   assert.deepEqual([takeover.job.job_id, takeover.previousQitemId], ["kb-social-media-t_00000001-a1", "q-1"], "an expired lease is taken over, naming the orphan qitem");
 
-  store.release("kb-social-media-t_00000001-a1", "seat-a");
+  store.release("kb-social-media-t_00000001-a1", "seat-a", "q-1");
   assert.equal(store.get("kb-social-media-t_00000001-a1")!.reserved_by, "seat-c", "only the holder can release");
   // Seat A's late confirm loses to seat C's takeover; C's confirm wins.
   assert.equal(store.confirmClaim("kb-social-media-t_00000001-a1", "seat-a", "q-1"), "lost");

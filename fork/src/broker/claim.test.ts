@@ -179,3 +179,45 @@ test("daemonQueue speaks the daemon's queue API: seats named in the body, never 
   }
   assert.match(newQitemId(new Date("2026-10-24T12:34:56Z")), /^qitem-20261024123456-[0-9a-f]{16}$/);
 });
+
+test("a stale failure cleanup can't release the same seat's newer reservation (release is fenced by qitem)", async () => {
+  // r2's repro on the store: seat S reserves as q1, the lease runs out, S reserves again as q2,
+  // then q1's cleanup runs. q2 must survive.
+  let clock = new Date("2026-10-24T12:00:00Z");
+  const t = setup(fakeDaemon().daemon, () => clock);
+  await t.submit("t_1");
+  t.store.reserve("social-media", "quick", "dev-s@team", "q1");
+  clock = new Date(clock.getTime() + RESERVATION_LEASE_MS + 1);
+  t.store.reserve("social-media", "quick", "dev-s@team", "q2");
+  t.store.release("kb-social-media-t_1-a1", "dev-s@team", "q1");
+  assert.equal(t.store.get("kb-social-media-t_1-a1")!.reserved_qitem_id, "q2");
+
+  // The same race through claim-next: request 1's daemon call outlives its lease, request 2 (same
+  // seat) reserves the job, then request 1 fails and cleans up. Request 2 still completes the claim.
+  const t2clock = { now: new Date("2026-10-24T12:00:00Z") };
+  let release2!: () => void;
+  const second = new Promise<void>((r) => { release2 = r; });
+  let n = 0;
+  let t2: ReturnType<typeof setup>;
+  let req2: Promise<Response>;
+  const d = fakeDaemon({
+    create: async () => {
+      if (++n === 1) {
+        t2clock.now = new Date(t2clock.now.getTime() + RESERVATION_LEASE_MS + 1);
+        req2 = t2.claim("dev-s@team");
+        await new Promise((r) => setImmediate(r)); // let request 2 reserve
+        throw new Error("daemon timed out");
+      }
+      await second;
+    },
+  });
+  t2 = setup(d.daemon, () => t2clock.now);
+  await t2.submit("t_1");
+  assert.equal((await t2.claim("dev-s@team")).status, 503);
+  assert.equal(t2.store.get("kb-social-media-t_1-a1")!.reserved_by, "dev-s@team", "request 2's reservation survived request 1's cleanup");
+  assert.equal((await t2.claim("dev-other@team")).status, 204, "so no other seat can take the job mid-handoff");
+  release2();
+  const r2 = await req2!;
+  assert.equal(r2.status, 200);
+  assert.equal(t2.store.get("kb-social-media-t_1-a1")!.state, "claimed");
+});
