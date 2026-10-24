@@ -139,6 +139,25 @@ the qitem, because a closed qitem doesn't prove Pi never started. Only `confirmC
 verified evidence could be that the daemon has no qitem with that id. Nothing is ever emitted
 for a claim that didn't happen.
 
+**Recovery (W3-A, `recoverHandoff`).** A handoff that a crash or a failed call left between
+`reserve` and `confirmClaim` is finished by retrying the same steps with the same stored qitem
+id, for the same seat. Reconciliation does this once a reservation is older than
+`RESERVATION_LEASE_MS`, so a claim-next that is still in flight is never raced.
+- **The daemon answers 404:** the broker creates the qitem. A retried create is idempotent
+  upstream, so a create that did land answers as the same qitem. A refused create (4xx) releases
+  the reservation, the same rule claim-next applies.
+- **The qitem is pending for that seat:** the broker claims it.
+- **After that,** reconciliation confirms the broker-side claim only once the daemon shows the
+  qitem claimed. A pending qitem is never confirmed.
+- **Anything else** leaves the reservation as it is: no answer, a 5xx, a qitem addressed to
+  another seat, or one in another state.
+
+Age only decides when a retry is attempted. Nothing releases on age, moves the job to another
+seat, or closes a qitem.
+
+A draining seat still gets its own reserved job delivered: that job was reserved before the
+drain, and the drain waits for it.
+
 ### Slot cap (PW-19, `slots.ts`)
 
 `PLANTWORKS_SLOT_CAP` caps the jobs in flight per `slotBudgetKey`, counted across every team that
