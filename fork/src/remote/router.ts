@@ -65,9 +65,23 @@ export function createSeatRouter(opts: RouterOptions) {
       const seen = ids.get(id);
       ids.set(id, seen === undefined || seen === owner ? owner : "ambiguous");
     }
-    if (owner !== "local" && argv.some((a) => a.includes("pane_pid"))) {
-      for (const n of text.match(/\d+/g) ?? []) remotePids.add(Number(n));
-    }
+    const format = flagValue(argv, "-F") ?? argv.at(-1)!;
+    if (owner !== "local" && format.includes("#{pane_pid}")) for (const pid of panePids(format, text)) remotePids.add(pid);
+  }
+
+  /** The #{pane_pid} field of each output line, matched against the -F format. A line that doesn't match gives all its numbers. */
+  function panePids(format: string, text: string): number[] {
+    const fields: string[] = [];
+    const pattern = new RegExp(`^${format.split(/(#\{[^}]*\})/).map((part, i) => {
+      if (i % 2 === 0) return part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      fields.push(part);
+      return "(.*?)";
+    }).join("")}$`);
+    const at = fields.indexOf("#{pane_pid}");
+    return text.split("\n").filter(Boolean).flatMap((line) => {
+      const pid = pattern.exec(line)?.[at + 1];
+      return pid && /^\d+$/.test(pid) ? [Number(pid)] : (line.match(/\d+/g) ?? []).map(Number);
+    });
   }
 
   /** The agent for a target, undefined for local. Throws for an ambiguous id. */

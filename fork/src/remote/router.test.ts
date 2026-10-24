@@ -150,3 +150,15 @@ test("shell commands that don't parse strictly are refused when they name a remo
   assert.deepEqual(l.shellSeen, ["tmux -D </dev/null >/dev/null 2>&1 &", "tmux has-session -t dev $(true)"]);
   assert.equal(agent.seen.length, 0);
 });
+
+test("kill guard: only a routed #{pane_pid} field marks a remote pid; other numbers in that output don't block a local kill", { skip: process.platform !== "linux" && "uses /proc" }, async () => {
+  const format = "#{pane_id}\t#{pane_width}x#{pane_height}\t#{pane_pid}";
+  const agent = fakeAgent(() => ok(`%3\t${process.pid}x24\t4242\n`));
+  const l = fakeLocal((argv) => (argv[1] === "list-panes" ? `${process.pid}\n` : ""));
+  const r = createSeatRouter({ routes: new Map([["rs-a", agent.transport]]), local: l.local });
+  await r.argvExec(["tmux", "list-panes", "-t", "=rs-a:", "-F", format]);
+  // this process stands in for a local pane process whose pid equals the remote pane's width
+  await r.tmuxExec(`kill -TERM ${process.pid}`); // the local shell is a fake: nothing is signalled
+  assert.deepEqual(l.shellSeen, [`kill -TERM ${process.pid}`]);
+  await assert.rejects(r.tmuxExec("kill -TERM 4242"), (e) => assertRouterError(e) && /refusing to signal pid 4242/.test((e as Error).message));
+});

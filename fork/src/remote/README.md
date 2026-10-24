@@ -50,7 +50,7 @@ and a timeout surfaces as unreachable.
 | any other routed command naming a path under the temp dir | refused. Staged scripts and the scoped launch env file only exist locally |
 | shell strings | parsed strictly (bare words, `'…'`, `"…"` without `$`, `` ` `` or `\`). A routed target goes to the agent. Unparseable text that names a routed session is refused; otherwise it runs locally |
 | `tmux -D …` | always local |
-| `kill -TERM\|-KILL <pid>`, with any route configured | only for a local tmux pane's process or a descendant of one (Linux `/proc`), and never for a pid seen in routed `pane_pid` output. Otherwise it is refused |
+| `kill -TERM\|-KILL <pid>`, with any route configured | only for a local tmux pane's process or a descendant of one (Linux `/proc`), and never for a pid a routed `#{pane_pid}` field reported (other numbers in that output, such as widths, are ignored). Otherwise it is refused |
 
 The kill rule closes a real hazard. `getPanePid()` is argv-routed, so it returns a remote pid,
 and `signalPaneProcess` and `signalPid` then run a local `kill`. Without the rule, a remote
