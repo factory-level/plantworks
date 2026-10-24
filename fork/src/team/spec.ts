@@ -21,6 +21,8 @@ export interface QueueClass {
   approvalTtlSeconds?: number;
   timeoutSeconds: number;
   maxAttempts: number;
+  /** Base priority of the class's jobs, -100..100; lower is claimed first. Absent means 0. */
+  priority?: number;
 }
 
 /**
@@ -119,7 +121,7 @@ export function validateSpec(spec: unknown, platform: Platform = PHASE_0_1): str
     const at = `classes.${name}`;
     if (!DNS_NAME.test(name)) errors.push(`${at}: class names must be DNS-safe`);
     if (!obj(c)) { errors.push(`${at} must be an object`); continue; }
-    unknownFields(errors, `${at}.`, c, ["slots", "model", "context", "perCall", "toolProfile", "approval", "approvalTtlSeconds", "timeoutSeconds", "maxAttempts"]);
+    unknownFields(errors, `${at}.`, c, ["slots", "model", "context", "perCall", "toolProfile", "approval", "approvalTtlSeconds", "timeoutSeconds", "maxAttempts", "priority"]);
     const ctx = obj(c.context) ? c.context : {};
     const call = obj(c.perCall) ? c.perCall : {};
     unknownFields(errors, `${at}.context.`, ctx, ["maxContextTokens", "thinkingTokens"]);
@@ -148,6 +150,7 @@ export function validateSpec(spec: unknown, platform: Platform = PHASE_0_1): str
     if (c.approvalTtlSeconds !== undefined && !int(c.approvalTtlSeconds, 1)) errors.push(`${at}.approvalTtlSeconds must be a positive integer`);
     if (!int(c.timeoutSeconds, 1)) errors.push(`${at}.timeoutSeconds must be a positive integer`);
     if (!int(c.maxAttempts, 1)) errors.push(`${at}.maxAttempts must be a positive integer`);
+    if (c.priority !== undefined && !(int(c.priority, -100) && (c.priority as number) <= 100)) errors.push(`${at}.priority must be an integer from -100 to 100`);
     // Rule 4: there are at least as many worker seats as slots.
     const seats = perTrain && obj(perTrain.workers) && int(spec.trains, 1) ? (spec.trains as number) * (Number(perTrain.workers[name]) || 0) : 0;
     if (int(c.slots) && seats < (c.slots as number)) errors.push(`${at}: ${c.slots} slots but only ${seats} worker seats (trains × perTrain.workers.${name})`);

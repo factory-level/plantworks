@@ -3,6 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
+  JOB_PRIORITIES,
   DNS_NAME, INITIAL_STATES, JOB_ID, JOB_STATES, MAX_PROMPT, MAX_TITLE,
   canTransition, isTerminal, parseJobId, transition, validateEnvelope,
 } from "./job.ts";
@@ -98,6 +99,7 @@ test("the published JSON Schema matches the validator", () => {
         },
       },
       timeoutSeconds: { type: "integer", minimum: 1 },
+      priority: { enum: Object.keys(JOB_PRIORITIES) },
     },
   });
 });
