@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { Command } from "commander";
+import { JOB_PRIORITIES, type JobPriority } from "../contract/job.ts";
 import { classFromSpec } from "../llm/classes.ts";
 import { readEndpoint } from "../llm/endpoint.ts";
 import { startGovernor, type Governor } from "../llm/governor.ts";
@@ -30,12 +31,14 @@ export async function governSeat(opts: { team: string; seat: string; class?: str
     endpoint: readEndpoint(opts.env ?? process.env),
     workerClass,
     port: opts.port,
+    // PW-29: opt-in, for a vLLM served with --scheduling-policy priority.
+    priorityHints: (opts.env ?? process.env).PLANTWORKS_LLM_PRIORITY === "1",
     // ponytail: reported only; the job's broker state is not changed from here (fail-closed, PW-19).
     onFail: (reason) => log(`plantworks worker: ${opts.seat} hit ${reason} (consecutive model calls cut at the ${workerClass.deadlineSeconds}s deadline); the broker job is left as it is`),
   });
   try {
     const agentDir = writeSeatFiles({ openrigHome: opts.openrigHome, session: opts.seat, className, governorUrl: governor.url, workerClass, toolProfile: spec.classes[className]!.toolProfile });
-    return { governor, agentDir, className, timeoutSeconds: spec.classes[className]!.timeoutSeconds };
+    return { governor, agentDir, className, timeoutSeconds: spec.classes[className]!.timeoutSeconds, classPriority: spec.classes[className]!.priority ?? 0 };
   } catch (e) {
     await governor.close();
     throw e;
@@ -61,7 +64,7 @@ export function workerVerb(pw: Command): void {
       if (!Number.isInteger(pollMs) || pollMs < 250 || pollMs > 60_000) throw new Error("--poll-ms must be 250..60000");
       const port = Number(opts.governorPort);
       if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new Error("--governor-port must be 0..65535");
-      const { governor, agentDir, className, timeoutSeconds } = await governSeat({ team: opts.team, seat: opts.seat, class: opts.class, teamsDir: opts.teams ?? process.env.PLANTWORKS_TEAMS_DIR, platform: opts.platform ?? process.env.PLANTWORKS_PLATFORM_FILE, port, openrigHome: process.env.OPENRIG_HOME });
+      const { governor, agentDir, className, timeoutSeconds, classPriority } = await governSeat({ team: opts.team, seat: opts.seat, class: opts.class, teamsDir: opts.teams ?? process.env.PLANTWORKS_TEAMS_DIR, platform: opts.platform ?? process.env.PLANTWORKS_PLATFORM_FILE, port, openrigHome: process.env.OPENRIG_HOME });
       process.stdout.write(`${opts.seat}: class ${className} governed at ${governor.url}; Pi files in ${agentDir}\n`);
       let stopping = false;
       process.once("SIGINT", () => { stopping = true; });
@@ -127,11 +130,14 @@ export function workerVerb(pw: Command): void {
           } else if (claim.status === 204 || claim.status === 429) { await sleep(); continue; }
           else if (!claim.ok) throw new Error(`claim-next returned ${claim.status}: ${(await claim.text()).slice(0, 300)}`);
           else {
-            const claimed = await claim.json() as { job: { jobId: string }; envelope?: { timeoutSeconds?: number } };
+            const claimed = await claim.json() as { job: { jobId: string }; envelope?: { timeoutSeconds?: number; priority?: JobPriority } };
             jobId = claimed.job.jobId;
             timeoutS = claimed.envelope?.timeoutSeconds ?? timeoutSeconds;
+            // PW-29: the same effective priority the broker ordered the claim by. The seat runs one job at a time.
+            governor.setPriority(classPriority + JOB_PRIORITIES[claimed.envelope?.priority ?? "normal"]);
           }
           await waitForDone(jobId, timeoutS);
+          governor.setPriority(undefined);
         }
       } finally {
         // Pi's model calls stop working with the governor: none goes to the endpoint ungoverned.

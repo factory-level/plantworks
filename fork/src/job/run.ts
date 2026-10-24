@@ -9,7 +9,7 @@ import { DEFAULT_CLASS, classByName, type WorkerClass } from "../llm/classes.ts"
 import { readEndpoint } from "../llm/endpoint.ts";
 import { startGovernor, type Governor } from "../llm/governor.ts";
 import { writeSeatFiles } from "../seat/pi-seat-files.ts";
-import { transition, validateEnvelope, type JobState, type TransitionDetail } from "../contract/job.ts";
+import { JOB_PRIORITIES, transition, validateEnvelope, type JobState, type TransitionDetail } from "../contract/job.ts";
 import { createEmitter, jobStateEvent, type DeliveryError } from "../events/job-state.ts";
 
 /** Job timeout ceilings per class, from the ADR 0204 sample team spec (quick 900 s, long 3600 s). */
@@ -100,6 +100,7 @@ export async function runJob(opts: RunOptions): Promise<RunResult> {
     governor = await startGovernor({
       endpoint: readEndpoint(env),
       workerClass,
+      priorityHints: env.PLANTWORKS_LLM_PRIORITY === "1", priority: JOB_PRIORITIES[job.priority ?? "normal"], // PW-29: built-in classes have no base
       onFail: (reason) => stop({ state: "failed", detail: { reason, message: "3 consecutive model calls hit the deadline" } }),
     });
     const agentDir = writeSeatFiles({ openrigHome: opts.openrigHome, session: sessionFor(job.jobId), className, governorUrl: governor.url });

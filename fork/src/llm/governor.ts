@@ -24,6 +24,14 @@ export type GovernorOptions = {
   backoffMs?: { first: number; max: number };
   /** Loopback port; 0 (the default) picks a free one. A fixed port keeps the seat's baseUrl valid across restarts. */
   port?: number;
+  /**
+   * PW-29: send the current job's effective priority as the request's `priority` (vLLM priority
+   * scheduling, lower first). Off by default: vLLM refuses a non-zero priority unless it runs with
+   * `--scheduling-policy priority`, and Ollama has no priority, so nothing is sent unless enabled.
+   */
+  priorityHints?: boolean;
+  /** The first job's effective priority, for a governor that serves one job (pw job run); setPriority changes it. */
+  priority?: number;
 };
 
 /**
@@ -31,13 +39,20 @@ export type GovernorOptions = {
  * job passes its timeout; `restore` lets calls through again. A cut-off stops model calls only: it
  * doesn't stop Pi or the tools it runs.
  */
-export type Governor = { url: string; close: () => Promise<void>; cutOff: (why: string) => void; restore: () => void };
+export type Governor = {
+  url: string; close: () => Promise<void>; cutOff: (why: string) => void; restore: () => void;
+  /** PW-29: the effective priority of the job this seat runs now; undefined sends none. One job at a time per seat. */
+  setPriority: (priority: number | undefined) => void;
+};
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "transfer-encoding", "content-length", "content-encoding", "host", "authorization"]);
 
-/** Rewrites a chat/completions request body to the class budget. Non-JSON bodies pass through. */
-export function governBody(body: Buffer, c: WorkerClass): Buffer {
+/**
+ * Rewrites a chat/completions request body to the class budget. Non-JSON bodies pass through.
+ * With `priority`, sets the body's `priority` to it, replacing whatever Pi sent.
+ */
+export function governBody(body: Buffer, c: WorkerClass, priority?: number): Buffer {
   let json: Record<string, unknown>;
   try {
     json = JSON.parse(body.toString("utf8"));
@@ -52,6 +67,7 @@ export function governBody(body: Buffer, c: WorkerClass): Buffer {
     if (typeof asked === "number" && asked < c.maxOutputTokens) continue;
     if (key === "max_tokens" || asked !== undefined) json[key] = c.maxOutputTokens;
   }
+  if (priority !== undefined) json.priority = priority;
   return Buffer.from(JSON.stringify(json));
 }
 
@@ -65,6 +81,7 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
   let consecutiveDeadlines = 0;
   let failed = false;
   let cut: string | null = null;
+  let priority: number | undefined = opts.priority;
   const inFlight = new Set<AbortController>();
 
   async function handle(req: IncomingMessage, res: ServerResponse) {
@@ -72,7 +89,7 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
     for await (const chunk of req) chunks.push(chunk as Buffer);
     let body: Buffer | undefined = chunks.length ? Buffer.concat(chunks) : undefined;
     const path = req.url ?? "/";
-    if (body && req.method === "POST" && /\/(chat\/)?completions$/.test(path.split("?")[0])) body = governBody(body, c);
+    if (body && req.method === "POST" && /\/(chat\/)?completions$/.test(path.split("?")[0])) body = governBody(body, c, opts.priorityHints ? priority : undefined);
 
     const headers: Record<string, string> = {};
     for (const [k, v] of Object.entries(req.headers)) if (!HOP_BY_HOP.has(k) && typeof v === "string") headers[k] = v;
@@ -155,5 +172,6 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
       for (const a of inFlight) a.abort(new Error(`cut off: ${why}`));
     },
     restore() { cut = null; },
+    setPriority(n) { priority = n; },
   };
 }
