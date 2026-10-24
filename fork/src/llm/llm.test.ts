@@ -177,6 +177,7 @@ test("the governor totals the endpoint-reported tokens of successful completions
   });
   const g = await startGovernor({ endpoint: { url: s.url }, workerClass: CLASSES.quick, log: () => {} });
   t.after(async () => { await g.close(); await s.close(); });
+  assert.equal(g.usage(), undefined, "unknown until a call reports usage");
   for (let i = 0; i < 4; i++) await (await fetch(`${g.url}/chat/completions`, { method: "POST", body: "{}" })).text();
   await (await fetch(`${g.url}/models`)).text(); // not a completion
   assert.deepEqual(g.usage(), { promptTokens: 107, completionTokens: 23 });

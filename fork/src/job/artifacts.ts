@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // PW-13: what a job leaves in its working tree, kept as a `pw/<jobId>` branch. The commit is made
-// with git plumbing (a temporary index, write-tree, commit-tree, update-ref), so the user's checkout,
-// index and current branch are never touched. `git add -A` honours .gitignore, so ignored files such
-// as a .env never reach the commit.
+// with git plumbing on a temporary index, so the user's checkout, index and current branch are never
+// touched, and nothing is pushed.
+//
+// The job ran as this user in this work tree, so it could have written the repository's config and
+// .gitattributes. The snapshot therefore runs nothing the job could choose: no `git add` (clean
+// filters, fsmonitor), files hashed with --no-filters, hooks and fsmonitor off, and no system or
+// global config. Untracked files are listed with the standard excludes, so ignored files such as a
+// .env never reach the commit.
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, lstatSync, mkdtempSync, readlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,12 +22,29 @@ export type Artifacts =
 const IDENTITY = { GIT_AUTHOR_NAME: "Plantworks runner", GIT_AUTHOR_EMAIL: "runner@plantworks.invalid", GIT_COMMITTER_NAME: "Plantworks runner", GIT_COMMITTER_EMAIL: "runner@plantworks.invalid" };
 /** States in which HEAD isn't a settled parent; a snapshot would guess, so it is skipped. */
 const IN_PROGRESS = ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "BISECT_LOG"];
+/** Settings that would run a command the repository's config names; forced off on every call. */
+const SAFE = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.untrackedCache=false"];
 
 export const branchFor = (jobId: string) => `pw/${jobId}`;
 
-function git(cwd: string, args: string[], env: NodeJS.ProcessEnv = {}): string {
-  // Only what git needs: no caller environment reaches it.
-  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { PATH: process.env.PATH, HOME: process.env.HOME, GIT_TERMINAL_PROMPT: "0", ...env } }).trimEnd();
+/** Only what git needs: no caller environment, no system or global config. */
+const gitEnv = (extra: NodeJS.ProcessEnv = {}) => ({ PATH: process.env.PATH, HOME: process.env.HOME, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", ...extra });
+
+function git(cwd: string, args: string[], extra: NodeJS.ProcessEnv = {}, input?: string): string {
+  return execFileSync("git", [...SAFE, ...args], { cwd, encoding: "utf8", input, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"], env: gitEnv(extra), maxBuffer: 256 * 1024 * 1024 }).trimEnd();
+}
+
+/** sha256 of a blob, streamed, so its size doesn't matter. */
+function blobSha256(cwd: string, blob: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const child = spawn("git", [...SAFE, "cat-file", "blob", blob], { cwd, env: gitEnv(), stdio: ["ignore", "pipe", "pipe"] });
+    let err = "";
+    child.stdout.on("data", (d) => hash.update(d));
+    child.stderr.on("data", (d) => (err += d));
+    child.on("error", reject);
+    child.on("close", (code) => (code === 0 ? resolve(hash.digest("hex")) : reject(new Error(`git cat-file ${blob}: ${err.trim() || `exit ${code}`}`))));
+  });
 }
 
 /** The repository `cwd` is in, or why there is none to snapshot. */
@@ -48,22 +70,50 @@ export function branchConflict(cwd: string, jobId: string): string | undefined {
   }
 }
 
-/** After Pi has stopped: commits the work tree's changes against HEAD to `pw/<jobId>`, or says why not. */
-export function snapshotWork(cwd: string, jobId: string, message: string): Artifacts {
+/**
+ * After Pi has stopped: commits the work tree against HEAD to `pw/<jobId>`, or says why not.
+ * Everything that can fail runs before the branch is written, so a failure leaves no branch.
+ */
+export async function snapshotWork(cwd: string, jobId: string, message: string): Promise<Artifacts> {
   const repo = repoOf(cwd);
   if ("skipped" in repo) return { branch: null, skipped: repo.skipped };
+  const { top } = repo;
   const scratch = mkdtempSync(join(tmpdir(), "pw-index-"));
   try {
     const index = { GIT_INDEX_FILE: join(scratch, "index") };
-    git(repo.top, ["read-tree", "HEAD"], index);
-    git(repo.top, ["add", "-A"], index);
-    const tree = git(repo.top, ["write-tree"], index);
-    if (tree === git(repo.top, ["rev-parse", "HEAD^{tree}"])) return { branch: null, skipped: "the job changed nothing in the work tree" };
-    const commit = git(repo.top, ["commit-tree", tree, "-p", "HEAD", "-m", message], IDENTITY);
-    // The empty old value makes update-ref fail rather than move a branch that appeared meanwhile.
-    git(repo.top, ["update-ref", `refs/heads/${branchFor(jobId)}`, commit, ""]);
-    const changed = git(repo.top, ["diff-tree", "-r", "-z", "--no-commit-id", "--name-only", "--diff-filter=d", "HEAD", commit]).split("\0").filter(Boolean);
-    const files = changed.map((path) => ({ path, sha256: createHash("sha256").update(execFileSync("git", ["cat-file", "blob", `${commit}:${path}`], { cwd: repo.top, env: { PATH: process.env.PATH } })).digest("hex") }));
+    git(top, ["read-tree", "HEAD"], index);
+    const nul = (s: string) => s.split("\0").filter(Boolean);
+    // HEAD's paths (from the index, without touching the work tree) and untracked, not-ignored files.
+    // Submodules keep HEAD's entry; a nested repository (a path ending in /) isn't descended into.
+    const tracked = nul(git(top, ["ls-files", "-z", "-s"], index)).map((l) => ({ mode: l.slice(0, 6), path: l.slice(l.indexOf("\t") + 1) }));
+    const untracked = nul(git(top, ["ls-files", "-z", "--others", "--exclude-standard"], index)).filter((p) => !p.endsWith("/"));
+    const paths = [...tracked.filter((e) => e.mode !== "160000").map((e) => e.path), ...untracked];
+    const zero = "0".repeat(git(top, ["rev-parse", "HEAD"]).length);
+    const regular: string[] = [];
+    const lines: string[] = [];
+    for (const path of paths) {
+      let st;
+      try { st = lstatSync(join(top, path)); } catch { lines.push(`0 ${zero}\t${path}`); continue; } // deleted
+      if (st.isSymbolicLink()) lines.push(`120000 ${git(top, ["hash-object", "-w", "--no-filters", "--stdin"], {}, readlinkSync(join(top, path)))}\t${path}`);
+      else if (st.isFile()) regular.push(path);
+      else lines.push(`0 ${zero}\t${path}`); // a file replaced by a directory or something else
+    }
+    // --stdin-paths is line-based, so a path with a newline is hashed on its own.
+    const batch = regular.filter((p) => !p.includes("\n"));
+    const ids = new Map<string, string>();
+    if (batch.length) git(top, ["hash-object", "-w", "--no-filters", "--stdin-paths"], {}, `${batch.join("\n")}\n`).split("\n").forEach((id, i) => ids.set(batch[i]!, id));
+    for (const path of regular) if (!ids.has(path)) ids.set(path, git(top, ["hash-object", "-w", "--no-filters", "--", path]));
+    for (const path of regular) lines.push(`${lstatSync(join(top, path)).mode & 0o111 ? "100755" : "100644"} ${ids.get(path)}\t${path}`);
+    if (lines.length) git(top, ["update-index", "-z", "--index-info"], index, lines.map((l) => `${l}\0`).join(""));
+    const tree = git(top, ["write-tree"], index);
+    if (tree === git(top, ["rev-parse", "HEAD^{tree}"])) return { branch: null, skipped: "the job changed nothing in the work tree" };
+    const changed = nul(git(top, ["diff-tree", "-r", "-z", "--no-renames", "--name-only", "--diff-filter=d", "HEAD", tree]));
+    const blobs = changed.map((path) => git(top, ["rev-parse", `${tree}:${path}`]));
+    const files: { path: string; sha256: string }[] = [];
+    for (let i = 0; i < changed.length; i++) files.push({ path: changed[i]!, sha256: await blobSha256(top, blobs[i]!) });
+    const commit = git(top, ["commit-tree", tree, "-p", "HEAD", "-m", message], IDENTITY);
+    // Last, and only now: the empty old value makes it fail rather than move a branch that appeared meanwhile.
+    git(top, ["update-ref", `refs/heads/${branchFor(jobId)}`, commit, ""]);
     return { branch: branchFor(jobId), commit, files };
   } finally {
     rmSync(scratch, { recursive: true, force: true });

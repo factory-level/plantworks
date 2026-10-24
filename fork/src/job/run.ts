@@ -44,8 +44,8 @@ export interface RunResult {
   text: string | null;
   /** Ids of state events the consumer never acknowledged; the caller owns re-sending them. */
   undelivered: string[];
-  /** Tokens the endpoint reported for the job's calls, and the seconds from `running` to the end (0 if it never ran). */
-  usage: Usage & { wallSeconds: number };
+  /** Tokens the endpoint reported for the job's calls (null when none reported any), and the seconds from `running` to the end (0 if it never ran). */
+  usage: { promptTokens: number | null; completionTokens: number | null; wallSeconds: number };
   /** The work Pi left in the working tree, as branch pw/<jobId>, or why there is none. */
   artifacts: Artifacts;
 }
@@ -181,12 +181,12 @@ async function runLocked(opts: RunOptions, job: JobEnvelope, className: string, 
   const why = (ending.detail.outcome ?? ending.detail.reason) as string;
   let artifacts: Artifacts;
   try {
-    artifacts = snapshotWork(opts.cwd, job.jobId, `Plantworks job ${job.jobId}: ${ending.state} (${why})`);
+    artifacts = await snapshotWork(opts.cwd, job.jobId, `Plantworks job ${job.jobId}: ${ending.state} (${why})`);
   } catch (e) {
     artifacts = { branch: null, skipped: `the snapshot failed: ${(e as Error).message.split("\n")[0]}` };
   }
-  const usage = { promptTokens: tokens?.promptTokens ?? 0, completionTokens: tokens?.completionTokens ?? 0, wallSeconds: runningAt === undefined ? 0 : Math.round((Date.now() - runningAt) / 100) / 10 };
-  // The event carries the fork-defined D11 shapes only: usage without wall time, artifacts as {name, uri}.
+  const usage = { promptTokens: tokens?.promptTokens ?? null, completionTokens: tokens?.completionTokens ?? null, wallSeconds: runningAt === undefined ? 0 : Math.round((Date.now() - runningAt) / 100) / 10 };
+  // The event carries the fork-defined D11 shapes only: usage (only when known) without wall time, artifacts as {name, uri}.
   enter(ending.state, ending.detail, {
     ...(tokens ? { usage: tokens } : {}),
     ...(artifacts.branch ? { artifacts: artifacts.files.map((f) => ({ name: f.path, uri: `git:${artifacts.commit}:${f.path}` })) } : {}),

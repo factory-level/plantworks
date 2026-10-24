@@ -4,7 +4,7 @@ import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -98,17 +98,53 @@ test("an existing pw/<jobId> branch is never overwritten: the job is refused bef
   assert.equal(git(dir, "rev-parse", `pw/${jobId}`), before);
 });
 
-test("no snapshot, with the reason, outside a repository, on an unborn HEAD, mid-merge, or with nothing changed", () => {
-  assert.deepEqual(snapshotWork(mkdtempSync(join(tmpdir(), "pw-plain-")), jobId, "m"), { branch: null, skipped: "the working directory is not in a git work tree" });
+test("no snapshot, with the reason, outside a repository, on an unborn HEAD, mid-merge, or with nothing changed", async () => {
+  assert.deepEqual(await snapshotWork(mkdtempSync(join(tmpdir(), "pw-plain-")), jobId, "m"), { branch: null, skipped: "the working directory is not in a git work tree" });
   const unborn = mkdtempSync(join(tmpdir(), "pw-unborn-"));
   git(unborn, "init", "-q");
   writeFileSync(join(unborn, "f"), "x");
-  assert.match((snapshotWork(unborn, jobId, "m") as { skipped: string }).skipped, /HEAD is unborn/);
+  assert.match((await snapshotWork(unborn, jobId, "m") as { skipped: string }).skipped, /HEAD is unborn/);
   const merging = repo();
   writeFileSync(join(merging, "README.md"), "edit\n");
   writeFileSync(join(git(merging, "rev-parse", "--absolute-git-dir"), "MERGE_HEAD"), `${git(merging, "rev-parse", "HEAD")}\n`);
-  assert.match((snapshotWork(merging, jobId, "m") as { skipped: string }).skipped, /mid-operation \(MERGE_HEAD exists\)/);
+  assert.match((await snapshotWork(merging, jobId, "m") as { skipped: string }).skipped, /mid-operation \(MERGE_HEAD exists\)/);
   assert.equal(git(merging, "branch", "--list", `pw/${jobId}`), "", "no branch was made");
   const clean = repo();
-  assert.deepEqual(snapshotWork(clean, jobId, "m"), { branch: null, skipped: "the job changed nothing in the work tree" });
+  assert.deepEqual(await snapshotWork(clean, jobId, "m"), { branch: null, skipped: "the job changed nothing in the work tree" });
+});
+
+test("the snapshot runs nothing the job could plant: no clean filter, no fsmonitor, no hooks; files are taken byte for byte", async () => {
+  const dir = repo();
+  const marker = join(mkdtempSync(join(tmpdir(), "pw-marker-")), "ran");
+  // What a job could write as this user: repository config naming commands, and attributes that apply them.
+  git(dir, "config", "filter.x.clean", `sh -c 'touch ${marker}.filter; tr a-z A-Z'`);
+  git(dir, "config", "core.fsmonitor", `sh -c 'touch ${marker}.fsmonitor; exit 1' --`);
+  git(dir, "config", "core.hooksPath", join(dir, "hooks"));
+  writeFileSync(join(dir, ".gitattributes"), "*.txt filter=x\n");
+  writeFileSync(join(dir, "work.txt"), "lower case\n");
+  const result = await snapshotWork(dir, jobId, "m");
+  assert.ok(result.branch, JSON.stringify(result));
+  assert.equal(existsSync(`${marker}.filter`), false, "the clean filter never ran");
+  assert.equal(existsSync(`${marker}.fsmonitor`), false, "fsmonitor never ran");
+  assert.equal(git(dir, "cat-file", "blob", `${result.commit}:work.txt`), "lower case", "committed as the bytes in the work tree, unfiltered");
+});
+
+test("large files, deletions, symlinks and the executable bit are kept as they are", async () => {
+  const dir = repo();
+  const big = "x".repeat(3 * 1024 * 1024);
+  writeFileSync(join(dir, "big.bin"), big);
+  rmSync(join(dir, "README.md"));
+  symlinkSync("target-of-link", join(dir, "link"));
+  writeFileSync(join(dir, "run.sh"), "#!/bin/sh\n");
+  chmodSync(join(dir, "run.sh"), 0o755);
+  const result = await snapshotWork(dir, jobId, "m");
+  assert.ok(result.branch, JSON.stringify(result));
+  assert.deepEqual(result.files.map((f) => f.path).sort(), ["big.bin", "link", "run.sh"], "deletions aren't listed");
+  assert.equal(result.files.find((f) => f.path === "big.bin")!.sha256, sha(big), "a 3 MB file is hashed whole");
+  assert.equal(result.files.find((f) => f.path === "link")!.sha256, sha("target-of-link"), "a symlink is its target text");
+  const tree = git(dir, "ls-tree", "-r", result.commit);
+  assert.match(tree, /^120000 blob \S+\tlink$/m);
+  assert.match(tree, /^100755 blob \S+\trun\.sh$/m);
+  assert.doesNotMatch(tree, /README\.md/, "the deleted file is gone from the snapshot");
+  assert.equal(readFileSync(join(dir, ".gitignore"), "utf8"), ".env\n");
 });

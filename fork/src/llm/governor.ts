@@ -31,9 +31,9 @@ export type GovernorOptions = {
  * job passes its timeout; `restore` lets calls through again. A cut-off stops model calls only: it
  * doesn't stop Pi or the tools it runs.
  */
-export type Governor = { url: string; close: () => Promise<void>; cutOff: (why: string) => void; restore: () => void; usage: () => Usage };
+export type Governor = { url: string; close: () => Promise<void>; cutOff: (why: string) => void; restore: () => void; usage: () => Usage | undefined };
 
-/** Token totals the endpoint reported on the calls that went through (PW-13). Calls that reported none add nothing. */
+/** Token totals the endpoint reported on the calls that went through (PW-13). Calls that reported none add nothing; `usage()` is undefined until one does. */
 export type Usage = { promptTokens: number; completionTokens: number };
 
 /** The OpenAI `usage` in a completions response: the JSON body, or the last SSE chunk that carries one. */
@@ -86,6 +86,7 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
   let failed = false;
   let cut: string | null = null;
   const usage: Usage = { promptTokens: 0, completionTokens: 0 };
+  let reported = false;
   const inFlight = new Set<AbortController>();
 
   async function handle(req: IncomingMessage, res: ServerResponse) {
@@ -132,7 +133,7 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
             res.end();
             record.status = upstream.status;
             const u = counts ? usageOf(seen) : undefined;
-            if (u) { usage.promptTokens += u.promptTokens; usage.completionTokens += u.completionTokens; }
+            if (u) { reported = true; usage.promptTokens += u.promptTokens; usage.completionTokens += u.completionTokens; }
             return;
           }
           await upstream.body?.cancel();
@@ -185,6 +186,6 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
       for (const a of inFlight) a.abort(new Error(`cut off: ${why}`));
     },
     restore() { cut = null; },
-    usage: () => ({ ...usage }),
+    usage: () => (reported ? { ...usage } : undefined),
   };
 }
