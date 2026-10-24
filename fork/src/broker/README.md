@@ -53,7 +53,7 @@ Errors are `{error, message}`, plus `errors` for an invalid envelope and `job` f
 
 | Status | `error` |
 |---|---|
-| 400 | `invalid_envelope`, `unknown_team`, `unknown_class`, `timeout_over_ceiling`, `invalid_decision` |
+| 400 | `invalid_envelope`, `unknown_team`, `unknown_class`, `timeout_over_ceiling`, `class_disabled`, `invalid_decision` |
 | 401 | `unauthorized` |
 | 404 | `not_found` |
 | 409 | `job_conflict`, `not_cancellable`, `already_decided`, `approval_expired`, `not_held` |
@@ -117,7 +117,7 @@ will do the work, for example `dev-worker@team`. No `class` means the team's `de
 | `204` | Nothing claimable in that class |
 | `400` | `invalid_claim`, `unknown_team`, `unknown_class` |
 | `429 slot_cap_reached` | The team's `slotBudgetKey` already has its cap of jobs in flight (PW-19). The body has `{slotBudgetKey, cap, inFlight}`. Ask again later |
-| `429 class_slots_reached` | The class already has its `slots` of jobs in flight, counted like the cap. The body has `{class, slots, inFlight}`. A class with `slots: 0` is never claimed. Ask again later |
+| `429 class_slots_reached` | The class already has its `slots` of jobs in flight, counted like the cap. The body has `{class, slots, inFlight}`. Ask again later |
 | `503 daemon_refused` | The daemon answered and refused to create the qitem (a 4xx other than 409), so nothing was delivered. The reservation is released and the job is claimable again |
 | `503 handoff_unconfirmed {jobId, qitemId, seat}` | The outcome is unknown: a timeout, a 5xx or 409 on create, or a failed claim after the create. The qitem may exist and may have been delivered, so the job **stays reserved and counted** and can't be claimed again until reconciliation (PW-21) settles it |
 | `409 reservation_lost` | Shouldn't happen: reservations are never taken over, and cancel refuses a reserved job. Left for reconciliation |
@@ -146,7 +146,10 @@ absent is `normal`). `reserve` takes the lowest, then the oldest. claim-next ser
 per call, so within a call only the job offsets reorder anything.
 
 **Class slots.** claim-next also keeps each class at or below its own `slots` in flight, counted
-like the slot cap below and checked in the same transaction. The key's cap is checked first.
+like the slot cap below and checked in the same transaction. The key's cap is checked first. A
+class with `slots: 0` could never run a job, so submit refuses its jobs (`400 class_disabled`)
+rather than queue them. A spec may still declare one, like the ADR sample's `long`, and raising
+its `slots` enables it.
 
 ### Slot cap (PW-19, `slots.ts`)
 

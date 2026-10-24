@@ -82,6 +82,8 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
   db.exec(SCHEMA);
   const have = new Set((db.prepare("PRAGMA table_info(jobs)").all() as { name: string }[]).map((c) => c.name));
   for (const col of ADDED_COLUMNS) if (!have.has(col.split(" ")[0]!)) db.exec(`ALTER TABLE jobs ADD COLUMN ${col}`);
+  // reserve() orders by priority, then seq; created after the migration has added the column.
+  db.exec("CREATE INDEX IF NOT EXISTS jobs_claim_order ON jobs (team, class, state, priority, seq)");
   const iso = () => now().toISOString();
   // IMMEDIATE: the write lock is taken up front, so a read inside the transaction can't go stale
   // against another broker process on the same file. Nested calls run as savepoints.

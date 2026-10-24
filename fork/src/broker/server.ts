@@ -117,6 +117,8 @@ export function createBroker(opts: BrokerOptions): Hono & { sweepApprovals: () =
     const cls = job.class ?? spec.defaultClass;
     const qc = spec.classes[cls];
     if (!qc) return fail(400, "unknown_class", `team ${job.team} has no class ${cls}`);
+    // claim-next never has more than `slots` of a class in flight, so a 0-slot class could never run the job.
+    if (qc.slots === 0) return fail(400, "class_disabled", `class ${cls} of ${job.team} has 0 slots, so nothing in it can run; raise its slots in the team spec first`);
     if (job.timeoutSeconds !== undefined && job.timeoutSeconds > qc.timeoutSeconds) {
       return fail(400, "timeout_over_ceiling", `timeoutSeconds ${job.timeoutSeconds} exceeds the ${cls} ceiling of ${qc.timeoutSeconds}`);
     }
