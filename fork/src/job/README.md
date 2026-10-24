@@ -44,9 +44,14 @@ cover every home on the host. Fail-closed:
 - it is stale, and replaced, only when the runner and the Pi it records are both gone, so a Pi left
   running by a killed runner still holds it. The lock says `starting` just before Pi is spawned and
   names its PID right after, so a runner that dies in between leaves a lock that is refused, not
-  taken over: check for a stray Pi, then remove it by hand;
-- a lock file that can't be read as one is refused and never removed: check that no job is running,
-  then remove it by hand.
+  taken over (see below for how to clear it);
+- a lock file that can't be read as one is refused and never removed.
+
+To clear a lock the runner refuses (a runner died while starting Pi, or the file is unreadable), as
+the refusal message also says:
+1. Check that no runner Pi is left: `pgrep -af -- '--mode rpc --no-session'` prints nothing, or only
+   Pis you can account for. Stop any stray one.
+2. Remove the lock: `rm "$OPENRIG_HOME/plantworks/job.lock"` (or the `PLANTWORKS_JOB_LOCK` path).
 
 A PID can be reused, so a stale lock whose PIDs now belong to other processes is refused until it
 is removed.

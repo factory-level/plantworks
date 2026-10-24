@@ -276,7 +276,7 @@ test("a stale lock (runner and Pi both gone) is replaced; an unreadable one is r
   // A runner that died between recording "starting" and Pi's PID: a Pi may be running unrecorded.
   const starting = JSON.stringify({ runner: dead, pi: "starting", token: "y", since: "then" });
   writeFileSync(path, starting);
-  assert.throws(() => takeJobLock(path), (e: Error) => e instanceof RejectedJob && /died while starting Pi/.test(e.message));
+  assert.throws(() => takeJobLock(path), (e: Error) => e instanceof RejectedJob && /died while starting Pi/.test(e.message) && e.message.includes("pgrep -af -- '--mode rpc --no-session'") && e.message.includes(`rm '${path}'`), "the refusal says how to verify and clear it");
   assert.equal(readFileSync(path, "utf8"), starting, "and the lock is kept");
   for (const garbage of ["", "{not json", JSON.stringify({ runner: "me" })]) {
     writeFileSync(path, garbage);

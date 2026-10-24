@@ -280,6 +280,9 @@ function startPi(command: string[], spawnOpts: { cwd: string; env: NodeJS.Proces
 export interface JobLock { recordPi(pid: number | "starting" | null): void; release(): void }
 type LockRecord = { runner: number; pi: number | "starting" | null; token: string; since: string };
 
+/** What an operator does about a lock the runner won't take over. Pi runs as `pi --mode rpc --no-session`. */
+const CLEAR_LOCK = (path: string) => `To clear it: check that no runner Pi is left (pgrep -af -- '--mode rpc --no-session' prints nothing, or only Pis you can account for; stop any stray one), then remove the lock (rm '${path}')`;
+
 const alive = (pid: number) => {
   try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; }
 };
@@ -313,9 +316,9 @@ export function takeJobLock(path: string, now = () => new Date()): JobLock {
       held = JSON.parse(raw);
       if (!Number.isInteger(held.runner) || (held.pi !== null && held.pi !== "starting" && !Number.isInteger(held.pi))) throw new Error("not a lock record");
     } catch (e) {
-      throw new RejectedJob(`${path} exists but can't be read as a job lock (${(e as Error).message}); refusing to run. Remove it only after checking that no job is running`);
+      throw new RejectedJob(`${path} exists but can't be read as a job lock (${(e as Error).message}); refusing to run. ${CLEAR_LOCK(path)}`);
     }
-    if (held.pi === "starting" && !alive(held.runner)) throw new RejectedJob(`${path}: runner ${held.runner} died while starting Pi, so a Pi may still be running unrecorded; refusing to run. Check for a stray Pi, then remove the lock by hand`);
+    if (held.pi === "starting" && !alive(held.runner)) throw new RejectedJob(`${path}: runner ${held.runner} died while starting Pi, so a Pi may still be running unrecorded; refusing to run. ${CLEAR_LOCK(path)}`);
     if (alive(held.runner) || (typeof held.pi === "number" && alive(held.pi))) throw new RejectedJob(`one job at a time on this host: ${path} is held by runner ${held.runner}${typeof held.pi === "number" ? ` and Pi ${held.pi}` : ""} since ${held.since}`);
     // Stale: move it aside, then make sure what moved is the lock we judged stale, not one just taken.
     const aside = `${path}.stale.${process.pid}.${mine.token}`;
