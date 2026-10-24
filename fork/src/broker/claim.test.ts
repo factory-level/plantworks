@@ -12,6 +12,7 @@ import { PHASE_0_1 } from "../team/spec.ts";
 import { claimNextRoutes, daemonQueue, newQitemId, type DaemonQueue } from "./claim.ts";
 import { API, createBroker, loadTeams, type Emit } from "./server.ts";
 import { openStore, RESERVATION_LEASE_MS } from "./store.ts";
+import { parseSlotCaps, type SlotCaps } from "./slots.ts";
 
 // Two no-approval classes, so class routing and the default class are both visible.
 const definition = {
@@ -39,14 +40,15 @@ function fakeDaemon(hooks: { create?: () => void | Promise<void>; claim?: () => 
   return { daemon, calls };
 }
 
-function setup(daemon: DaemonQueue, now: () => Date = () => new Date(), token?: string) {
+// PW-18 tests aren't about the PW-19 cap, so they get a roomy one; slots.test.ts covers the cap.
+function setup(daemon: DaemonQueue, now: () => Date = () => new Date(), token?: string, slotCaps: SlotCaps = { fallback: 100, byKey: {} }) {
   const dir = mkdtempSync(join(tmpdir(), "pw-claim-"));
   assert.ok("files" in emitTeam(definition, dir, platform));
   const store = openStore(":memory:", now);
   const events: [string, string][] = [];
   const emit: Emit = (row, state) => events.push([row.job_id, state]);
   let n = 0;
-  const routes = [claimNextRoutes({ daemon, brokerSession: "plantworks-broker", newQitemId: () => `qitem-test-${++n}`, log: () => {} })];
+  const routes = [claimNextRoutes({ daemon, brokerSession: "plantworks-broker", slotCaps, now, newQitemId: () => `qitem-test-${++n}`, log: () => {} })];
   const app = createBroker({ store, teams: loadTeams(dir, platform), emit, routes, token });
   const call = (path: string, body: unknown, headers: Record<string, string> = {}) =>
     app.request(`${API}${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
@@ -220,4 +222,49 @@ test("a stale failure cleanup can't release the same seat's newer reservation (r
   const r2 = await req2!;
   assert.equal(r2.status, 200);
   assert.equal(t2.store.get("kb-social-media-t_1-a1")!.state, "claimed");
+});
+
+// PW-19: the slot cap, through claim-next.
+test("the default cap is 1 in flight per slot budget key; a terminal job frees its slot", async () => {
+  const t = setup(fakeDaemon().daemon, undefined, undefined, parseSlotCaps(undefined));
+  await t.submit("t_1");
+  await t.submit("t_2");
+  assert.equal((await t.claim("dev-a@team")).status, 200);
+  const capped = await t.claim("dev-b@team");
+  assert.equal(capped.status, 429);
+  assert.deepEqual(await capped.json(), { error: "slot_cap_reached", message: "slot budget social-media has 1 of 1 jobs in flight; ask again later", slotBudgetKey: "social-media", cap: 1, inFlight: 1 });
+  t.store.transition("kb-social-media-t_1-a1", "running");
+  assert.equal((await t.claim("dev-b@team")).status, 429, "running still holds the slot");
+  t.store.transition("kb-social-media-t_1-a1", "done", { outcome: "succeeded" });
+  assert.equal((await (await t.claim("dev-b@team")).json()).job.jobId, "kb-social-media-t_2-a1", "done freed it");
+});
+
+test("concurrent claims never exceed the cap, because a reservation holds its slot during the handoff", async () => {
+  let open!: () => void;
+  const gate = new Promise<void>((r) => { open = r; });
+  const t = setup(fakeDaemon({ create: () => gate }).daemon, undefined, undefined, parseSlotCaps("social-media=2"));
+  for (const card of ["t_1", "t_2", "t_3", "t_4"]) await t.submit(card);
+  // Four seats ask at once; every handoff is held at the daemon, so all four overlap.
+  const pending = ["a", "b", "c", "d"].map((s) => t.claim(`dev-${s}@team`));
+  await new Promise((r) => setImmediate(r));
+  open();
+  const statuses = (await Promise.all(pending)).map((r) => r.status).sort();
+  assert.deepEqual(statuses, [200, 200, 429, 429]);
+  assert.equal(t.store.db.prepare("SELECT COUNT(*) AS n FROM jobs WHERE state = 'claimed'").get().n, 2);
+});
+
+test("an expired reservation holds no slot, so a crashed claim can't block its own takeover at cap 1", async () => {
+  let clock = new Date("2026-10-24T12:00:00Z");
+  const t = setup(fakeDaemon().daemon, () => clock, undefined, parseSlotCaps(undefined));
+  await t.submit("t_1");
+  t.store.reserve("social-media", "quick", "dev-a@team", "qitem-orphan");
+  assert.equal((await t.claim("dev-b@team")).status, 429, "a live reservation holds the only slot");
+  clock = new Date(clock.getTime() + RESERVATION_LEASE_MS + 1);
+  assert.equal((await t.claim("dev-b@team")).status, 200);
+});
+
+test("cap 0 stops claims for a key; other keys keep their own cap", async () => {
+  const t = setup(fakeDaemon().daemon, undefined, undefined, parseSlotCaps("5,social-media=0"));
+  await t.submit("t_1");
+  assert.equal((await t.claim("dev-a@team")).status, 429);
 });

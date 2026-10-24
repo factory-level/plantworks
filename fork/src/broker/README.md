@@ -77,6 +77,7 @@ will do the work, for example `dev-worker@team`. No `class` means the team's `de
 | `200 {job, qitemId, seat, envelope}` | The oldest queued job of that class is now `claimed` by the seat. Its upstream qitem `qitemId` is addressed to the seat and claimed for it |
 | `204` | Nothing claimable in that class |
 | `400` | `invalid_claim`, `unknown_team`, `unknown_class` |
+| `429 slot_cap_reached` | The team's `slotBudgetKey` already has its cap of jobs in flight (PW-19). The body has `{slotBudgetKey, cap, inFlight}`. Ask again later |
 | `409 reservation_lost` | The job was cancelled, or its lease taken over, while it was being handed to this seat. Ask again |
 | `503 daemon_unavailable` | The daemon refused or didn't answer. The job stays claimable at once |
 
@@ -91,6 +92,27 @@ destination is that seat. Steps:
 
 Failure handling: on a daemon failure, the reservation is released and the qitem closed. On
 `lost`, the broker's own qitem is closed. Nothing is ever emitted for a claim that didn't happen.
+
+### Slot cap (PW-19, `slots.ts`)
+
+`PLANTWORKS_SLOT_CAP` caps the jobs in flight per `slotBudgetKey`, counted across every team that
+shares the key.
+
+- **Format.** `key=n` entries, comma-separated, with an optional bare `n` for every other key,
+  for example `social-media=1` or `2,social-media=1`.
+- **Unset** means the Phase 0–1 default of **1 per key**; it never means unlimited. `0` stops
+  claims for a key. A malformed value stops the broker from starting.
+- **In flight** means `claimed` or `running`, or `queued` under a live (unexpired) claim-next
+  reservation. So a handoff in progress holds its slot, while an expired reservation holds none.
+- **A slot frees** when the job reaches a terminal state.
+- **Never exceeded.** claim-next counts and reserves in one immediate SQLite transaction, so
+  concurrent claims, or another broker on the same file, can't exceed the cap.
+- **Separate from other caps.** This runtime cap is independent of the team spec's validation
+  caps (`pw team validate --platform`) and of Hermes' `kanban.max_in_progress_per_profile`.
+
+**Known gap:** a seat that dies while holding a job keeps the slot until something fails the job.
+With cap 1, that blocks the key. Failing jobs past their class `timeoutSeconds` belongs to the
+worker lifecycle (PW-21).
 
 The daemon is `PLANTWORKS_DAEMON_URL` (default `http://127.0.0.1:7533`, the PW-16 port), with
 `OPENRIG_AUTH_BEARER_TOKEN` when set. Qitems are created as `PLANTWORKS_BROKER_SESSION` (default

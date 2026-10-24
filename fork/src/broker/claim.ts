@@ -14,6 +14,7 @@
 import { randomBytes } from "node:crypto";
 import { API, jobRecord, type BrokerRoutes } from "./server.ts";
 import { RESERVATION_LEASE_MS } from "./store.ts";
+import { capFor, inFlight, parseSlotCaps, type SlotCaps } from "./slots.ts";
 import type { JobEnvelope } from "../contract/job.ts";
 
 /** A seat session as OpenRig names it, for example `dev-worker@team`. */
@@ -59,14 +60,24 @@ export interface ClaimNextOptions {
   /** The session the broker creates qitems as (PLANTWORKS_BROKER_SESSION). */
   brokerSession: string;
   leaseMs?: number;
+  /** PW-19 slot caps by slotBudgetKey. Default: 1 in flight per key. */
+  slotCaps?: SlotCaps;
+  /** The same clock as the store's, so live and expired reservations are told apart alike. */
+  now?: () => Date;
   newQitemId?: () => string;
   log?: (line: string) => void;
 }
 
-/** POST /plantworks/v1/claim-next {team, class?, seat}: 200 with the claimed job, or 204 when nothing is claimable. */
+/**
+ * POST /plantworks/v1/claim-next {team, class?, seat}: 200 with the claimed job, 204 when nothing is
+ * claimable, 429 when the team's slot budget key is at its cap (PW-19).
+ */
 export function claimNextRoutes(opts: ClaimNextOptions): BrokerRoutes {
   const log = opts.log ?? ((l) => process.stderr.write(`${l}\n`));
   const mint = opts.newQitemId ?? (() => newQitemId());
+  const caps = opts.slotCaps ?? parseSlotCaps(undefined);
+  const now = opts.now ?? (() => new Date());
+  const leaseMs = opts.leaseMs ?? RESERVATION_LEASE_MS;
   // Closing is cleanup: a failure is logged and never fails the claim it runs inside.
   const closeQuietly = async (qitemId: string, note: string) => {
     try { await opts.daemon.close(qitemId, opts.brokerSession, note); } catch (e) { log(`plantworks broker: could not close ${qitemId}: ${(e as Error).message}`); }
@@ -85,7 +96,17 @@ export function claimNextRoutes(opts: ClaimNextOptions): BrokerRoutes {
       const seat = body.seat;
 
       const qitemId = mint();
-      const reserved = store.reserve(body.team, cls, seat, qitemId, opts.leaseMs ?? RESERVATION_LEASE_MS);
+      // Count and reserve in one immediate transaction: a concurrent claim (or another broker on the
+      // same file) can't read the same count and also reserve.
+      const key = spec.endpoint.slotBudgetKey;
+      const cap = capFor(caps, key);
+      const reserved = store.db.transaction(() => {
+        const used = inFlight(store, teams, key, now(), leaseMs);
+        return used >= cap ? { capped: used } : store.reserve(body.team as string, cls, seat, qitemId, leaseMs);
+      }).immediate();
+      if (reserved && "capped" in reserved) {
+        return c.json({ error: "slot_cap_reached", message: `slot budget ${key} has ${reserved.capped} of ${cap} jobs in flight; ask again later`, slotBudgetKey: key, cap, inFlight: reserved.capped }, 429);
+      }
       if (!reserved) return c.body(null, 204);
       const { job } = reserved;
       if (reserved.previousQitemId) await closeQuietly(reserved.previousQitemId, `plantworks: the reservation on ${job.job_id} expired and passed to ${seat}`);
