@@ -7,6 +7,8 @@ import { DNS_NAME } from "../contract/job.ts";
 import { ceilingProblems, type Ceilings } from "../llm/classes.ts";
 
 export const SPEC_VERSION = "plantworks/v1";
+/** ADR 0204: the default class has at most a 16K context. */
+export const DEFAULT_CLASS_CONTEXT = 16384;
 export const APPROVALS = ["never", "per-job", "always"] as const;
 export const TOOL_PROFILES = ["default", "trimmed"] as const;
 
@@ -90,6 +92,11 @@ export function validateSpec(spec: unknown, platform: Platform = PHASE_0_1): str
   const classes = obj(spec.classes) ? spec.classes : {};
   if (!obj(spec.classes) || Object.keys(classes).length === 0) errors.push("classes must name at least one class");
   if (typeof spec.defaultClass !== "string" || !Object.hasOwn(classes, spec.defaultClass)) errors.push("defaultClass must name one of the classes");
+  // ADR 0204: the default class is the 16K one; a 32K context is opt-in by naming its class.
+  else {
+    const ctx = obj(classes[spec.defaultClass]) && obj((classes[spec.defaultClass] as Record<string, unknown>).context) ? ((classes[spec.defaultClass] as Record<string, unknown>).context as Record<string, unknown>) : {};
+    if (typeof ctx.maxContextTokens === "number" && ctx.maxContextTokens > DEFAULT_CLASS_CONTEXT) errors.push(`defaultClass ${spec.defaultClass} has a ${ctx.maxContextTokens}-token context; the default class is at most ${DEFAULT_CLASS_CONTEXT} (a larger context is opt-in by class)`);
+  }
 
   const perTrain = obj(spec.perTrain) ? spec.perTrain : null;
   if (!perTrain) errors.push("perTrain must be an object");

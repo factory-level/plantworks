@@ -45,9 +45,10 @@ plantworks pw team validate out/<team>/team.json [--platform platform.json]
 | 2 | Every model is served | `--platform` `models` |
 | 3 | Context is at most the platform maximum. Once the Pi baseline is measured (`piBaselineTokens`, plus `reserveTokens`), baseline + output + reserve must be below the context | `--platform` |
 | 4 | Worker seats ≥ slots, per class | |
-| 5 | Envelope values stay within the class ceilings | Enforced by the broker at submit, not here |
+| 5 | Envelope values stay within the class ceilings: `timeoutSeconds` ≤ the class's (`timeout_over_ceiling`), `contextBudget` ≤ its `context.maxContextTokens` (`context_over_ceiling`). The envelope has no output-token field, so there is nothing to compare with `perCall.maxOutputTokens` | Enforced by the broker at submit, not here |
 | 6 | `approval: always` has a TTL. Every spec names an `events.approvalConsumer` | |
 | 7 | Names are DNS-safe and unique | |
+| — | The `defaultClass` has at most a 16384-token context (ADR 0204: 16K is the default, 32K is opt-in by class) | |
 | 8 | Every class sets `perCall`, within the ceilings: 60 s, and 1536 output tokens (≤16K) or 1024 (32K) | `../llm/classes.ts` |
 
 Without `--platform`, the Phase 0–1 platform applies: `qwen3.5:9b` and a 32768-token maximum.

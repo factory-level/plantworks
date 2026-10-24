@@ -130,6 +130,10 @@ export function createBroker(opts: BrokerOptions): Hono & { sweepApprovals: () =
     if (job.timeoutSeconds !== undefined && job.timeoutSeconds > qc.timeoutSeconds) {
       return fail(400, "timeout_over_ceiling", `timeoutSeconds ${job.timeoutSeconds} exceeds the ${cls} ceiling of ${qc.timeoutSeconds}`);
     }
+    // Rule 5: envelope values stay within the class. contextBudget (D11) defaults to the class context and may not exceed it.
+    if (job.contextBudget !== undefined && job.contextBudget > qc.context.maxContextTokens) {
+      return fail(400, "context_over_ceiling", `contextBudget ${job.contextBudget} exceeds the ${cls} context of ${qc.context.maxContextTokens} tokens`);
+    }
     // A class that needs approval (per-job or always) holds every job until it is decided.
     const held = qc.approval !== "never";
     const priority = (qc.priority ?? 0) + JOB_PRIORITIES[job.priority ?? "normal"];

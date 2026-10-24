@@ -54,7 +54,7 @@ Errors are `{error, message}`, plus `errors` for an invalid envelope and `job` f
 
 | Status | `error` |
 |---|---|
-| 400 | `invalid_envelope`, `unknown_team`, `unknown_class`, `timeout_over_ceiling`, `class_disabled`, `invalid_decision` |
+| 400 | `invalid_envelope`, `unknown_team`, `unknown_class`, `timeout_over_ceiling`, `context_over_ceiling`, `class_disabled`, `invalid_decision` |
 | 401 | `unauthorized` |
 | 404 | `not_found` |
 | 409 | `job_conflict`, `not_cancellable`, `already_decided`, `approval_expired`, `not_held` |
