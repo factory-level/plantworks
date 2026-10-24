@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // `plantworks pw team emit` and `plantworks pw team validate`.
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Command } from "commander";
 import { PHASE_0_1, buildSpec, hermesProfileConfig, validatePlatform, validateSpec, type Platform, type TeamSpec } from "./spec.ts";
 
@@ -27,7 +28,13 @@ function writeAtomic(path: string, text: string) {
   renameSync(tmp, path);
 }
 
-/** Writes <out>/<team>/team.json and <out>/<team>/hermes-profile/config.yaml, or nothing if the spec is invalid. */
+/** The Hermes integration kit's skill (PW-24), shipped in every emitted profile. */
+const BRIDGE_SKILL = join(dirname(fileURLToPath(import.meta.url)), "..", "hermes", "plantworks-bridge", "SKILL.md");
+
+/**
+ * Writes <out>/<team>/team.json, <out>/<team>/hermes-profile/config.yaml and
+ * <out>/<team>/hermes-profile/skills/plantworks-bridge/SKILL.md, or nothing if the spec is invalid.
+ */
 export function emitTeam(definition: unknown, outDir: string, platform: Platform = PHASE_0_1): { files: string[] } | { errors: string[] } {
   if (typeof definition !== "object" || definition === null || Array.isArray(definition)) return { errors: ["team definition must be an object"] };
   if ("hermesProfile" in definition) return { errors: ["hermesProfile is derived from the team; leave it out of the definition"] };
@@ -35,10 +42,11 @@ export function emitTeam(definition: unknown, outDir: string, platform: Platform
   const errors = validateSpec(spec, platform);
   if (errors.length) return { errors };
   const dir = join(outDir, (spec as unknown as TeamSpec).team);
-  mkdirSync(join(dir, "hermes-profile"), { recursive: true });
-  const files = [join(dir, "team.json"), join(dir, "hermes-profile", "config.yaml")];
+  mkdirSync(join(dir, "hermes-profile", "skills", "plantworks-bridge"), { recursive: true });
+  const files = [join(dir, "team.json"), join(dir, "hermes-profile", "config.yaml"), join(dir, "hermes-profile", "skills", "plantworks-bridge", "SKILL.md")];
   writeAtomic(files[0], `${JSON.stringify(spec, null, 2)}\n`);
   writeAtomic(files[1], hermesProfileConfig(spec as unknown as TeamSpec));
+  writeAtomic(files[2], readFileSync(BRIDGE_SKILL, "utf8"));
   return { files };
 }
 
