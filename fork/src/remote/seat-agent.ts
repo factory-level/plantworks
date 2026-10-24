@@ -33,6 +33,8 @@ export const runTmux: TmuxRunner = (argv, stdin) => new Promise((resolve) => {
   child.stderr.on("data", (d) => (stderr += d));
   child.on("error", (e) => resolve({ code: 127, stdout, stderr: `${stderr}${e.message}\n` }));
   child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+  // tmux may exit without reading its stdin (EPIPE): its exit code and stderr are the answer, so the write error is dropped.
+  child.stdin.on("error", () => {});
   child.stdin.end(stdin ?? "");
 });
 

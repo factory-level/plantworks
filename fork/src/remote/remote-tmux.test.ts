@@ -139,3 +139,10 @@ test("end to end: startServer with the router; the daemon lists the remote seat,
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("runTmux: a command that exits without reading its stdin answers with its exit code; EPIPE never escapes", async () => {
+  const big = "x".repeat(4 * 1024 * 1024);
+  for (let i = 0; i < 5; i++) {
+    assert.deepEqual(await runTmux([process.execPath, "-e", "process.stderr.write('gone'); process.exit(3)"], big), { code: 3, stdout: "", stderr: "gone" });
+  }
+});
