@@ -35,6 +35,10 @@
       "type": "integer",
       "minimum": 1,
       "description": "Requested job timeout. The broker rejects values above the class ceiling."
+    },
+    "priority": {
+      "enum": ["urgent", "high", "normal", "low"],
+      "description": "Absent means normal. Effective priority is the class's priority plus urgent -3, high -1, normal 0, low +2; claim-next takes the lowest effective priority first, then the oldest."
     }
   }
 }

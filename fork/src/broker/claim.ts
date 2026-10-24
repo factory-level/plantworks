@@ -4,7 +4,7 @@
 // that seat asks for work, so a job is never bound to a seat that isn't ready for it.
 //
 // One claim, in order:
-// 1. reserve: the oldest unreserved queued job of (team, class), held for this seat, with a qitem
+// 1. reserve: the unreserved queued job of (team, class) with the lowest effective priority, then oldest, held for this seat, with a qitem
 //    id chosen up front. The job stays `queued` and nothing is emitted.
 // 2. Create the qitem with that id, then claim it for the seat. The daemon delivers (wakes the
 //    seat) when it creates the qitem, so from that point Pi may be working.
@@ -17,7 +17,7 @@
 // verified evidence. Nothing here closes a qitem as if that stopped Pi.
 import { randomBytes } from "node:crypto";
 import { API, jobRecord, type BrokerRoutes } from "./server.ts";
-import { capFor, inFlight, parseSlotCaps, type SlotCaps } from "./slots.ts";
+import { capFor, classInFlight, inFlight, parseSlotCaps, type SlotCaps } from "./slots.ts";
 import { RESERVATION_LEASE_MS, type JobRow, type Store } from "./store.ts";
 import type { JobEnvelope } from "../contract/job.ts";
 
@@ -108,7 +108,8 @@ export interface ClaimNextOptions {
 
 /**
  * POST /plantworks/v1/claim-next {team, class?, seat}: 200 with the claimed job, 204 when nothing is
- * claimable, 429 when the team's slot budget key is at its cap (PW-19).
+ * claimable, 429 when the team's slot budget key is at its cap (PW-19) or the class has all its
+ * `slots` in flight (PW-18).
  */
 export function claimNextRoutes(opts: ClaimNextOptions): BrokerRoutes {
   const log = opts.log ?? ((l) => process.stderr.write(`${l}\n`));
@@ -137,13 +138,20 @@ export function claimNextRoutes(opts: ClaimNextOptions): BrokerRoutes {
         // PW-22: a draining seat gets no new work. Checked in the same transaction as the reserve.
         if (store.isDraining(seat)) return { draining: true } as const;
         const used = inFlight(store, teams, key);
-        return used >= cap ? { capped: used } : store.reserve(team, cls, seat, qitemId);
+        if (used >= cap) return { capped: used };
+        // PW-18: the class's own `slots` bound, counted the same way as the key's cap.
+        const classUsed = classInFlight(store, team, cls);
+        return classUsed >= spec.classes[cls]!.slots ? { classFull: classUsed } : store.reserve(team, cls, seat, qitemId);
       }).immediate();
       if (reserved && "draining" in reserved) {
         return c.json({ error: "seat_draining", message: `${seat} is draining and takes no new work; DELETE ${API}/seats/${seat}/drain resumes it`, seat }, 409);
       }
       if (reserved && "capped" in reserved) {
         return c.json({ error: "slot_cap_reached", message: `slot budget ${key} has ${reserved.capped} of ${cap} jobs in flight; ask again later`, slotBudgetKey: key, cap, inFlight: reserved.capped }, 429);
+      }
+      if (reserved && "classFull" in reserved) {
+        const slots = spec.classes[cls]!.slots;
+        return c.json({ error: "class_slots_reached", message: `class ${cls} of ${team} has ${reserved.classFull} of ${slots} slots in flight; ask again later`, class: cls, slots, inFlight: reserved.classFull }, 429);
       }
       if (!reserved) return c.body(null, 204);
       const job = reserved;

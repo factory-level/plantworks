@@ -30,6 +30,14 @@ docker run --rm --entrypoint sh "${img}" -c 'npm ls -g --depth=0 2>/dev/null' | 
 ok "Pi is the pinned @earendil-works/pi-coding-agent@1.4.0"
 docker inspect -f '{{json .Config.Healthcheck.Test}}' "${img}" | grep -q 'entrypoint.sh","health"' || fail "the image declares no role-aware HEALTHCHECK"
 ok "the image declares the role-aware HEALTHCHECK"
+label() { docker inspect -f "{{index .Config.Labels \"org.opencontainers.image.$1\"}}" "${img}"; }
+[ "$(label source)" = "https://github.com/factory-level/plantworks" ] || fail "OCI source label is '$(label source)'"
+[ "$(label licenses)" = "Apache-2.0" ] || fail "OCI licenses label is '$(label licenses)'"
+case "$(label base.name)" in *@sha256:*) ;; *) fail "OCI base.name label '$(label base.name)' is not the digest-pinned base" ;; esac
+[ -n "$(label revision)" ] && [ "$(label revision)" != unknown ] || fail "OCI revision label is unset"
+ok "OCI labels: source, licenses=Apache-2.0, base.name=$(label base.name | cut -c1-40)..., revision=$(label revision | cut -c1-12)"
+[ "$(docker run --rm --entrypoint rig "${img}" --version)" = "${want}" ] || fail "upstream rig is not on PATH at ${want}"
+ok "upstream rig is on PATH (rig --version is ${want})"
 
 set +e
 docker run --rm -e OPENRIG_BIND_HOST=0.0.0.0 "${img}" daemon >/dev/null 2>"${work}/refuse.err"
@@ -46,6 +54,8 @@ tcp="$(docker exec "${id}-d" cat /proc/net/tcp /proc/net/tcp6 | awk '$4 == "0A" 
 echo "${tcp}" | grep -q '^0100007F:1D6D$' || fail "the daemon is not listening on 127.0.0.1:7533"
 ! echo "${tcp}" | grep ':1D6D$' | grep -qv '^0100007F:' || fail "the daemon listens beyond loopback"
 ok "daemon listens on 127.0.0.1:7533 only"
+docker exec "${id}-d" rig daemon status | grep -q "^Daemon running on port 7533" || fail "upstream rig does not reach the fork daemon on 7533"
+ok "upstream rig reaches the same Pi-only daemon (port 7533)"
 docker exec "${id}-d" /app/fork/container/entrypoint.sh health || fail "daemon health check failed"
 ok "daemon health check passes"
 
@@ -76,11 +86,16 @@ code=$?
 set -e
 [ "${code}" != 0 ] && grep -q "PLANTWORKS_TEAM" "${work}/worker.err" || fail "worker without PLANTWORKS_TEAM did not refuse"
 ok "worker role refuses to start without PLANTWORKS_TEAM/PLANTWORKS_SEAT"
-docker run -d --name "${id}-w" --network "container:${id}-d" -e PLANTWORKS_TEAM=smoke -e PLANTWORKS_SEAT=smoke-worker@smoke "${img}" worker >/dev/null
+# The endpoint is a closed loopback port: the worker's governor starts without calling it.
+docker run -d --name "${id}-w" --network "container:${id}-d" -v "${work}/teams:/etc/fork/teams:ro" -v "${work}:/w:ro" \
+  -e PLANTWORKS_PLATFORM_FILE=/w/platform.json -e PLANTWORKS_LLM_URL=http://127.0.0.1:9/v1 \
+  -e PLANTWORKS_TEAM=smoke -e PLANTWORKS_SEAT=smoke-worker@smoke "${img}" worker >/dev/null
 sleep 6
 [ "$(docker inspect -f '{{.State.Running}}' "${id}-w")" = true ] || { docker logs "${id}-w" | tail -20; fail "the worker exited"; }
 docker exec "${id}-w" /app/fork/container/entrypoint.sh health || fail "worker health check failed"
 ok "worker health check passes"
+docker exec "${id}-w" cat /var/lib/fork/state/pi/smoke-worker@smoke/agent/models.json | grep -q '"baseUrl": "http://127.0.0.1:7535"' || fail "the worker did not render the seat's models.json at its governor"
+ok "worker renders the seat's Pi files at its governor (127.0.0.1:7535)"
 # The seat smoke-worker@smoke doesn't exist, so this checks the worker loop runs, not a handoff to Pi.
 echo "   job after the worker ran: $(api /jobs/kb-smoke-t_1-a1 GET | cut -c1-160)"
 echo "   worker log: $(docker logs "${id}-w" 2>&1 | tail -n 3 | tr '\n' ' ' | cut -c1-240)"

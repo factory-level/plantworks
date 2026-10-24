@@ -20,6 +20,7 @@ fork/container/smoke.sh [image]    # checks every role against stubs (needs Dock
 - **State:** `OPENRIG_HOME=/var/lib/fork` holds the daemon home and the broker's SQLite, so mount a volume there.
 - **Team specs:** these are read from `/etc/fork/teams/<team>/team.json`; mount the emitted files read-only.
 - **Broker settings:** `PLANTWORKS_PLATFORM_FILE` and `PLANTWORKS_BROKER_DB` pass `--platform` and `--db` through.
+- **Worker settings:** the worker reads the same team specs and `PLANTWORKS_PLATFORM_FILE`, and runs its seat's call governor on `127.0.0.1:7535` (`PLANTWORKS_GOVERNOR_PORT`), so it needs `PLANTWORKS_LLM_URL` (and `PLANTWORKS_LLM_API_KEY` if the endpoint takes one). It writes the seat's Pi files under `OPENRIG_HOME`, so it shares the daemon's state volume, and it must start before the daemon launches the seat.
 - **Secrets:** `PLANTWORKS_SLOT_CAP`, `PLANTWORKS_BROKER_TOKEN`, `PLANTWORKS_LLM_URL`, `PLANTWORKS_LLM_API_KEY` and `*_CALLBACK` are passed at run time. The build adds no secret of its own.
 
 ## How the roles fit together, and what this doesn't solve
@@ -49,9 +50,11 @@ fork/container/smoke.sh [image]    # checks every role against stubs (needs Dock
 - **Pi:** `@earendil-works/pi-coding-agent@1.4.0`, whose npm integrity is checked against the platform pin before install. Pi's own dependencies are still resolved from the npm registry at build time; they aren't pinned.
 - **Source:** the build context is a clean `git archive` of one commit. Untracked and local files can't reach the image, but every file tracked at that commit does, so a secret committed to the repository would be included too; the archive is no substitute for keeping secrets out of git. The CLI and daemon are built with `npm ci` from the committed lockfile, and the fork imports their `dist/` by path.
 - **Runtime:** the image runs as uid 10001 under `tini`. It is tagged locally only, with no registry and no published digest.
+- **Labels:** `org.opencontainers.image.source` (the fork's repository), `licenses=Apache-2.0`, `base.name` (the digest-pinned base reference) and `revision` (the commit).
+- **Upstream `rig`:** it is on `PATH` next to `plantworks`/`pwctl`, for Pi seats and operators. `OPENRIG_PORT=7533` and `OPENRIG_NO_KERNEL=1` point it at the same Pi-only daemon. Because the port comes from the environment, it takes precedence over the home's config file (upstream resolves env, then file, then default): in the image, `plantworks config set daemon.port` has no effect. Change the port with `-e OPENRIG_PORT=<port>` on every container instead; the roles, health check and smoke assume 7533. Start the daemon with the `daemon` role (`plantworks daemon start`), not `rig daemon start`.
+- **CI:** Fork CI's `image-build` job runs `build.sh` and `smoke.sh` on every PR and push to main. It has no registry login and pushes nothing.
 
 ## Deliberately left out
 
 - **No multi-arch or reproducible-digest builds, and no registry push.** Add them with the deployment work (#993).
 - **Dev dependencies stay in the image.** Prune them if image size matters.
-- **No CI image build.** It takes several minutes, so `smoke.sh` runs locally. Add a CI job if images start changing often.

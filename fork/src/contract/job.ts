@@ -22,7 +22,13 @@ export interface JobEnvelope {
   class?: string;
   task: { prompt: string; title?: string };
   timeoutSeconds?: number;
+  /** Absent means normal. Added to the class's priority; lower is claimed first. */
+  priority?: JobPriority;
 }
+
+/** Job priority offsets: effective priority = class priority + offset, and claim-next takes the lowest first. */
+export const JOB_PRIORITIES = { urgent: -3, high: -1, normal: 0, low: 2 } as const;
+export type JobPriority = keyof typeof JOB_PRIORITIES;
 
 /** Detail carried by a transition. Only done, failed and cancelled carry any. */
 export type TransitionDetail =
@@ -99,7 +105,7 @@ export function validateEnvelope(input: unknown): Validation {
   const obj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
   if (!obj(input)) return { ok: false, errors: ["envelope must be an object"] };
 
-  const known = ["jobId", "team", "class", "task", "timeoutSeconds"];
+  const known = ["jobId", "team", "class", "task", "timeoutSeconds", "priority"];
   for (const k of Object.keys(input)) if (!known.includes(k)) errors.push(`unknown field ${k}`);
 
   if (typeof input.jobId !== "string" || !parseJobId(input.jobId)) errors.push("jobId must match kb-<board>-<cardId>-a<attempt>");
@@ -116,6 +122,7 @@ export function validateEnvelope(input: unknown): Validation {
 
   const t = input.timeoutSeconds;
   if (t !== undefined && !(Number.isInteger(t) && (t as number) > 0)) errors.push("timeoutSeconds must be a positive integer");
+  if (input.priority !== undefined && !Object.hasOwn(JOB_PRIORITIES, input.priority as string)) errors.push(`priority must be one of ${Object.keys(JOB_PRIORITIES).join(", ")}`);
 
   if (errors.length) return { ok: false, errors };
   return { ok: true, envelope: input as unknown as JobEnvelope };
