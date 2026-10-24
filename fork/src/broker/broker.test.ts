@@ -18,21 +18,23 @@ import Database from "better-sqlite3";
 const definition = (team = "social-media") => ({
   team,
   trains: 1,
-  perTrain: { orchestrators: 1, workers: { quick: 1, long: 1 } },
+  perTrain: { orchestrators: 1, workers: { quick: 1, long: 1, review: 1 } },
   endpoint: { url: "${PLANTWORKS_LLM_URL}", slotBudgetKey: team },
   defaultClass: "quick",
   classes: {
     quick: { slots: 1, model: "qwen3.5:9b", context: { maxContextTokens: 16384, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1536, deadlineSeconds: 60 }, approval: "never", timeoutSeconds: 900, maxAttempts: 2 },
-    long: { slots: 0, model: "qwen3.5:9b", context: { maxContextTokens: 32768, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1024, deadlineSeconds: 60 }, approval: "per-job", timeoutSeconds: 3600, maxAttempts: 1 },
-    review: { slots: 0, model: "qwen3.5:9b", context: { maxContextTokens: 16384, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1536, deadlineSeconds: 60 }, approval: "always", approvalTtlSeconds: 60, timeoutSeconds: 900, maxAttempts: 1 },
+    long: { slots: 1, model: "qwen3.5:9b", context: { maxContextTokens: 32768, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1024, deadlineSeconds: 60 }, approval: "per-job", timeoutSeconds: 3600, maxAttempts: 1 },
+    review: { slots: 1, model: "qwen3.5:9b", context: { maxContextTokens: 16384, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1536, deadlineSeconds: 60 }, approval: "always", approvalTtlSeconds: 60, timeoutSeconds: 900, maxAttempts: 1 },
+    // A valid spec may keep a class at 0 slots (the ADR sample's `long`); submit refuses its jobs.
+    off: { slots: 0, model: "qwen3.5:9b", context: { maxContextTokens: 16384, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1536, deadlineSeconds: 60 }, approval: "never", timeoutSeconds: 900, maxAttempts: 1 },
   },
   events: { callbackDefault: "${PLANTWORKS_FRONTDOOR_CALLBACK}", approvalConsumer: "frontdoor" },
 });
-const platform = { ...PHASE_0_1, slotCaps: { "social-media": 1 } };
+const platform = { ...PHASE_0_1, slotCaps: { "social-media": 3 } };
 
 function teamsDir(defs = [definition()]) {
   const dir = mkdtempSync(join(tmpdir(), "pw-teams-"));
-  for (const d of defs) assert.ok("files" in emitTeam(d, dir, { ...platform, slotCaps: { [d.team]: 1 } }));
+  for (const d of defs) assert.ok("files" in emitTeam(d, dir, { ...platform, slotCaps: { [d.team]: 3 } }));
   return dir;
 }
 
@@ -81,6 +83,7 @@ test("submit refuses what the team spec does not allow, before storing anything"
     [envelope({ team: "other-team", jobId: "kb-x-t_00000000-a1" }), "unknown_team"],
     [envelope({ class: "huge" }), "unknown_class"],
     [envelope({ timeoutSeconds: 901 }), "timeout_over_ceiling"],
+    [envelope({ class: "off" }), "class_disabled"],
   ];
   for (const [body, error] of cases) {
     const res = await t.call("POST", "/jobs", body);
@@ -181,7 +184,7 @@ test("team specs: an invalid spec, a misplaced one or an unset placeholder stops
   assert.throws(() => loadTeams(teamsDir(), PHASE_0_1), /slot/i, "validated against the platform");
   const misplaced = teamsDir([definition("news")]);
   renameSync(join(misplaced, "news"), join(misplaced, "sports"));
-  assert.throws(() => loadTeams(misplaced, { ...platform, slotCaps: { news: 1 } }), /team is news, but the directory is sports/);
+  assert.throws(() => loadTeams(misplaced, { ...platform, slotCaps: { news: 3 } }), /team is news, but the directory is sports/);
   assert.throws(() => loadTeams(mkdtempSync(join(tmpdir(), "pw-empty-"))), /no team specs/);
 
   assert.equal(expand("${A_CALLBACK}", { A_CALLBACK: "http://127.0.0.1:1/events" }), "http://127.0.0.1:1/events");
@@ -264,7 +267,7 @@ test("a real failing callback is isolated from a healthy team's outbox delivery"
   const bad = await stubConsumer(400);
   const healthy = await stubConsumer(204);
   const store = openStore(":memory:");
-  const multiPlatform = { ...PHASE_0_1, slotCaps: { a: 1, b: 1 } };
+  const multiPlatform = { ...PHASE_0_1, slotCaps: { a: 3, b: 3 } };
   const teams = loadTeams(teamsDir([definition("a"), definition("b")]), multiPlatform);
   teams.set("a", { ...teams.get("a")!, events: { ...teams.get("a")!.events, callbackDefault: "${TEAM_A_CALLBACK}" } });
   teams.set("b", { ...teams.get("b")!, events: { ...teams.get("b")!.events, callbackDefault: "${TEAM_B_CALLBACK}" } });
