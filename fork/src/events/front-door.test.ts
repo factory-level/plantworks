@@ -37,7 +37,13 @@ function world(defs: ReturnType<typeof definition>[]) {
   /** One broker process: the real HTTP server, its outbox and its 1 s replay pump. */
   const boot = async (env: Record<string, string>) => {
     const store = openStore(db);
-    const broker = await startBroker({ store, teams: loadTeams(dir, platform), env, host: "127.0.0.1", port: 0, log: () => {} });
+    let broker: Awaited<ReturnType<typeof startBroker>>;
+    try {
+      broker = await startBroker({ store, teams: loadTeams(dir, platform), env, host: "127.0.0.1", port: 0, log: () => {} });
+    } catch (e) {
+      store.close(); // a refused start (for example a missing credential) must not leak the file handle
+      throw e;
+    }
     const stop = async () => { await broker.close(); store.close(); };
     open.add(stop);
     const submit = (team: string, card: string) => fetch(`${broker.url}${API}/jobs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jobId: jobId(team, card), team, task: { prompt: `do ${card}` } }) });
@@ -126,6 +132,9 @@ test("lost acknowledgements and a broker restart redeliver the same ids, and the
   assert.deepEqual(fd.timeline(id), ["queued", "claimed", "running", "done"]);
 });
 
+// Note: broker.close() does not stop a delivery cycle already retrying (outbox.ts); the stopped
+// broker's cycle backs off until its attempts run out (about a minute), which keeps this file's
+// process alive that long after the tests pass. Reported to the outbox owner; not changed here.
 test("a restart while the consumer is down replays the pending events with their original ids", async () => {
   let down = true;
   const fd = await frontDoor({ fail: () => (down ? 503 : undefined) });
