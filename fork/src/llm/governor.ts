@@ -22,6 +22,8 @@ export type GovernorOptions = {
   log?: (record: CallRecord) => void;
   maxConsecutiveDeadlines?: number;
   backoffMs?: { first: number; max: number };
+  /** Loopback port; 0 (the default) picks a free one. A fixed port keeps the seat's baseUrl valid across restarts. */
+  port?: number;
 };
 
 export type Governor = { url: string; close: () => Promise<void> };
@@ -122,7 +124,10 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
   }
 
   const server = createServer((req, res) => void handle(req, res));
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(opts.port ?? 0, "127.0.0.1", () => { server.off("error", reject); resolve(); });
+  });
   const { port } = server.address() as AddressInfo;
   return {
     url: `http://127.0.0.1:${port}`,
