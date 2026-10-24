@@ -37,13 +37,8 @@
       "description": "Requested job timeout. The broker rejects values above the class ceiling."
     },
     "repo": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["owner", "name"],
-      "properties": {
-        "owner": { "type": "string", "minLength": 1 },
-        "name": { "type": "string", "minLength": 1 }
-      },
+      "type": "string",
+      "pattern": "^[^/]+/[^/]+$",
       "description": "Optional fork-defined repository scope; pending HarnessHG acknowledgement."
     },
     "contextBudget": {

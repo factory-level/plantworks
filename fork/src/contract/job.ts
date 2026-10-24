@@ -23,7 +23,7 @@ export interface JobEnvelope {
   task: { prompt: string; title?: string };
   timeoutSeconds?: number;
   /** Optional fork-defined repository scope; HarnessHG acknowledgement is pending. */
-  repo?: { owner: string; name: string };
+  repo?: string;
   /** Optional fork-defined token budget; absent uses the selected class context. */
   contextBudget?: number;
   /** Optional opaque origin reference; HarnessHG acknowledgement is pending. */
@@ -123,14 +123,7 @@ export function validateEnvelope(input: unknown): Validation {
   const t = input.timeoutSeconds;
   if (t !== undefined && !(Number.isInteger(t) && (t as number) > 0)) errors.push("timeoutSeconds must be a positive integer");
 
-  const repo = input.repo;
-  if (repo !== undefined) {
-    if (!obj(repo)) errors.push("repo must be an object");
-    else {
-      for (const k of Object.keys(repo)) if (k !== "owner" && k !== "name") errors.push(`unknown field repo.${k}`);
-      for (const k of ["owner", "name"]) if (typeof repo[k] !== "string" || repo[k] === "") errors.push(`repo.${k} must be a non-empty string`);
-    }
-  }
+  if (input.repo !== undefined && (typeof input.repo !== "string" || !/^[^/]+\/[^/]+$/.test(input.repo))) errors.push("repo must be an owner/name string");
   if (input.contextBudget !== undefined && !(Number.isInteger(input.contextBudget) && (input.contextBudget as number) > 0)) errors.push("contextBudget must be a positive integer");
   const origin = input.origin;
   if (origin !== undefined) {

@@ -64,7 +64,7 @@ The following additive shapes are **fork-defined pending HarnessHG acknowledgeme
 validated and documented here to make the current implementation explicit; they do not claim an
 upstream or HarnessHG contract decision.
 
-- Optional envelope `repo: { owner, name }`, `contextBudget` (positive integer tokens; absent
+- Optional envelope `repo` (an `owner/name` string), `contextBudget` (positive integer tokens; absent
   uses the selected class context), and opaque `origin: { kind, ref }`.
 - `plantworks.job.state` data may include known `qitemId`, `seat`, `summary` (at most 2 KiB in
   UTF-8), `artifacts: [{ name, uri }]`, `evidence: [{ kind, uri }]`, and `usage` with prompt and

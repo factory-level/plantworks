@@ -19,7 +19,7 @@ emitter and tests.
 | `task.prompt` | yes | What the worker is asked to do, at most 65,536 characters |
 | `task.title` | no | Short label for logs and events, at most 200 characters |
 | `timeoutSeconds` | no | Requested job timeout. The broker rejects values above the class ceiling |
-| `repo` | no | Optional `{ owner, name }` repository reference; fork-defined and pending HarnessHG acknowledgement |
+| `repo` | no | Optional `owner/name` repository string; fork-defined and pending HarnessHG acknowledgement |
 | `contextBudget` | no | Optional positive token count; when absent, the selected class context applies; fork-defined and pending HarnessHG acknowledgement |
 | `origin` | no | Optional opaque `{ kind, ref }` reference; fork-defined and pending HarnessHG acknowledgement |
 
