@@ -37,9 +37,12 @@ test("terminal transitions require their detail", () => {
 
 test("jobId parses into board, card and attempt", () => {
   assert.deepEqual(parseJobId("kb-board1-card9-a12"), { board: "board1", cardId: "card9", attempt: 12 });
-  assert.deepEqual(parseJobId("kb-b1-3f2a9c1e-77b0-4c1d-a1"), { board: "b1", cardId: "3f2a9c1e-77b0-4c1d", attempt: 1 });
-  assert.deepEqual(parseJobId("kb-b1-x-a2-a3"), { board: "b1", cardId: "x-a2", attempt: 3 });
-  for (const bad of ["kb-board-card-a0", "kb-board-card", "x-board-card-a1", "kb-board--a1", `kb-${"b".repeat(65)}-c-a1`, `kb-b-${"c".repeat(129)}-a1`]) {
+  assert.deepEqual(parseJobId("kb-social-media-t_3fa9c01e-a1"), { board: "social-media", cardId: "t_3fa9c01e", attempt: 1 });
+  assert.deepEqual(parseJobId("kb-team_ops-x-t_00ff00ff-a2"), { board: "team_ops-x", cardId: "t_00ff00ff", attempt: 2 });
+  for (const bad of [
+    "kb-board-card-a0", "kb-board-card", "x-board-card-a1", "kb-board--a1", "kb-Board-t_1-a1", "kb-_b-t_1-a1",
+    `kb-${"b".repeat(65)}-c-a1`, `kb-b-${"c".repeat(65)}-a1`,
+  ]) {
     assert.equal(parseJobId(bad), null, bad);
   }
 });

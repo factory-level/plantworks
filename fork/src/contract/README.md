@@ -13,7 +13,7 @@ emitter and tests.
 
 | Field | Required | Meaning |
 |---|---|---|
-| `jobId` | yes | `kb-<board>-<cardId>-a<attempt>`, the idempotency key. The board is 1–64 alphanumeric characters with no `-`; the card ID is up to 128 characters and may contain `-` (UUIDs work); the attempt is a positive number. Re-submitting the same `jobId` returns the existing job. Only the front door creates a new attempt (`-a2`, ...). |
+| `jobId` | yes | `kb-<board>-<cardId>-a<attempt>`, the idempotency key. The board is a Hermes kanban board slug (lowercase, 1–64 characters, may contain `-` and `_`); the card is a Hermes kanban task ID such as `t_3fa9c01e` (1–64 characters, letters, digits and `_`, no `-`); the attempt is a positive number. Example: `kb-social-media-t_3fa9c01e-a1`. Re-submitting the same `jobId` returns the existing job. Only the front door creates a new attempt (`-a2`, ...). |
 | `team` | yes | DNS-safe team name, equal to the Hermes profile name |
 | `class` | no | Queue class from the team spec. When absent, the broker uses the team's default class (the 16K class in the sample spec). The envelope never names a default itself |
 | `task.prompt` | yes | What the worker is asked to do, at most 65,536 characters |
@@ -57,9 +57,11 @@ detailed field list was not available, so these choices are **defaults, open for
 2. **`timeoutSeconds`**: the one envelope value the ADR's "within the class ceilings" rule
    applies to. Per-call budgets stay class-only.
 3. **No per-job callback**: events go to the team spec's `callbackDefault` only (see above).
-4. **`jobId` format**: the board ID has no `-`, so the ID parses unambiguously, while the card ID
-   may contain `-`. Both are length-bounded. **Needs the front-door owner to confirm** that
-   the Kanban board and card IDs fit.
+4. **`jobId` format**: matched to Hermes' kanban IDs. Board slugs follow Hermes'
+   `^[a-z0-9][a-z0-9\-_]{0,63}$`, and task IDs are `t_` plus 8 hex characters. A card ID never
+   contains `-`, so it is always the second-to-last segment and the ID parses unambiguously. A
+   card source with `-` in its IDs would need its own mapping. Checked against the Hermes
+   source; the front-door owner has not acknowledged it yet.
 5. **Failure reasons** `timeout` and `error`, next to the ADR's `call-deadline`. **Cancel
    reasons** `denied`, `approval-expired` and `front-door`.
 6. **`claimed -> failed`** is allowed, so a seat that dies before work

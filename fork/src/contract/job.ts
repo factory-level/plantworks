@@ -79,7 +79,9 @@ export function transition(from: JobState, to: JobState, detail: Record<string, 
   }
 }
 
-export const JOB_ID = /^kb-([A-Za-z0-9]{1,64})-([A-Za-z0-9][A-Za-z0-9-]{0,127})-a([1-9][0-9]{0,5})$/;
+// Board: a Hermes kanban board slug (may contain - and _). Card: a Hermes task id such as
+// t_3fa9c01e (no -), so the card is always the second-to-last segment.
+export const JOB_ID = /^kb-([a-z0-9][a-z0-9_-]{0,63})-([A-Za-z0-9_]{1,64})-a([1-9][0-9]{0,5})$/;
 export const DNS_NAME = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
 export const MAX_PROMPT = 65536;
 export const MAX_TITLE = 200;
