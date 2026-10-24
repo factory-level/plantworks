@@ -128,7 +128,15 @@ test("temp files: a routed paste ships the loaded buffer as stdin; a routed loca
     [["tmux", "load-buffer", "-b", "buf1", "-"], "hello; world"],
     [["tmux", "paste-buffer", "-t", "rs-a", "-b", "buf1", "-d", "-r", "-p"], undefined],
   ]);
-  assert.deepEqual(l.argvSeen.at(-1), ["tmux", "delete-buffer", "-b", "buf1"], "the unpasted local copy is removed");
+  assert.deepEqual(l.argvSeen, [], "a routed paste needs no local tmux server at all: the load waited for the paste");
+  // A local paste loads the same way it always did, just before pasting.
+  await r.argvExec(["tmux", "load-buffer", "-b", "buf2", path]);
+  await r.argvExec(["tmux", "paste-buffer", "-t", "dev-local", "-b", "buf2", "-d"]);
+  assert.deepEqual(l.argvSeen, [["tmux", "load-buffer", "-b", "buf2", path], ["tmux", "paste-buffer", "-t", "dev-local", "-b", "buf2", "-d"]]);
+  // A buffer loaded and then deleted without a paste touches no server.
+  await r.argvExec(["tmux", "load-buffer", "-b", "buf3", path]);
+  await r.argvExec(["tmux", "delete-buffer", "-b", "buf3"]);
+  assert.equal(l.argvSeen.length, 2);
   await assert.rejects(r.argvExec(["tmux", "send-keys", "-t", "rs-a", `sh ${tmpdir()}/openrig-send-x.sh`, "Enter"]), assertRouterError);
   await assert.rejects(r.argvExec(["tmux", "paste-buffer", "-t", "rs-a", "-b", "never-loaded"]), assertRouterError);
 

@@ -33,7 +33,8 @@ if (refused) {
   const { brokerVerb } = await import("../src/broker/command.ts");
   const { workerVerb } = await import("../src/broker/worker.ts");
   const { mcpVerb } = await import("../src/hermes/command.ts");
+  const { remoteVerbs } = await import("../src/remote/command.ts");
   // A command may set process.exitCode itself (for example a failed preflight); keep it.
-  const code = await runProgram(createPlantworksProgram([llmVerb, jobVerb, teamVerb, brokerVerb, workerVerb, mcpVerb]), process.argv);
+  const code = await runProgram(createPlantworksProgram([llmVerb, jobVerb, teamVerb, brokerVerb, workerVerb, mcpVerb, remoteVerbs]), process.argv);
   process.exitCode = process.exitCode || code;
 }
