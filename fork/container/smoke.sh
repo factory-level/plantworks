@@ -30,6 +30,14 @@ docker run --rm --entrypoint sh "${img}" -c 'npm ls -g --depth=0 2>/dev/null' | 
 ok "Pi is the pinned @earendil-works/pi-coding-agent@1.4.0"
 docker inspect -f '{{json .Config.Healthcheck.Test}}' "${img}" | grep -q 'entrypoint.sh","health"' || fail "the image declares no role-aware HEALTHCHECK"
 ok "the image declares the role-aware HEALTHCHECK"
+label() { docker inspect -f "{{index .Config.Labels \"org.opencontainers.image.$1\"}}" "${img}"; }
+[ "$(label source)" = "https://github.com/factory-level/plantworks" ] || fail "OCI source label is '$(label source)'"
+[ "$(label licenses)" = "Apache-2.0" ] || fail "OCI licenses label is '$(label licenses)'"
+case "$(label base.name)" in *@sha256:*) ;; *) fail "OCI base.name label '$(label base.name)' is not the digest-pinned base" ;; esac
+[ -n "$(label revision)" ] && [ "$(label revision)" != unknown ] || fail "OCI revision label is unset"
+ok "OCI labels: source, licenses=Apache-2.0, base.name=$(label base.name | cut -c1-40)..., revision=$(label revision | cut -c1-12)"
+[ "$(docker run --rm --entrypoint rig "${img}" --version)" = "${want}" ] || fail "upstream rig is not on PATH at ${want}"
+ok "upstream rig is on PATH (rig --version is ${want})"
 
 set +e
 docker run --rm -e OPENRIG_BIND_HOST=0.0.0.0 "${img}" daemon >/dev/null 2>"${work}/refuse.err"
@@ -46,6 +54,8 @@ tcp="$(docker exec "${id}-d" cat /proc/net/tcp /proc/net/tcp6 | awk '$4 == "0A" 
 echo "${tcp}" | grep -q '^0100007F:1D6D$' || fail "the daemon is not listening on 127.0.0.1:7533"
 ! echo "${tcp}" | grep ':1D6D$' | grep -qv '^0100007F:' || fail "the daemon listens beyond loopback"
 ok "daemon listens on 127.0.0.1:7533 only"
+docker exec "${id}-d" rig daemon status | grep -q "^Daemon running on port 7533" || fail "upstream rig does not reach the fork daemon on 7533"
+ok "upstream rig reaches the same Pi-only daemon (port 7533)"
 docker exec "${id}-d" /app/fork/container/entrypoint.sh health || fail "daemon health check failed"
 ok "daemon health check passes"
 

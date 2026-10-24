@@ -15,5 +15,5 @@ trap 'rm -rf "${ctx}"' EXIT
 git -C "${root}" archive "${commit}" | tar -x -C "${ctx}"
 
 tag="fork-runtime:${commit:0:12}"
-DOCKER_BUILDKIT=1 docker build --file "${ctx}/fork/container/Dockerfile" --build-arg "BASE_IMAGE=${base}" --tag "${tag}" "${ctx}" >&2
+DOCKER_BUILDKIT=1 docker build --file "${ctx}/fork/container/Dockerfile" --build-arg "BASE_IMAGE=${base}" --build-arg "SOURCE_COMMIT=${commit}" --tag "${tag}" "${ctx}" >&2
 echo "${tag}"
