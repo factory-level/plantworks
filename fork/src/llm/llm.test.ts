@@ -124,6 +124,21 @@ test("each call is cut at the deadline, and three in a row fail the job once wit
   await s.close();
 });
 
+test("an endpoint error between deadline aborts also breaks the run", async () => {
+  let reply: number | null = null;
+  const s = await stub((_q, res) => { if (reply) res.writeHead(reply).end(); });
+  const fails: string[] = [];
+  const g = await startGovernor({ endpoint: { url: s.url }, workerClass: { ...CLASSES.quick, deadlineSeconds: 0.1 }, onFail: (r) => fails.push(r), log: () => {} });
+  const call = async (r: number | null) => { reply = r; return (await fetch(`${g.url}/models`)).status; };
+  try {
+    assert.deepEqual([await call(null), await call(null), await call(500), await call(null)], [504, 504, 500, 504]);
+    assert.deepEqual(fails, [], "only two deadline aborts were consecutive");
+  } finally {
+    await g.close();
+    await s.close();
+  }
+});
+
 test("`plantworks pw llm preflight` checks the class model against the endpoint", async () => {
   const s = await stub(models(["qwen3.5:9b"]));
   const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
