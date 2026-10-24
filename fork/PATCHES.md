@@ -16,6 +16,8 @@ change as small as possible, so that conflicts land on one obvious line.
 
 | ID | File | Reason | Card |
 |---|---|---|---|
+| PW-31 | `packages/daemon/src/index.ts` | Pass optional daemon options through `startServer` while retaining server-owned settings | PW-31 |
+| PW-31 | `packages/daemon/test/index.test.ts` | Pin default startup behavior and supplied options passthrough | PW-31 |
 
 ## Additions outside fork/
 
