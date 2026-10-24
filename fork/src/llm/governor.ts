@@ -26,7 +26,12 @@ export type GovernorOptions = {
   port?: number;
 };
 
-export type Governor = { url: string; close: () => Promise<void> };
+/**
+ * `cutOff` refuses the seat's model calls (403) and aborts the ones in flight, for example when a
+ * job passes its timeout; `restore` lets calls through again. A cut-off stops model calls only: it
+ * doesn't stop Pi or the tools it runs.
+ */
+export type Governor = { url: string; close: () => Promise<void>; cutOff: (why: string) => void; restore: () => void };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "transfer-encoding", "content-length", "content-encoding", "host", "authorization"]);
@@ -59,6 +64,8 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
   const backoff = opts.backoffMs ?? { first: 1000, max: 30_000 };
   let consecutiveDeadlines = 0;
   let failed = false;
+  let cut: string | null = null;
+  const inFlight = new Set<AbortController>();
 
   async function handle(req: IncomingMessage, res: ServerResponse) {
     const chunks: Buffer[] = [];
@@ -72,7 +79,15 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
     if (opts.endpoint.apiKey) headers.authorization = `Bearer ${opts.endpoint.apiKey}`;
 
     const record: CallRecord = { method: req.method ?? "GET", path, status: 0, holdMs: 0, waitMs: 0, retries503: 0, deadline: false };
+    const refuse = () => {
+      record.status = 403;
+      if (res.headersSent) { res.destroy(); return; }
+      res.writeHead(403, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: `model calls are cut off: ${cut}`, type: "governor" } }));
+    };
+    if (cut) { refuse(); log(record); return; }
     const abort = new AbortController();
+    inFlight.add(abort);
     res.on("close", () => abort.abort(new Error("client went away")));
     try {
       for (let delay = backoff.first; ; delay = Math.min(delay * 2, backoff.max)) {
@@ -99,17 +114,20 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
         record.retries503++;
         record.waitMs += delay;
         await sleep(delay);
+        if (cut) { refuse(); return; }
         if (abort.signal.aborted) return;
       }
     } catch (e) {
-      if (!res.headersSent) {
+      if (cut && !record.deadline) refuse();
+      else if (!res.headersSent) {
         res.writeHead(record.deadline ? 504 : 502, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { message: record.deadline ? `call exceeded the ${c.deadlineSeconds}s deadline` : `endpoint error: ${(e as Error).message}`, type: "governor" } }));
       } else {
         res.destroy();
       }
-      record.status = record.deadline ? 504 : 502;
+      if (record.status !== 403) record.status = record.deadline ? 504 : 502;
     } finally {
+      inFlight.delete(abort);
       log(record);
       if (record.deadline) {
         if (++consecutiveDeadlines >= limit && !failed) {
@@ -132,5 +150,10 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
   return {
     url: `http://127.0.0.1:${port}`,
     close: () => new Promise((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }),
+    cutOff(why) {
+      cut = why;
+      for (const a of inFlight) a.abort(new Error(`cut off: ${why}`));
+    },
+    restore() { cut = null; },
   };
 }
