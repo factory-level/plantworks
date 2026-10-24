@@ -1,0 +1,10 @@
+Plantworks
+Copyright 2026 The Plantworks contributors
+
+This product is a fork of OpenRig (https://github.com/mvschwarz/openrig),
+which is licensed under the Apache License, Version 2.0. The upstream
+copyright notice is kept in the repository's LICENSE file.
+
+Files under fork/ are original to this fork and are licensed under the
+Apache License, Version 2.0. Every other file is upstream OpenRig code,
+unchanged unless it is listed in fork/PATCHES.md.
