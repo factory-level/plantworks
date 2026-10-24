@@ -57,7 +57,7 @@ export function createSeatRouter(opts: RouterOptions) {
   /** Numbers seen in routed pane_pid output: never signalled locally, even when a local pid matches. */
   const remotePids = new Set<number>();
   /** Buffers loaded locally whose contents a routed paste ships to the agent (load-buffer has no target). */
-  const buffers = new Map<string, string>();
+  const buffers = new Map<string, { argv: string[]; contents: string }>();
 
   function learn(argv: string[], text: string, owner: SeatTransport | "local") {
     if (argv[1] === "capture-pane") return; // pane text, not tmux output
@@ -146,17 +146,15 @@ export function createSeatRouter(opts: RouterOptions) {
     if (argv.some((a) => a.includes(tmp))) throw fail("refusing to send a local temp-file path to a remote seat");
     if (argv[1] === "paste-buffer") {
       const buf = flagValue(argv, "-b");
-      const contents = buf === undefined ? undefined : buffers.get(buf);
-      if (contents === undefined) throw fail("refusing a paste whose buffer was not loaded through this router");
-      await send(t, ["tmux", "load-buffer", "-b", buf!, "-"], contents);
+      const loaded = buf === undefined ? undefined : buffers.get(buf);
+      if (loaded === undefined) throw fail("refusing a paste whose buffer was not loaded through this router");
+      buffers.delete(buf!);
+      await send(t, ["tmux", "load-buffer", "-b", buf!, "-"], loaded.contents);
       try {
         return await send(t, argv);
       } catch (e) {
         await send(t, ["tmux", "delete-buffer", "-b", buf!]).catch(() => {});
         throw e;
-      } finally {
-        buffers.delete(buf!);
-        await local.argv(["tmux", "delete-buffer", "-b", buf!]).catch(() => {}); // the local copy is never pasted
       }
     }
     return send(t, argv);
@@ -186,18 +184,22 @@ export function createSeatRouter(opts: RouterOptions) {
       if (mentionsRoute(argv.join(" "))) throw fail("refusing a command chain that names a remote seat");
       return runLocal(argv);
     }
-    if (cmd[0] === "load-buffer") {
-      const out = await runLocal(argv);
-      const path = argv.at(-1)!;
-      const buf = flagValue(cmd, "-b");
-      if (buf !== undefined && path !== "-") buffers.set(buf, readFile(path));
-      return out;
+    // A buffer has no target: the paste that follows decides which server gets it. So the load is deferred to the
+    // paste, and a daemon whose seats are all remote needs no local tmux server for it. (Upstream removes the staged
+    // file only after the paste.) A load that can't be deferred runs as is.
+    const buf = flagValue(cmd, "-b");
+    if (cmd[0] === "load-buffer" && buf !== undefined && argv.at(-1) !== "-" && cmd.length === 4) {
+      buffers.set(buf, { argv, contents: readFile(argv.at(-1)!) });
+      return "";
     }
-    if (cmd[0] === "delete-buffer") {
-      const buf = flagValue(cmd, "-b");
-      if (buf !== undefined) buffers.delete(buf);
+    if (cmd[0] === "delete-buffer" && buf !== undefined && buffers.delete(buf)) return ""; // never loaded anywhere
+    if (cmd[0] === "paste-buffer" && buf !== undefined && !routeOf(commandTarget(cmd)) && buffers.has(buf)) {
+      const loaded = buffers.get(buf)!;
+      buffers.delete(buf);
+      await runLocal(loaded.argv);
       return runLocal(argv);
     }
+    if (cmd[0] === "load-buffer" || cmd[0] === "delete-buffer") return runLocal(argv);
     if (isEnumeration(cmd)) return enumerate(argv);
     const t = routeOf(commandTarget(cmd));
     return t ? routed(t, argv) : runLocal(argv);
