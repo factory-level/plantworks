@@ -124,9 +124,10 @@ test("broker restart preserves drain; worker restart resumes the seat without sk
   store.close();
   store = openStore(db);
   broker = await startBroker({ ...options, store });
+  const lookupsBeforeRestart = heldJobLookups.length;
   const restarted = spawn(process.execPath, [bin, "pw", "worker", "run", "--team", "t", "--seat", seat, "--poll-ms", "250", "--governor-port", "0"], { env: { ...workerEnv, PLANTWORKS_BROKER_URL: proxyUrl }, stdio: "ignore" });
   t.after(() => { if (restarted.exitCode === null) restarted.kill("SIGKILL"); });
-  await until(() => heldJobLookups.length >= 2);
+  await until(() => heldJobLookups.length > lookupsBeforeRestart);
   assert.equal(store.get(second)!.state, "queued", "worker death and broker restart do not skip unresolved work");
   assert.deepEqual(claimAttempts, [], "the restarted worker still waits before requesting another claim");
   assert.deepEqual(daemonCalls, []);
