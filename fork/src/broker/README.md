@@ -53,7 +53,7 @@ Errors are `{error, message}`, plus `errors` for an invalid envelope and `job` f
 
 | Status | `error` |
 |---|---|
-| 400 | `invalid_envelope`, `unknown_team`, `unknown_class`, `timeout_over_ceiling`, `invalid_decision` |
+| 400 | `invalid_envelope`, `unknown_team`, `unknown_class`, `timeout_over_ceiling`, `class_disabled`, `invalid_decision` |
 | 401 | `unauthorized` |
 | 404 | `not_found` |
 | 409 | `job_conflict`, `not_cancellable`, `already_decided`, `approval_expired`, `not_held` |
@@ -113,17 +113,18 @@ will do the work, for example `dev-worker@team`. No `class` means the team's `de
 
 | Response | When |
 |---|---|
-| `200 {job, qitemId, seat, envelope}` | The oldest queued job of that class is now `claimed` by the seat. Its upstream qitem `qitemId` is addressed to the seat and claimed for it |
+| `200 {job, qitemId, seat, envelope}` | The next queued job of that class (lowest effective priority, then oldest) is now `claimed` by the seat. Its upstream qitem `qitemId` is addressed to the seat and claimed for it |
 | `204` | Nothing claimable in that class |
 | `400` | `invalid_claim`, `unknown_team`, `unknown_class` |
 | `429 slot_cap_reached` | The team's `slotBudgetKey` already has its cap of jobs in flight (PW-19). The body has `{slotBudgetKey, cap, inFlight}`. Ask again later |
+| `429 class_slots_reached` | The class already has its `slots` of jobs in flight, counted like the cap. The body has `{class, slots, inFlight}`. Ask again later |
 | `503 daemon_refused` | The daemon answered and refused to create the qitem (a 4xx other than 409), so nothing was delivered. The reservation is released and the job is claimable again |
 | `503 handoff_unconfirmed {jobId, qitemId, seat}` | The outcome is unknown: a timeout, a 5xx or 409 on create, or a failed claim after the create. The qitem may exist and may have been delivered, so the job **stays reserved and counted** and can't be claimed again until reconciliation (PW-21) settles it |
 | `409 reservation_lost` | Shouldn't happen: reservations are never taken over, and cancel refuses a reserved job. Left for reconciliation |
 
 This is **late binding**: the upstream qitem exists only from the moment a seat claims, and its
 destination is that seat. Steps:
-1. `reserve` the oldest unreserved queued job, with a qitem id chosen first.
+1. `reserve` the next unreserved queued job, with a qitem id chosen first.
 2. Create the qitem with that id. The daemon delivers (wakes the seat) when it creates the qitem,
    so from here on Pi may be working. Upstream treats a retried create with the same id as
    idempotent.
@@ -138,6 +139,17 @@ the qitem, because a closed qitem doesn't prove Pi never started. Only `confirmC
 `release` that reconciliation (PW-21) justifies from verified evidence, ends it. For example,
 verified evidence could be that the daemon has no qitem with that id. Nothing is ever emitted
 for a claim that didn't happen.
+
+**Order.** Each job stores an effective priority when it is submitted: its class's `priority`
+(default 0) plus the envelope's `priority` offset (`urgent` -3, `high` -1, `normal` 0, `low` +2;
+absent is `normal`). `reserve` takes the lowest, then the oldest. claim-next serves one class
+per call, so within a call only the job offsets reorder anything.
+
+**Class slots.** claim-next also keeps each class at or below its own `slots` in flight, counted
+like the slot cap below and checked in the same transaction. The key's cap is checked first. A
+class with `slots: 0` could never run a job, so submit refuses its jobs (`400 class_disabled`)
+rather than queue them. A spec may still declare one, like the ADR sample's `long`, and raising
+its `slots` enables it.
 
 ### Slot cap (PW-19, `slots.ts`)
 
@@ -222,6 +234,26 @@ a claimed identity (`claimed:v1`). It never sends `X-OpenRig-Session`, which wou
 seat's transport identity. The broker does not close qitems during cleanup.
 
 ### Worker lifecycle (PW-21)
+
+**The seat's call governor (PW-11/PW-12, W3-B).** Before it claims anything, `worker run` loads
+its team spec (`--teams`/`PLANTWORKS_TEAMS_DIR`, validated against `--platform`/`PLANTWORKS_PLATFORM_FILE`
+as the broker does) and starts the seat's call governor with the limits of the class it serves
+(`--class`, else the team's `defaultClass`): `perCall.maxOutputTokens`, `perCall.deadlineSeconds`
+and `context.maxContextTokens`, not the built-in classes. It then renders the seat's Pi
+`models.json`/`settings.json` into `$OPENRIG_HOME/state/pi/<seat>/agent`, the directory the
+daemon's Pi seat reads, with the governor as the only `baseUrl`. The endpoint key stays in the
+worker. The governor listens on `127.0.0.1:7535` (`--governor-port`/`PLANTWORKS_GOVERNOR_PORT`),
+a fixed port so a restarted worker keeps the seat's `baseUrl` valid. So:
+- start the worker before the daemon launches the seat: Pi reads these files when it starts, and a
+  seat that was already running keeps whatever it loaded;
+- the worker refuses to start, before claiming, without a valid spec, the class, `OPENRIG_HOME` or
+  `PLANTWORKS_LLM_URL`, or when the port is taken (for example a second worker in the pod);
+- when the worker stops, its governor stops, so the seat's model calls fail rather than reach the
+  endpoint ungoverned.
+
+A 503 from the endpoint is waited out inside the governor: the broker job doesn't change state and
+no attempt is used. After three consecutive calls cut at the deadline the worker logs
+`call-deadline`; it doesn't fail or release the broker job (see fail-closed above).
 
 `plantworks pw worker run --team <team> --seat <session>` claims one job at a time and polls its
 broker record. It asks for another job only after the broker reports `done`. A worker process

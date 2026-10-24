@@ -76,11 +76,16 @@ code=$?
 set -e
 [ "${code}" != 0 ] && grep -q "PLANTWORKS_TEAM" "${work}/worker.err" || fail "worker without PLANTWORKS_TEAM did not refuse"
 ok "worker role refuses to start without PLANTWORKS_TEAM/PLANTWORKS_SEAT"
-docker run -d --name "${id}-w" --network "container:${id}-d" -e PLANTWORKS_TEAM=smoke -e PLANTWORKS_SEAT=smoke-worker@smoke "${img}" worker >/dev/null
+# The endpoint is a closed loopback port: the worker's governor starts without calling it.
+docker run -d --name "${id}-w" --network "container:${id}-d" -v "${work}/teams:/etc/fork/teams:ro" -v "${work}:/w:ro" \
+  -e PLANTWORKS_PLATFORM_FILE=/w/platform.json -e PLANTWORKS_LLM_URL=http://127.0.0.1:9/v1 \
+  -e PLANTWORKS_TEAM=smoke -e PLANTWORKS_SEAT=smoke-worker@smoke "${img}" worker >/dev/null
 sleep 6
 [ "$(docker inspect -f '{{.State.Running}}' "${id}-w")" = true ] || { docker logs "${id}-w" | tail -20; fail "the worker exited"; }
 docker exec "${id}-w" /app/fork/container/entrypoint.sh health || fail "worker health check failed"
 ok "worker health check passes"
+docker exec "${id}-w" cat /var/lib/fork/state/pi/smoke-worker@smoke/agent/models.json | grep -q '"baseUrl": "http://127.0.0.1:7535"' || fail "the worker did not render the seat's models.json at its governor"
+ok "worker renders the seat's Pi files at its governor (127.0.0.1:7535)"
 # The seat smoke-worker@smoke doesn't exist, so this checks the worker loop runs, not a handoff to Pi.
 echo "   job after the worker ran: $(api /jobs/kb-smoke-t_1-a1 GET | cut -c1-160)"
 echo "   worker log: $(docker logs "${id}-w" 2>&1 | tail -n 3 | tr '\n' ' ' | cut -c1-240)"

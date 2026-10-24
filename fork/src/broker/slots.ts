@@ -41,14 +41,21 @@ export function parseSlotCaps(value: string | undefined): SlotCaps {
 
 export const capFor = (caps: SlotCaps, key: string): number => (Object.hasOwn(caps.byKey, key) ? caps.byKey[key] : caps.fallback);
 
+const IN_FLIGHT = "(state IN ('claimed', 'running') OR (state = 'queued' AND reserved_by IS NOT NULL))";
+
 /** Jobs in flight for a slot budget key: claimed, running, or queued under a reservation of any age. */
 export function inFlight(store: Store, teams: Map<string, TeamSpec>, key: string): number {
   const sharing = [...teams.values()].filter((t) => t.endpoint.slotBudgetKey === key).map((t) => t.team);
   if (!sharing.length) return 0;
   const row = store.db
-    .prepare(`SELECT COUNT(*) AS n FROM jobs WHERE team IN (${sharing.map(() => "?").join(",")}) AND (state IN ('claimed', 'running') OR (state = 'queued' AND reserved_by IS NOT NULL))`)
+    .prepare(`SELECT COUNT(*) AS n FROM jobs WHERE team IN (${sharing.map(() => "?").join(",")}) AND ${IN_FLIGHT}`)
     .get(...sharing) as { n: number };
   return row.n;
+}
+
+/** PW-18: jobs in flight for one team's class, counted the same way. claim-next keeps this at or below the class's `slots`. */
+export function classInFlight(store: Store, team: string, cls: string): number {
+  return (store.db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE team = ? AND class = ? AND ${IN_FLIGHT}`).get(team, cls) as { n: number }).n;
 }
 
 /**

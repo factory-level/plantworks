@@ -114,7 +114,7 @@ test("the published fleet.schema.json names exactly the validator's fields", () 
   assert.deepEqual(keys(schema), Object.keys(s).sort());
   assert.deepEqual(schema.required.sort(), Object.keys(s).sort());
   const cls = schema.properties.classes.additionalProperties;
-  assert.deepEqual(keys(cls), ["approval", "approvalTtlSeconds", "context", "maxAttempts", "model", "perCall", "slots", "timeoutSeconds", "toolProfile"]);
+  assert.deepEqual(keys(cls), ["approval", "approvalTtlSeconds", "context", "maxAttempts", "model", "perCall", "priority", "slots", "timeoutSeconds", "toolProfile"]);
   assert.deepEqual(keys(cls.properties.context), Object.keys(s.classes.quick.context).sort());
   assert.deepEqual(keys(cls.properties.perCall), Object.keys(s.classes.quick.perCall).sort());
   assert.equal(schema.properties.hermesProfile.properties.kanban.properties.max_in_progress_per_profile.type, "integer");

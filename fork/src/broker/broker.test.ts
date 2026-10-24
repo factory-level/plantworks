@@ -18,21 +18,23 @@ import Database from "better-sqlite3";
 const definition = (team = "social-media") => ({
   team,
   trains: 1,
-  perTrain: { orchestrators: 1, workers: { quick: 1, long: 1 } },
+  perTrain: { orchestrators: 1, workers: { quick: 1, long: 1, review: 1 } },
   endpoint: { url: "${PLANTWORKS_LLM_URL}", slotBudgetKey: team },
   defaultClass: "quick",
   classes: {
     quick: { slots: 1, model: "qwen3.5:9b", context: { maxContextTokens: 16384, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1536, deadlineSeconds: 60 }, approval: "never", timeoutSeconds: 900, maxAttempts: 2 },
-    long: { slots: 0, model: "qwen3.5:9b", context: { maxContextTokens: 32768, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1024, deadlineSeconds: 60 }, approval: "per-job", timeoutSeconds: 3600, maxAttempts: 1 },
-    review: { slots: 0, model: "qwen3.5:9b", context: { maxContextTokens: 16384, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1536, deadlineSeconds: 60 }, approval: "always", approvalTtlSeconds: 60, timeoutSeconds: 900, maxAttempts: 1 },
+    long: { slots: 1, model: "qwen3.5:9b", context: { maxContextTokens: 32768, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1024, deadlineSeconds: 60 }, approval: "per-job", timeoutSeconds: 3600, maxAttempts: 1 },
+    review: { slots: 1, model: "qwen3.5:9b", context: { maxContextTokens: 16384, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1536, deadlineSeconds: 60 }, approval: "always", approvalTtlSeconds: 60, timeoutSeconds: 900, maxAttempts: 1 },
+    // A valid spec may keep a class at 0 slots (the ADR sample's `long`); submit refuses its jobs.
+    off: { slots: 0, model: "qwen3.5:9b", context: { maxContextTokens: 16384, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1536, deadlineSeconds: 60 }, approval: "never", timeoutSeconds: 900, maxAttempts: 1 },
   },
   events: { callbackDefault: "${PLANTWORKS_FRONTDOOR_CALLBACK}", approvalConsumer: "frontdoor" },
 });
-const platform = { ...PHASE_0_1, slotCaps: { "social-media": 1 } };
+const platform = { ...PHASE_0_1, slotCaps: { "social-media": 3 } };
 
 function teamsDir(defs = [definition()]) {
   const dir = mkdtempSync(join(tmpdir(), "pw-teams-"));
-  for (const d of defs) assert.ok("files" in emitTeam(d, dir, { ...platform, slotCaps: { [d.team]: 1 } }));
+  for (const d of defs) assert.ok("files" in emitTeam(d, dir, { ...platform, slotCaps: { [d.team]: 3 } }));
   return dir;
 }
 
@@ -81,6 +83,7 @@ test("submit refuses what the team spec does not allow, before storing anything"
     [envelope({ team: "other-team", jobId: "kb-x-t_00000000-a1" }), "unknown_team"],
     [envelope({ class: "huge" }), "unknown_class"],
     [envelope({ timeoutSeconds: 901 }), "timeout_over_ceiling"],
+    [envelope({ class: "off" }), "class_disabled"],
   ];
   for (const [body, error] of cases) {
     const res = await t.call("POST", "/jobs", body);
@@ -181,7 +184,7 @@ test("team specs: an invalid spec, a misplaced one or an unset placeholder stops
   assert.throws(() => loadTeams(teamsDir(), PHASE_0_1), /slot/i, "validated against the platform");
   const misplaced = teamsDir([definition("news")]);
   renameSync(join(misplaced, "news"), join(misplaced, "sports"));
-  assert.throws(() => loadTeams(misplaced, { ...platform, slotCaps: { news: 1 } }), /team is news, but the directory is sports/);
+  assert.throws(() => loadTeams(misplaced, { ...platform, slotCaps: { news: 3 } }), /team is news, but the directory is sports/);
   assert.throws(() => loadTeams(mkdtempSync(join(tmpdir(), "pw-empty-"))), /no team specs/);
 
   assert.equal(expand("${A_CALLBACK}/events", { A_CALLBACK: "http://127.0.0.1:1" }), "http://127.0.0.1:1/events");
@@ -202,7 +205,7 @@ test("plantworks pw broker serve: submit over HTTP, the event is delivered, and 
   const home = mkdtempSync(join(tmpdir(), "pw-broker-"));
   const platformFile = join(home, "platform.json");
   writeFileSync(platformFile, JSON.stringify(platform));
-  const env = { ...process.env, OPENRIG_HOME: home, PLANTWORKS_TEAMS_DIR: teamsDir(), PLANTWORKS_FRONTDOOR_CALLBACK: consumer.url, PLANTWORKS_BROKER_TOKEN: "t0k" };
+  const env = { ...process.env, OPENRIG_HOME: home, PLANTWORKS_TEAMS_DIR: teamsDir(), PLANTWORKS_FRONTDOOR_CALLBACK: consumer.url, PLANTWORKS_BROKER_TOKEN: "t0k", PLANTWORKS_SLOT_CAP: "social-media=3" };
   const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
   const serve = async () => {
     const child = spawn(process.execPath, [bin, "pw", "broker", "serve", "--platform", platformFile, "--port", "0"], { env });
@@ -237,6 +240,13 @@ test("plantworks pw broker serve: a class over an env ceiling, a bad ceiling or 
   const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
   const base = { ...process.env, OPENRIG_HOME: home, PLANTWORKS_TEAMS_DIR: teamsDir(), PLANTWORKS_FRONTDOOR_CALLBACK: "http://127.0.0.1:9/cb", PLANTWORKS_BROKER_TOKEN: "t0k" };
   for (const k of ["PLANTWORKS_MAX_CALL_SECONDS", "PLANTWORKS_MAX_CALL_OUTPUT", "PLANTWORKS_SLOT_CAP"]) delete (base as Record<string, unknown>)[k];
+  // With PLANTWORKS_SLOT_CAP unset (1 per key), a team asking for one slot: quick only.
+  const oneSlot = teamsDir();
+  const spec = join(oneSlot, "social-media", "team.json");
+  const one = JSON.parse(readFileSync(spec, "utf8"));
+  one.classes.long.slots = 0;
+  one.classes.review.slots = 0;
+  writeFileSync(spec, JSON.stringify(one));
   /** Serves with `extra` env; resolves "listening" or the exit code and stderr. */
   const serve = (extra: Record<string, string>) => new Promise<{ listening: boolean; code: number | null; stderr: string }>((resolve) => {
     const child = spawn(process.execPath, [bin, "pw", "broker", "serve", "--platform", platformFile, "--port", "0"], { env: { ...base, ...extra } });
@@ -250,14 +260,15 @@ test("plantworks pw broker serve: a class over an env ceiling, a bad ceiling or 
     [{ PLANTWORKS_MAX_CALL_OUTPUT: "1024" }, /classes\.quick exceeds a platform ceiling: output 1536 > 1024 tokens/],
     [{ PLANTWORKS_MAX_CALL_SECONDS: "0" }, /PLANTWORKS_MAX_CALL_SECONDS: "0" is not a positive integer/],
     [{ PLANTWORKS_MAX_CALL_OUTPUT: "4096" }, /above the platform ceiling/],
-    [{ PLANTWORKS_SLOT_CAP: "social-media=0" }, /slot budget social-media: the teams' classes ask for 1 slots, over PLANTWORKS_SLOT_CAP's 0/],
+    [{ PLANTWORKS_SLOT_CAP: "social-media=2" }, /slot budget social-media: the teams' classes ask for 3 slots, over PLANTWORKS_SLOT_CAP's 2/],
+    [{}, /ask for 3 slots, over PLANTWORKS_SLOT_CAP's 1/],
   ];
   for (const [extra, re] of refused) {
     const r = await serve(extra);
     assert.deepEqual([r.listening, r.code], [false, 1], JSON.stringify(extra));
     assert.match(r.stderr, re);
   }
-  for (const ok of [{}, { PLANTWORKS_MAX_CALL_SECONDS: "60", PLANTWORKS_MAX_CALL_OUTPUT: "1536/1024", PLANTWORKS_SLOT_CAP: "social-media=1" }]) {
+  for (const ok of [{ PLANTWORKS_TEAMS_DIR: oneSlot }, { PLANTWORKS_MAX_CALL_SECONDS: "60", PLANTWORKS_MAX_CALL_OUTPUT: "1536/1024", PLANTWORKS_SLOT_CAP: "social-media=3" }]) {
     const r = await serve(ok);
     assert.equal(r.listening, true, `${JSON.stringify(ok)}: ${r.stderr}`);
   }
@@ -365,7 +376,7 @@ test("plantworks pw broker serve: a held job is approved through the decision UR
   const home = mkdtempSync(join(tmpdir(), "pw-broker-"));
   const platformFile = join(home, "platform.json");
   writeFileSync(platformFile, JSON.stringify(platform));
-  const env = { ...process.env, OPENRIG_HOME: home, PLANTWORKS_TEAMS_DIR: teamsDir(), PLANTWORKS_FRONTDOOR_CALLBACK: consumer.url, PLANTWORKS_BROKER_TOKEN: "t0k" };
+  const env = { ...process.env, OPENRIG_HOME: home, PLANTWORKS_TEAMS_DIR: teamsDir(), PLANTWORKS_FRONTDOOR_CALLBACK: consumer.url, PLANTWORKS_BROKER_TOKEN: "t0k", PLANTWORKS_SLOT_CAP: "social-media=3" };
   const child = spawn(process.execPath, [fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url)), "pw", "broker", "serve", "--platform", platformFile, "--port", "0"], { env });
   try {
     const url = await new Promise<string>((resolve, reject) => {

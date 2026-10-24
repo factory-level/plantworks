@@ -47,6 +47,11 @@ export function callCeilingsFromEnv(env: Record<string, string | undefined>): Ce
   return c;
 }
 
+/** A team spec queue class's limits (ADR 0204 `context` and `perCall`) as the governor and the seat files take them. */
+export function classFromSpec(c: { model: string; context: { maxContextTokens: number }; perCall: { maxOutputTokens: number; deadlineSeconds: number } }): WorkerClass {
+  return { model: c.model, maxContextTokens: c.context.maxContextTokens, maxOutputTokens: c.perCall.maxOutputTokens, deadlineSeconds: c.perCall.deadlineSeconds };
+}
+
 export function classByName(name: string): WorkerClass {
   if (!Object.hasOwn(CLASSES, name)) throw new Error(`unknown worker class "${name}" (known: ${Object.keys(CLASSES).join(", ")})`);
   return CLASSES[name as ClassName];

@@ -62,7 +62,8 @@
           "approval": { "enum": ["never", "per-job", "always"] },
           "approvalTtlSeconds": { "type": "integer", "minimum": 1, "description": "Required when approval is always." },
           "timeoutSeconds": { "type": "integer", "minimum": 1 },
-          "maxAttempts": { "type": "integer", "minimum": 1 }
+          "maxAttempts": { "type": "integer", "minimum": 1 },
+          "priority": { "type": "integer", "minimum": -100, "maximum": 100, "description": "Base priority for the class's jobs; lower is claimed first. Absent means 0." }
         }
       }
     },
