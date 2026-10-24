@@ -13,20 +13,24 @@ emitter and tests.
 
 | Field | Required | Meaning |
 |---|---|---|
-| `jobId` | yes | `kb-<board>-<cardId>-a<attempt>`, the idempotency key. Re-submitting the same `jobId` returns the existing job. Only the front door creates a new attempt (`-a2`, ...). |
+| `jobId` | yes | `kb-<board>-<cardId>-a<attempt>`, the idempotency key. The board is 1–64 alphanumeric characters with no `-`; the card ID is up to 128 characters and may contain `-` (UUIDs work); the attempt is a positive number. Re-submitting the same `jobId` returns the existing job. Only the front door creates a new attempt (`-a2`, ...). |
 | `team` | yes | DNS-safe team name, equal to the Hermes profile name |
-| `class` | no | Queue class from the team spec. Defaults to `quick`, the 16K class |
-| `task.prompt` | yes | What the worker is asked to do |
-| `task.title` | no | Short label for logs and events |
-| `callback.url` | no | Where `plantworks.job.state` events are posted. Falls back to the team spec's `events.callbackDefault` |
+| `class` | no | Queue class from the team spec. When absent, the broker uses the team's default class (the 16K class in the sample spec). The envelope never names a default itself |
+| `task.prompt` | yes | What the worker is asked to do, at most 65,536 characters |
+| `task.title` | no | Short label for logs and events, at most 200 characters |
 | `timeoutSeconds` | no | Requested job timeout. The broker rejects values above the class ceiling |
 
 Unknown fields are rejected, so that a misspelt field is never silently ignored.
+
+**There is no per-job callback.** Events go only to the team spec's `events.callbackDefault`,
+which the operator sets. A submitter-chosen URL would let anyone who can submit a job make the
+broker send requests to local services, cloud metadata or in-cluster addresses.
 
 ## States
 
 ```
 queued -> claimed -> running -> done | failed
+claimed -> failed                   the seat died or timed out before work started
 held   -> queued | cancelled        approval granted, or denied / expired
 queued -> cancelled                 cancelled by the front door
 failed -> retried                   the front door submitted the next attempt
@@ -39,7 +43,7 @@ A job starts in `queued`, or in `held` when its class needs approval. `done`, `c
 |---|---|
 | `done` | `outcome`: `succeeded` or `rejected-by-checks`. Optional `closure: "handoff-sre"` when a person should take the job to an SRE agent |
 | `failed` | `reason`: `call-deadline`, `timeout` or `error`. Optional `message` |
-| `cancelled` | `reason`: `denied`, `approval-expired` or `cancelled`. Optional `message` |
+| `cancelled` | `reason`: `denied`, `approval-expired` or `front-door` (cancelled by the front door). Optional `message` |
 
 The broker never retries content. Task-level retries belong to the front door, and seat
 recovery belongs to the OpenRig daemon.
@@ -52,13 +56,17 @@ detailed field list was not available, so these choices are **defaults, open for
 1. **`task: { prompt, title? }`**: the job's content. The ADR names no content field.
 2. **`timeoutSeconds`**: the one envelope value the ADR's "within the class ceilings" rule
    applies to. Per-call budgets stay class-only.
-3. **`callback` is optional**: the team spec's `callbackDefault` covers it.
-4. **`jobId` board and card IDs are alphanumeric** (no `-`), so the ID parses unambiguously.
+3. **No per-job callback**: events go to the team spec's `callbackDefault` only (see above).
+4. **`jobId` format**: the board ID has no `-`, so the ID parses unambiguously, while the card ID
+   may contain `-`. Both are length-bounded. **Needs the front-door owner to confirm** that
+   the Kanban board and card IDs fit.
 5. **Failure reasons** `timeout` and `error`, next to the ADR's `call-deadline`. **Cancel
-   reasons** `denied`, `approval-expired` and `cancelled`.
-6. **`claimed` can only go to `running`**. A runner that fails before work starts moves to
-   `running` and then `failed`, so every failure is reported from the same state.
+   reasons** `denied`, `approval-expired` and `front-door`.
+6. **`claimed -> failed`** is allowed, so a seat that dies before work
+   starts never reports a `running` that did not happen.
 7. **No version field in the envelope**: the API path (`/plantworks/v1/jobs`) and the schema
    `$id` carry the version.
+8. **Size limits**: `task.prompt` at most 65,536 characters, `task.title` at most 200, plus the
+   `jobId` part lengths above. The broker's HTTP body limit is a separate, outer bound.
 
 A change to the field set or the states needs an acknowledgement from the front-door owner.

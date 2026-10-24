@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  DNS_NAME, INITIAL_STATES, JOB_ID, JOB_STATES,
+  DNS_NAME, INITIAL_STATES, JOB_ID, JOB_STATES, MAX_PROMPT, MAX_TITLE,
   canTransition, isTerminal, parseJobId, transition, validateEnvelope,
 } from "./job.ts";
 
@@ -13,7 +13,7 @@ const good = { jobId: "kb-board1-card9-a1", team: "social-media", task: { prompt
 test("the normal path, approval, cancel and retry are the only legal moves", () => {
   const legal = new Set([
     "held>queued", "held>cancelled", "queued>claimed", "queued>cancelled",
-    "claimed>running", "running>done", "running>failed", "failed>retried",
+    "claimed>running", "claimed>failed", "running>done", "running>failed", "failed>retried",
   ]);
   for (const from of JOB_STATES) for (const to of JOB_STATES) {
     assert.equal(canTransition(from, to), legal.has(`${from}>${to}`), `${from} -> ${to}`);
@@ -32,46 +32,69 @@ test("terminal transitions require their detail", () => {
   assert.deepEqual(transition("held", "cancelled", { reason: "approval-expired" }), { reason: "approval-expired" });
   assert.throws(() => transition("queued", "claimed", { outcome: "succeeded" }), /does not take outcome/);
   assert.throws(() => transition("done", "running"), /illegal job transition done -> running/);
-  assert.throws(() => transition("claimed", "failed", { reason: "error" }), /illegal/);
+  assert.deepEqual(transition("claimed", "failed", { reason: "error" }), { reason: "error" });
 });
 
 test("jobId parses into board, card and attempt", () => {
   assert.deepEqual(parseJobId("kb-board1-card9-a12"), { board: "board1", cardId: "card9", attempt: 12 });
-  for (const bad of ["kb-board-card-a0", "kb-board-card", "x-board-card-a1", "kb-bo-ard-card-a1"]) assert.equal(parseJobId(bad), null, bad);
+  assert.deepEqual(parseJobId("kb-b1-3f2a9c1e-77b0-4c1d-a1"), { board: "b1", cardId: "3f2a9c1e-77b0-4c1d", attempt: 1 });
+  assert.deepEqual(parseJobId("kb-b1-x-a2-a3"), { board: "b1", cardId: "x-a2", attempt: 3 });
+  for (const bad of ["kb-board-card-a0", "kb-board-card", "x-board-card-a1", "kb-board--a1", `kb-${"b".repeat(65)}-c-a1`, `kb-b-${"c".repeat(129)}-a1`]) {
+    assert.equal(parseJobId(bad), null, bad);
+  }
 });
 
-test("valid envelopes get the default class", () => {
-  const r = validateEnvelope(good);
-  assert.ok(r.ok);
-  assert.equal(r.envelope.class, "quick");
-  const full = { ...good, class: "long", task: { prompt: "x", title: "t" }, callback: { url: "https://frontdoor.example.invalid/cb" }, timeoutSeconds: 900 };
+test("valid envelopes pass unchanged; the broker resolves an absent class", () => {
+  assert.deepEqual(validateEnvelope(good), { ok: true, envelope: good });
+  const full = { ...good, class: "long", task: { prompt: "x", title: "t" }, timeoutSeconds: 900 };
   assert.deepEqual(validateEnvelope(full), { ok: true, envelope: full });
 });
 
 test("invalid envelopes are rejected with every reason", () => {
   assert.deepEqual(validateEnvelope(null), { ok: false, errors: ["envelope must be an object"] });
-  const r = validateEnvelope({ jobId: "card9", team: "Social_Media", task: { prompt: " ", extra: 1 }, callback: { url: "ftp://x" }, timeoutSeconds: 0, more: true });
+  const r = validateEnvelope({ jobId: "card9", team: "Social_Media", task: { prompt: " ", extra: 1 }, timeoutSeconds: 0, callback: { url: "http://127.0.0.1/" } });
   assert.ok(!r.ok);
   assert.deepEqual(r.errors.sort(), [
-    "callback.url must be an http(s) URL",
     "jobId must match kb-<board>-<cardId>-a<attempt>",
-    "task.prompt must be a non-empty string",
+    `task.prompt must be a non-empty string of at most ${MAX_PROMPT} characters`,
     "team must be a DNS-safe name",
     "timeoutSeconds must be a positive integer",
-    "unknown field more",
+    "unknown field callback",
     "unknown field task.extra",
   ]);
+  const long = validateEnvelope({ ...good, task: { prompt: "x".repeat(MAX_PROMPT + 1), title: "t".repeat(MAX_TITLE + 1) } });
+  assert.ok(!long.ok);
+  assert.equal(long.errors.length, 2);
 });
 
+const stripDescriptions = (v: unknown): unknown =>
+  Array.isArray(v) ? v.map(stripDescriptions)
+  : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).filter(([k]) => k !== "description").map(([k, x]) => [k, stripDescriptions(x)]))
+  : v;
+
 test("the published JSON Schema matches the validator", () => {
-  assert.equal(schema.additionalProperties, false);
-  assert.deepEqual(schema.required, ["jobId", "team", "task"]);
-  assert.deepEqual(Object.keys(schema.properties), ["jobId", "team", "class", "task", "callback", "timeoutSeconds"]);
-  assert.equal(schema.properties.jobId.pattern, JOB_ID.source);
-  assert.equal(schema.properties.team.pattern, DNS_NAME.source);
-  assert.equal(schema.properties.class.pattern, DNS_NAME.source);
-  assert.equal(schema.properties.class.default, "quick");
-  assert.deepEqual(schema.properties.task.required, ["prompt"]);
-  assert.deepEqual(Object.keys(schema.properties.task.properties), ["prompt", "title"]);
-  assert.deepEqual(schema.properties.callback.required, ["url"]);
+  const dns = { type: "string", pattern: DNS_NAME.source };
+  assert.deepEqual(stripDescriptions(schema), {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "https://github.com/factory-level/plantworks/blob/main/fork/schema/job-envelope.schema.json",
+    title: "Plantworks job envelope (v1)",
+    type: "object",
+    additionalProperties: false,
+    required: ["jobId", "team", "task"],
+    properties: {
+      jobId: { type: "string", pattern: JOB_ID.source },
+      team: dns,
+      class: dns,
+      task: {
+        type: "object",
+        additionalProperties: false,
+        required: ["prompt"],
+        properties: {
+          prompt: { type: "string", minLength: 1, maxLength: MAX_PROMPT, pattern: "\\S" },
+          title: { type: "string", maxLength: MAX_TITLE },
+        },
+      },
+      timeoutSeconds: { type: "integer", minimum: 1 },
+    },
+  });
 });

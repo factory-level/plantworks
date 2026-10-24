@@ -12,21 +12,19 @@ export type DoneOutcome = (typeof DONE_OUTCOMES)[number];
 export const FAILURE_REASONS = ["call-deadline", "timeout", "error"] as const;
 export type FailureReason = (typeof FAILURE_REASONS)[number];
 
-export const CANCEL_REASONS = ["denied", "approval-expired", "cancelled"] as const;
+export const CANCEL_REASONS = ["denied", "approval-expired", "front-door"] as const;
 export type CancelReason = (typeof CANCEL_REASONS)[number];
-
-export const DEFAULT_CLASS = "quick";
 
 export interface JobEnvelope {
   jobId: string;
   team: string;
+  /** Absent means the team spec's default class; the broker resolves it. */
   class?: string;
   task: { prompt: string; title?: string };
-  callback?: { url: string };
   timeoutSeconds?: number;
 }
 
-/** Detail carried by a transition. Only terminal states carry any. */
+/** Detail carried by a transition. Only done, failed and cancelled carry any. */
 export type TransitionDetail =
   | { outcome: DoneOutcome; closure?: "handoff-sre" }
   | { reason: FailureReason | CancelReason; message?: string }
@@ -35,7 +33,7 @@ export type TransitionDetail =
 const NEXT: Record<JobState, readonly JobState[]> = {
   held: ["queued", "cancelled"],
   queued: ["claimed", "cancelled"],
-  claimed: ["running"],
+  claimed: ["running", "failed"],
   running: ["done", "failed"],
   failed: ["retried"],
   done: [],
@@ -81,8 +79,10 @@ export function transition(from: JobState, to: JobState, detail: Record<string, 
   }
 }
 
-export const JOB_ID = /^kb-([A-Za-z0-9]+)-([A-Za-z0-9]+)-a([1-9][0-9]*)$/;
+export const JOB_ID = /^kb-([A-Za-z0-9]{1,64})-([A-Za-z0-9][A-Za-z0-9-]{0,127})-a([1-9][0-9]{0,5})$/;
 export const DNS_NAME = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
+export const MAX_PROMPT = 65536;
+export const MAX_TITLE = 200;
 
 export function parseJobId(jobId: string): { board: string; cardId: string; attempt: number } | null {
   const m = JOB_ID.exec(jobId);
@@ -91,13 +91,13 @@ export function parseJobId(jobId: string): { board: string; cardId: string; atte
 
 export type Validation = { ok: true; envelope: JobEnvelope } | { ok: false; errors: string[] };
 
-/** Validates a submitted envelope (untrusted input) and fills the default class. */
+/** Validates a submitted envelope (untrusted input). */
 export function validateEnvelope(input: unknown): Validation {
   const errors: string[] = [];
   const obj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
   if (!obj(input)) return { ok: false, errors: ["envelope must be an object"] };
 
-  const known = ["jobId", "team", "class", "task", "callback", "timeoutSeconds"];
+  const known = ["jobId", "team", "class", "task", "timeoutSeconds"];
   for (const k of Object.keys(input)) if (!known.includes(k)) errors.push(`unknown field ${k}`);
 
   if (typeof input.jobId !== "string" || !parseJobId(input.jobId)) errors.push("jobId must match kb-<board>-<cardId>-a<attempt>");
@@ -107,19 +107,14 @@ export function validateEnvelope(input: unknown): Validation {
   if (!obj(input.task)) errors.push("task must be an object");
   else {
     for (const k of Object.keys(input.task)) if (k !== "prompt" && k !== "title") errors.push(`unknown field task.${k}`);
-    if (typeof input.task.prompt !== "string" || input.task.prompt.trim() === "") errors.push("task.prompt must be a non-empty string");
-    if (input.task.title !== undefined && typeof input.task.title !== "string") errors.push("task.title must be a string");
-  }
-
-  if (input.callback !== undefined) {
-    if (!obj(input.callback) || Object.keys(input.callback).some((k) => k !== "url")) errors.push("callback must be { url }");
-    else if (typeof input.callback.url !== "string" || !/^https?:\/\//.test(input.callback.url) || !URL.canParse(input.callback.url)) errors.push("callback.url must be an http(s) URL");
+    const { prompt, title } = input.task;
+    if (typeof prompt !== "string" || prompt.trim() === "" || prompt.length > MAX_PROMPT) errors.push(`task.prompt must be a non-empty string of at most ${MAX_PROMPT} characters`);
+    if (title !== undefined && (typeof title !== "string" || title.length > MAX_TITLE)) errors.push(`task.title must be a string of at most ${MAX_TITLE} characters`);
   }
 
   const t = input.timeoutSeconds;
   if (t !== undefined && !(Number.isInteger(t) && (t as number) > 0)) errors.push("timeoutSeconds must be a positive integer");
 
   if (errors.length) return { ok: false, errors };
-  const envelope = input as unknown as JobEnvelope;
-  return { ok: true, envelope: { ...envelope, class: envelope.class ?? DEFAULT_CLASS } };
+  return { ok: true, envelope: input as unknown as JobEnvelope };
 }
