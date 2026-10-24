@@ -51,6 +51,43 @@ describe("what became of a stream observation", () => {
     expect(moved.summary).toContain("now with qa-one@rig");
   });
 
+  it("a handed-on or superseded row is followed to the row holding the work now", async () => {
+    const S1 = "/api/queue/qitem-stream-S1", NEXT = "/api/queue/list?handedOffFrom=";
+    const handed = row("handed-off", { closureReason: "handed_off_to", closureTarget: "qa-one@rig" });
+    const open = await streamOutcome(client({ [DISP]: disposition({}), [S1]: handed,
+      [`${NEXT}qitem-stream-S1`]: { status: 200, data: [{ qitemId: "q-2", handedOffFrom: "qitem-stream-S1" }] },
+      "/api/queue/q-2": row("in-progress", { qitemId: "q-2", destinationSession: "qa-one@rig" }) }), "S1");
+    expect(open).toMatchObject({ stage: "work_open", work: [{ qitemId: "q-2", owner: "qa-one@rig", state: "in-progress", handedOnFrom: ["qitem-stream-S1"] }] });
+    expect(open.summary).toContain("handed on to q-2; it's in-progress and now with qa-one@rig");
+    const twice = await streamOutcome(client({ [DISP]: disposition({}), [S1]: handed,
+      [`${NEXT}qitem-stream-S1`]: { status: 200, data: [{ qitemId: "q-2", handedOffFrom: "qitem-stream-S1" }] },
+      "/api/queue/q-2": row("canceled", { qitemId: "q-2", closureReason: "superseded", closureTarget: "q-3" }),
+      [`${NEXT}q-2`]: { status: 200, data: [{ qitemId: "q-3", handedOffFrom: "q-2" }] },
+      "/api/queue/q-3": row("done", { qitemId: "q-3", closureReason: "no-follow-on", resolution: "fixed" }) }), "S1");
+    expect(twice).toMatchObject({ stage: "work_closed", work: [{ qitemId: "q-3", state: "done", resolution: "fixed", handedOnFrom: ["qitem-stream-S1", "q-2"] }] });
+  });
+
+  it("unknown, never closed: a failed read, a missing row, or a handoff whose successor can't be found", async () => {
+    const S1 = "/api/queue/qitem-stream-S1", NEXT = "/api/queue/list?handedOffFrom=qitem-stream-S1";
+    const failed = await streamOutcome(client({ [DISP]: disposition({}), [S1]: { status: 500, data: { error: "boom" } } }), "S1");
+    expect(failed).toMatchObject({ stage: "work_unknown", work: [{ state: "unavailable", unknown: "row_read_failed" }] });
+    expect(failed).not.toHaveProperty("note");
+    expect(await streamOutcome(client({ [DISP]: disposition({}) }), "S1")).toMatchObject({ stage: "work_unknown", work: [{ unknown: "row_missing" }] });
+    const manual = row("done", { closureReason: "handed_off_to", closureTarget: "dev-guard@rig" });
+    const unlinked = await streamOutcome(client({ [DISP]: disposition({}), [S1]: manual, [NEXT]: { status: 200, data: [] } }), "S1");
+    expect(unlinked).toMatchObject({ stage: "work_unknown", work: [{ state: "done", closedToward: "dev-guard@rig", unknown: "successor_not_recorded" }] });
+    expect(unlinked.summary).toContain("closed toward dev-guard@rig");
+    // An older daemon ignores the filter and lists unrelated rows; they aren't taken for the successor.
+    expect(await streamOutcome(client({ [DISP]: disposition({}), [S1]: manual, [NEXT]: { status: 200, data: [{ qitemId: "q-9", handedOffFrom: null }] } }), "S1"))
+      .toMatchObject({ stage: "work_unknown", work: [{ unknown: "successor_not_recorded" }] });
+    expect(await streamOutcome(client({ [DISP]: disposition({}), [S1]: manual, [NEXT]: { status: 500, data: {} } }), "S1"))
+      .toMatchObject({ stage: "work_unknown", work: [{ unknown: "successor_read_failed" }] });
+    // The walk is bounded.
+    const loop = await streamOutcome(client({ [DISP]: disposition({}), [S1]: manual,
+      [NEXT]: { status: 200, data: [{ qitemId: "qitem-stream-S1", handedOffFrom: "qitem-stream-S1" }] } }), "S1");
+    expect(loop).toMatchObject({ stage: "work_unknown", work: [{ unknown: "too_many_handoffs" }] });
+  });
+
   it("join, duplicate and no_action", async () => {
     const join = disposition({ disposition: "join", ownerSession: "qa-one@rig", workQitemId: "q-1", effect: { operation: "note", qitemId: "q-1" }, applied: { outcome: "noted" } });
     expect(await streamOutcome(client({ [DISP]: join, "/api/queue/q-1": row("blocked", { qitemId: "q-1", destinationSession: "qa-one@rig" }) }), "S1"))
