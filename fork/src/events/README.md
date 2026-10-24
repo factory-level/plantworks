@@ -16,16 +16,32 @@
 ## Delivery
 
 - **Destination:** the team spec's `events.callbackDefault`, which the operator configures. A job
-  envelope can't name a destination.
-- **At least once:** each event is retried until the consumer answers `2xx`. A consumer can
-  see the same `id` more than once and must treat repeats as no-ops.
-- **Retries:** network errors, `408`, `429` and `5xx` are retried with exponential backoff
-  (0.5 s doubling, capped at 30 s, 8 attempts by default). Any other `4xx` is permanent and is
-  not retried.
-- **Order:** events go out one at a time, in the order they were emitted. A permanently
-  failed event doesn't hold back the ones after it.
-- **Limit:** retries are held in memory until the broker has a persistent outbox. A process that
-  crashes loses undelivered events, so re-emit from the job's recorded state.
+  envelope can't name a destination. Redirects are not followed: a `3xx` reply is a permanent
+  failure, so a consumer can't bounce the POST to another address.
+- **Order:** events go out one at a time, in the order they were emitted. A failed event
+  doesn't hold back the ones after it.
+- **Retries:** network errors, request timeouts (10 s), `408`, `429` and `5xx` are retried with
+  exponential backoff (0.5 s doubling, capped at 30 s) or the consumer's `Retry-After`, capped
+  the same way. Any other `3xx` or `4xx` is permanent and is not retried.
+- **Budget:** 8 attempts by default. With the default delays that is about 61.5 s of waiting
+  plus up to 8 request timeouts, so **roughly 1 to 2.5 minutes**. A consumer that is down
+  longer than that misses the event.
+
+### What "at least once" means here
+
+An event is delivered at least once **while the emitting process is alive and the consumer
+recovers within the retry budget**. When it isn't delivered (permanent `3xx`/`4xx`, or the
+budget ran out):
+
+- the emitter reports it through `onDeliveryError` (default: a line on stderr), and `emit()`
+  rejects with a `DeliveryError` carrying the event. **The event is then the caller's**: record
+  it and re-emit it later. Await or catch every `emit()`.
+- nothing is persisted. After a crash, a process can only re-emit the job's **current** state,
+  so intermediate events (for example `claimed`, `running`) may never arrive.
+
+**Consumers must therefore tolerate both duplicates** (deduplicate on `id`) **and gaps**
+(treat a later state as implying the earlier ones). Restart durability arrives with the
+broker's persistent outbox. Until then, nothing in Phase 0 should assume it.
 
 The front door maps these events to its own actions (complete, block or attach on the card). That
 mapping belongs to the front door, not to Plantworks.
