@@ -4,33 +4,42 @@
 // that seat asks for work, so a job is never bound to a seat that isn't ready for it.
 //
 // One claim, in order:
-// 1. reserve: the oldest queued job of (team, class), held for this seat under a lease, with a
-//    qitem id chosen up front. The job stays `queued` and nothing is emitted.
-// 2. If the reservation took over an expired lease, close the old holder's qitem (a crash orphan).
-// 3. Create the qitem with that id (a retried create with the same id is idempotent upstream),
-//    then claim it for the seat.
-// 4. confirmClaim: queued -> claimed, only if this seat still holds the reservation with this
-//    qitem. Lost (taken over, cancelled meanwhile): close our qitem; nothing was published.
+// 1. reserve: the oldest unreserved queued job of (team, class), held for this seat, with a qitem
+//    id chosen up front. The job stays `queued` and nothing is emitted.
+// 2. Create the qitem with that id, then claim it for the seat. The daemon delivers (wakes the
+//    seat) when it creates the qitem, so from that point Pi may be working.
+// 3. confirmClaim: queued -> claimed, only if this seat still holds the reservation with this qitem.
+//
+// Fail-closed (PW-19): a reservation is released only on evidence that no qitem was delivered,
+// namely the daemon refusing the create outright. Any other failure (a timeout, a 5xx, a failed
+// claim after the create, a crash) leaves the reservation in place. It stays counted against the
+// slot cap and the job can't be claimed again until reconciliation (PW-21) settles it from
+// verified evidence. Nothing here closes a qitem as if that stopped Pi.
 import { randomBytes } from "node:crypto";
 import { API, jobRecord, type BrokerRoutes } from "./server.ts";
-import { RESERVATION_LEASE_MS } from "./store.ts";
 import { capFor, inFlight, parseSlotCaps, type SlotCaps } from "./slots.ts";
 import type { JobEnvelope } from "../contract/job.ts";
 
 /** A seat session as OpenRig names it, for example `dev-worker@team`. */
 export const SEAT = /^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$/;
 
-/** The three daemon queue calls claim-next makes. */
+/** The daemon answered and refused the request: for `create`, proof that no qitem was persisted. */
+export class DaemonRefused extends Error {}
+
+/** The two daemon queue calls claim-next makes. */
 export interface DaemonQueue {
   create(item: { qitemId: string; source: string; destination: string; body: string; summary: string; tags: string[] }): Promise<void>;
   claim(qitemId: string, seat: string): Promise<void>;
-  close(qitemId: string, actor: string, note: string): Promise<void>;
 }
 
 /**
  * The upstream daemon's queue API (/api/queue). The broker acts for seats, so it names them in the
  * request body, which the daemon records as a claimed identity (`claimed:v1`); it never sends
  * X-OpenRig-Session, which would assert a seat's transport identity.
+ *
+ * A 4xx answer throws DaemonRefused, except 409, which means a qitem with that id exists.
+ * Everything else (409, 5xx, a timeout, a dropped connection) throws a plain Error: the outcome
+ * is unknown.
  */
 export function daemonQueue(opts: { url: string; token?: string; fetch?: typeof fetch; timeoutMs?: number }): DaemonQueue {
   const f = opts.fetch ?? fetch;
@@ -41,12 +50,13 @@ export function daemonQueue(opts: { url: string; token?: string; fetch?: typeof 
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(opts.timeoutMs ?? 10_000),
     });
-    if (!res.ok) throw new Error(`daemon ${path} returned ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    if (res.ok) return;
+    const message = `daemon ${path} returned ${res.status}: ${(await res.text()).slice(0, 300)}`;
+    throw res.status >= 400 && res.status < 500 && res.status !== 409 ? new DaemonRefused(message) : new Error(message);
   };
   return {
     create: (i) => call("/create", { qitemId: i.qitemId, sourceSession: i.source, destinationSession: i.destination, body: i.body, summary: i.summary, tags: i.tags }),
     claim: (qitemId, seat) => call(`/${encodeURIComponent(qitemId)}/claim`, { destinationSession: seat }),
-    close: (qitemId, actor, note) => call(`/${encodeURIComponent(qitemId)}/update`, { actorSession: actor, state: "done", closureReason: "canceled", transitionNote: note }),
   };
 }
 
@@ -59,11 +69,8 @@ export interface ClaimNextOptions {
   daemon: DaemonQueue;
   /** The session the broker creates qitems as (PLANTWORKS_BROKER_SESSION). */
   brokerSession: string;
-  leaseMs?: number;
   /** PW-19 slot caps by slotBudgetKey. Default: 1 in flight per key. */
   slotCaps?: SlotCaps;
-  /** The same clock as the store's, so live and expired reservations are told apart alike. */
-  now?: () => Date;
   newQitemId?: () => string;
   log?: (line: string) => void;
 }
@@ -76,12 +83,6 @@ export function claimNextRoutes(opts: ClaimNextOptions): BrokerRoutes {
   const log = opts.log ?? ((l) => process.stderr.write(`${l}\n`));
   const mint = opts.newQitemId ?? (() => newQitemId());
   const caps = opts.slotCaps ?? parseSlotCaps(undefined);
-  const now = opts.now ?? (() => new Date());
-  const leaseMs = opts.leaseMs ?? RESERVATION_LEASE_MS;
-  // Closing is cleanup: a failure is logged and never fails the claim it runs inside.
-  const closeQuietly = async (qitemId: string, note: string) => {
-    try { await opts.daemon.close(qitemId, opts.brokerSession, note); } catch (e) { log(`plantworks broker: could not close ${qitemId}: ${(e as Error).message}`); }
-  };
 
   return (app, { store, teams, emit }) => {
     app.post(`${API}/claim-next`, async (c) => {
@@ -89,10 +90,11 @@ export function claimNextRoutes(opts: ClaimNextOptions): BrokerRoutes {
       if (!body || typeof body.team !== "string" || typeof body.seat !== "string" || !SEAT.test(body.seat) || (body.class !== undefined && typeof body.class !== "string")) {
         return c.json({ error: "invalid_claim", message: "send {team, seat, class?}; seat is an OpenRig session name" }, 400);
       }
-      const spec = teams.get(body.team);
-      if (!spec) return c.json({ error: "unknown_team", message: `no team spec for ${body.team}` }, 400);
+      const team = body.team;
+      const spec = teams.get(team);
+      if (!spec) return c.json({ error: "unknown_team", message: `no team spec for ${team}` }, 400);
       const cls = body.class ?? spec.defaultClass;
-      if (!spec.classes[cls]) return c.json({ error: "unknown_class", message: `team ${body.team} has no class ${cls}` }, 400);
+      if (!spec.classes[cls]) return c.json({ error: "unknown_class", message: `team ${team} has no class ${cls}` }, 400);
       const seat = body.seat;
 
       const qitemId = mint();
@@ -101,17 +103,16 @@ export function claimNextRoutes(opts: ClaimNextOptions): BrokerRoutes {
       const key = spec.endpoint.slotBudgetKey;
       const cap = capFor(caps, key);
       const reserved = store.db.transaction(() => {
-        const used = inFlight(store, teams, key, now(), leaseMs);
-        return used >= cap ? { capped: used } : store.reserve(body.team as string, cls, seat, qitemId, leaseMs);
+        const used = inFlight(store, teams, key);
+        return used >= cap ? { capped: used } : store.reserve(team, cls, seat, qitemId);
       }).immediate();
       if (reserved && "capped" in reserved) {
         return c.json({ error: "slot_cap_reached", message: `slot budget ${key} has ${reserved.capped} of ${cap} jobs in flight; ask again later`, slotBudgetKey: key, cap, inFlight: reserved.capped }, 429);
       }
       if (!reserved) return c.body(null, 204);
-      const { job } = reserved;
-      if (reserved.previousQitemId) await closeQuietly(reserved.previousQitemId, `plantworks: the reservation on ${job.job_id} expired and passed to ${seat}`);
-
+      const job = reserved;
       const envelope = JSON.parse(job.envelope) as JobEnvelope;
+
       try {
         await opts.daemon.create({
           qitemId,
@@ -121,20 +122,34 @@ export function claimNextRoutes(opts: ClaimNextOptions): BrokerRoutes {
           summary: envelope.task.title ?? `Plantworks job ${job.job_id}`,
           tags: ["plantworks", `plantworks-job:${job.job_id}`, `plantworks-team:${job.team}`, `plantworks-class:${cls}`],
         });
+      } catch (e) {
+        if (e instanceof DaemonRefused) {
+          // The daemon refused the create, so no qitem exists and nothing was delivered: safe to release.
+          store.release(job.job_id, seat, qitemId);
+          return c.json({ error: "daemon_refused", message: `the daemon refused to create the qitem for ${job.job_id}: ${e.message}` }, 503);
+        }
+        return held(e as Error);
+      }
+      try {
         await opts.daemon.claim(qitemId, seat);
       } catch (e) {
-        store.release(job.job_id, seat, qitemId);
-        await closeQuietly(qitemId, `plantworks: claim of ${job.job_id} failed`);
-        return c.json({ error: "daemon_unavailable", message: `could not hand ${job.job_id} to ${seat}: ${(e as Error).message}` }, 503);
+        return held(e as Error);
       }
 
       const confirmed = store.confirmClaim(job.job_id, seat, qitemId);
       if (confirmed === "lost") {
-        await closeQuietly(qitemId, `plantworks: ${seat} lost the reservation on ${job.job_id}`);
-        return c.json({ error: "reservation_lost", message: `${job.job_id} was taken over or cancelled while it was being handed to ${seat}; ask again` }, 409);
+        // Only a bug gets here: a reservation is never taken over, and cancel refuses a reserved job.
+        log(`plantworks broker: ${seat} lost the reservation on ${job.job_id} after creating ${qitemId}; left for reconciliation`);
+        return c.json({ error: "reservation_lost", message: `${job.job_id} is no longer reserved for ${seat}`, jobId: job.job_id, qitemId }, 409);
       }
       emit(confirmed.row, "claimed", confirmed.detail);
       return c.json({ job: jobRecord(confirmed.row), qitemId, seat, envelope });
+
+      /** The qitem may exist and may have been delivered: keep the reservation, counted and unclaimable. */
+      function held(e: Error) {
+        log(`plantworks broker: handoff of ${job.job_id} to ${seat} as ${qitemId} is unconfirmed (${e.message}); reservation held for reconciliation`);
+        return c.json({ error: "handoff_unconfirmed", message: `the handoff of ${job.job_id} to ${seat} is unconfirmed: ${e.message}. The job stays reserved and counted until reconciliation settles it`, jobId: job.job_id, qitemId, seat }, 503);
+      }
     });
   };
 }

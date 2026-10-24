@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // PW-19: the platform slot cap. At most N jobs are in flight per slotBudgetKey, across every team
-// that shares the key. In flight means claimed or running, or queued under a live claim-next
-// reservation (so a claim being handed over already holds its slot). claim-next counts and
+// that shares the key. In flight means claimed or running, or queued under a claim-next
+// reservation of any age: once the daemon may have created and delivered the qitem, Pi may be
+// working, so the reservation holds its slot until confirmClaim or a verified release. claim-next counts and
 // reserves in one immediate transaction, so concurrent claims can't both slip under the cap.
 // This runtime cap is separate from the team spec's validation caps and from Hermes' kanban
 // setting; neither one changes it.
@@ -40,13 +41,12 @@ export function parseSlotCaps(value: string | undefined): SlotCaps {
 
 export const capFor = (caps: SlotCaps, key: string): number => (Object.hasOwn(caps.byKey, key) ? caps.byKey[key] : caps.fallback);
 
-/** Jobs in flight for a slot budget key: claimed, running, or queued under an unexpired reservation. */
-export function inFlight(store: Store, teams: Map<string, TeamSpec>, key: string, now: Date, leaseMs: number): number {
+/** Jobs in flight for a slot budget key: claimed, running, or queued under a reservation of any age. */
+export function inFlight(store: Store, teams: Map<string, TeamSpec>, key: string): number {
   const sharing = [...teams.values()].filter((t) => t.endpoint.slotBudgetKey === key).map((t) => t.team);
   if (!sharing.length) return 0;
-  const live = new Date(now.getTime() - leaseMs).toISOString();
   const row = store.db
-    .prepare(`SELECT COUNT(*) AS n FROM jobs WHERE team IN (${sharing.map(() => "?").join(",")}) AND (state IN ('claimed', 'running') OR (state = 'queued' AND reserved_at IS NOT NULL AND reserved_at > ?))`)
-    .get(...sharing, live) as { n: number };
+    .prepare(`SELECT COUNT(*) AS n FROM jobs WHERE team IN (${sharing.map(() => "?").join(",")}) AND (state IN ('claimed', 'running') OR (state = 'queued' AND reserved_by IS NOT NULL))`)
+    .get(...sharing) as { n: number };
   return row.n;
 }

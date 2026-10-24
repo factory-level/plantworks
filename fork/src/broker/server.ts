@@ -119,6 +119,9 @@ export function createBroker(opts: BrokerOptions): Hono {
     const row = store.get(c.req.param("jobId"));
     if (!row) return fail(404, "not_found", `no job ${c.req.param("jobId")}`);
     if (row.state === "cancelled") return c.json(jobRecord(row));
+    // A reserved job is being handed to a seat, which may already have it (PW-19 fail-closed):
+    // cancelling would free its slot while Pi may run.
+    if (row.reserved_by) return fail(409, "not_cancellable", `job ${row.job_id} is being handed to ${row.reserved_by}; cancel it after the handoff settles`, { job: jobRecord(row) });
     if (!canTransition(row.state, "cancelled")) return fail(409, "not_cancellable", `a ${row.state} job cannot be cancelled`, { job: jobRecord(row) });
     const { row: next, detail } = store.transition(row.job_id, "cancelled", { reason: "front-door" });
     emit(next, "cancelled", detail);

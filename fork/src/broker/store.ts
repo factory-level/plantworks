@@ -6,7 +6,12 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { transition as checkTransition, type JobEnvelope, type JobState, type TransitionDetail } from "../contract/job.ts";
 
-/** How long a claim-next reservation (PW-18) holds a queued job before another seat may take it. */
+/**
+ * How old a claim-next reservation must be before reconciliation (PW-21) treats it as stuck and
+ * looks at it. Age never releases a reservation or lets another seat take the job: once the
+ * daemon may have created and delivered the qitem, nothing short of verified evidence proves Pi
+ * never started.
+ */
 export const RESERVATION_LEASE_MS = 60_000;
 
 export interface JobRow {
@@ -105,26 +110,23 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
     },
 
     /**
-     * PW-18's claim-next reservation: the oldest queued job for (team, class) that is unreserved
-     * or whose lease has run out. The state stays queued and nothing is emitted.
-     * `previousQitemId` is the expired holder's qitem when this takes over a lease, for the caller to close.
+     * PW-18's claim-next reservation: the oldest queued job for (team, class) that nobody has
+     * reserved. The state stays queued and nothing is emitted. A reserved job is never taken over,
+     * however old the reservation: only `confirmClaim` or a verified `release` ends it.
      */
-    reserve(team: string, cls: string, seat: string, qitemId: string, leaseMs = RESERVATION_LEASE_MS): { job: JobRow; previousQitemId: string | null } | undefined {
+    reserve(team: string, cls: string, seat: string, qitemId: string): JobRow | undefined {
       return tx(() => {
-        const at = now();
-        const expired = new Date(at.getTime() - leaseMs).toISOString();
-        const row = db.prepare("SELECT * FROM jobs WHERE team = ? AND class = ? AND state = 'queued' AND (reserved_at IS NULL OR reserved_at <= ?) ORDER BY seq LIMIT 1")
-          .get(team, cls, expired) as JobRow | undefined;
+        const row = db.prepare("SELECT * FROM jobs WHERE team = ? AND class = ? AND state = 'queued' AND reserved_by IS NULL ORDER BY seq LIMIT 1")
+          .get(team, cls) as JobRow | undefined;
         if (!row) return undefined;
-        db.prepare("UPDATE jobs SET reserved_by = ?, reserved_at = ?, reserved_qitem_id = ? WHERE job_id = ?").run(seat, at.toISOString(), qitemId, row.job_id);
-        return { job: get(row.job_id)!, previousQitemId: row.reserved_qitem_id };
+        db.prepare("UPDATE jobs SET reserved_by = ?, reserved_at = ?, reserved_qitem_id = ? WHERE job_id = ?").run(seat, iso(), qitemId, row.job_id);
+        return get(row.job_id);
       });
     },
 
     /**
      * Turns a reservation into the claim: queued -> claimed, only if the job is still reserved by
-     * this seat with this qitem. Otherwise (lease taken over, job cancelled) returns "lost", and
-     * the caller closes its own qitem.
+     * this seat with this qitem. Otherwise returns "lost".
      */
     confirmClaim(jobId: string, seat: string, qitemId: string): { row: JobRow; detail: TransitionDetail } | "lost" {
       return tx(() => {
@@ -135,8 +137,9 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
     },
 
     /**
-     * Drops a reservation, only if it is still this seat's with this qitem. The qitem fences it:
-     * the same seat may hold a newer reservation on the job after its own lease ran out.
+     * Drops a reservation, only if it is still this seat's with this qitem. Call it only on
+     * evidence that the qitem was never delivered (the daemon refused to create it, or
+     * reconciliation verified it doesn't exist): releasing makes the job claimable again.
      */
     release(jobId: string, seat: string, qitemId: string): void {
       db.prepare("UPDATE jobs SET reserved_by = NULL, reserved_at = NULL, reserved_qitem_id = NULL WHERE job_id = ? AND reserved_by = ? AND reserved_qitem_id = ?").run(jobId, seat, qitemId);
