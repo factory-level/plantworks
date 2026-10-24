@@ -110,7 +110,7 @@ test("worker run with PLANTWORKS_LLM_PRIORITY=1: each job's effective priority r
   await running;
 });
 
-test("a worker restarted while its seat holds a job sends that job's stored priority from the broker record", async (t) => {
+test("a worker restarted while its seat holds a job sends that job's stored priority from the broker record, asking again after a failed read", async (t) => {
   const teams = mkdtempSync(join(tmpdir(), "pw-wprio-teams-"));
   assert.ok("files" in emitTeam({
     team: "t", trains: 1, perTrain: { orchestrators: 1, workers: { small: 1 } },
@@ -121,11 +121,14 @@ test("a worker restarted while its seat holds a job sends that job's stored prio
   // The seat already holds job-h (claimed before the restart), submitted urgent: stored priority 2 + -3.
   let done = false;
   let claims = 0;
+  let recordReads = 0;
   const broker = createServer((req, res) => {
     const json = (body: unknown) => res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(body));
     if (req.method === "DELETE") return json({});
     if (req.url!.endsWith("/drain")) return json({ seat: "worker-0@t", draining: false, inFlight: done ? [] : ["job-h"] });
     if (req.url === "/plantworks/v1/claim-next") { claims++; return res.writeHead(204).end(); }
+    // The first read of the record fails (a broker blip): the worker must ask again, not guess.
+    if (recordReads++ === 0) return res.writeHead(503).end();
     json({ jobId: "job-h", state: done ? "done" : "running", priority: -1 });
   });
   const seen: (number | undefined)[] = [];
@@ -157,6 +160,7 @@ test("a worker restarted while its seat holds a job sends that job's stored prio
   const [{ workerVerb }, { runProgram }] = await Promise.all([import("./worker.ts"), import("../../../packages/cli/dist/index.js")]);
   workerVerb(program);
   const running = runProgram(program, process.argv);
+  t.after(() => { process.emit("SIGTERM" as NodeJS.Signals); }); // stop the worker even if an assertion fails
   let baseUrl: string | undefined;
   while (!baseUrl) {
     try { baseUrl = (Object.values(JSON.parse(readFileSync(join(home, "state", "pi", "worker-0@t", "agent", "models.json"), "utf8")).providers)[0] as { baseUrl: string }).baseUrl; } catch { await new Promise((r) => setTimeout(r, 20)); }

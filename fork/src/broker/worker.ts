@@ -78,11 +78,19 @@ export function workerVerb(pw: Command): void {
        * timeout the governor cuts off the seat's model calls. That stops no tool or process, so the
        * job and its slot stay held and the wait goes on.
        */
-      /** A job's stored effective priority from the broker; the class base if the broker can't say. */
+      /**
+       * A job's stored effective priority from the broker. A failed or unreadable answer is asked
+       * again (held calls stay held meanwhile); only a record without one, from a broker that
+       * predates the field, falls back to the class base.
+       */
       const storedPriority = async (jobId: string): Promise<number> => {
-        const res = await fetch(`${base}/plantworks/v1/jobs/${encodeURIComponent(jobId)}`, { headers, signal: AbortSignal.timeout(15_000) }).catch(() => null);
-        const record = res?.ok ? await res.json().catch(() => null) as { priority?: unknown } | null : null;
-        return typeof record?.priority === "number" ? record.priority : classPriority;
+        while (!stopping) {
+          const res = await fetch(`${base}/plantworks/v1/jobs/${encodeURIComponent(jobId)}`, { headers, signal: AbortSignal.timeout(15_000) }).catch(() => null);
+          const record = res?.ok ? await res.json().catch(() => null) as { priority?: unknown } | null : null;
+          if (record && typeof record === "object") return typeof record.priority === "number" ? record.priority : classPriority;
+          await sleep();
+        }
+        return classPriority;
       };
       const waitForDone = async (jobId: string, timeoutS: number) => {
         process.stdout.write(`waiting for broker completion of ${jobId}\n`);
