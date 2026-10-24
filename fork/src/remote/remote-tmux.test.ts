@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // The router and the seat agent against real tmux: two private sockets on this host stand in for
 // the daemon's server and a remote one. No real transport and no remote host. Skipped without tmux.
-import { test, after } from "node:test";
+import { test, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import http from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TmuxAdapter } from "../../../packages/daemon/dist/adapters/tmux.js";
@@ -18,7 +19,21 @@ import { inProcessTransport } from "./transport.ts";
 
 const hasTmux = (() => { try { execFileSync("tmux", ["-V"]); return true; } catch { return false; } })();
 const skip = hasTmux ? false : "tmux is not installed";
-delete process.env.TMUX; // private sockets only, never the caller's server
+// Run from inside an OpenRig seat, this process inherits that seat's live daemon identity: OPENRIG_DB, OPENRIG_URL,
+// OPENRIG_SESSION_NAME, its hook token and TMUX. None of it may reach anything this file starts. A fresh
+// TMUX_TMPDIR also makes the default tmux socket a private, empty one, so even a call that misses `-L` can't
+// reach the caller's tmux server.
+for (const k of Object.keys(process.env)) if (/^(OPENRIG_|RIGGED_|TMUX)/.test(k)) delete process.env[k];
+process.env.TMUX_TMPDIR = mkdtempSync("/tmp/pw32-"); // tmux socket paths are length-limited
+
+/** The fixture daemon's whole environment: built from scratch, never copied from this process. */
+function fixtureEnv(home: string, port: number): Record<string, string> {
+  return {
+    PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, TMPDIR: tmpdir(), TMUX_TMPDIR: process.env.TMUX_TMPDIR!,
+    OPENRIG_HOME: home, OPENRIG_DB: join(home, "openrig.sqlite"), OPENRIG_PORT: String(port),
+    OPENRIG_NO_KERNEL: "1", OPENRIG_BIND_HOST: "127.0.0.1",
+  };
+}
 
 const L = `pw32-local-${process.pid}`;
 const R = `pw32-remote-${process.pid}`;
@@ -26,6 +41,7 @@ const onSocket = (socket: string, argv: string[]) => (argv[0] === "tmux" ? ["tmu
 const tmux = (socket: string, ...args: string[]) => execFileSync("tmux", ["-L", socket, ...args], { encoding: "utf8" });
 /** Ends both servers. A server whose last session ended has already exited. */
 const reset = () => { for (const s of [L, R]) { try { tmux(s, "kill-server"); } catch { /* not running */ } } };
+beforeEach(reset); // a failed test never leaves sessions for the next one
 after(reset);
 
 const agent = createSeatAgent({ prefix: "rs-", run: (argv, stdin) => runTmux(onSocket(R, argv), stdin) });
@@ -101,8 +117,9 @@ test("a routed seat is created, written to and read through upstream's adapter, 
   assert.equal(await adapter.hasSession("rs-w"), true);
   assert.deepEqual(await adapter.sendText("rs-w", "echo routed-$((40+2))", undefined, { bracketed: false }), { ok: true });
   await adapter.sendKeys("rs-w", ["Enter"]);
-  await sleep(300);
-  assert.match((await adapter.capturePaneContent("rs-w", 20)) ?? "", /routed-42/);
+  let screen = "";
+  for (let i = 0; i < 50 && !/routed-42/.test(screen); i++) { await sleep(100); screen = (await adapter.capturePaneContent("rs-w", 20)) ?? ""; }
+  assert.match(screen, /routed-42/);
   assert.equal(tmux(L, "list-buffers"), "", "no local buffer is left behind");
   assert.deepEqual(await adapter.killSession("rs-w"), { ok: true });
   assert.deepEqual(await adapter.probeSession("rs-w"), { state: "absent" }, "the remote tmux's own absence text");
@@ -116,7 +133,7 @@ test("end to end: startServer with the router; the daemon lists the remote seat,
   const port = await new Promise<number>((resolve) => { const s = createServer().listen(0, "127.0.0.1", () => { const p = (s.address() as { port: number }).port; s.close(() => resolve(p)); }); });
   const fixture = fileURLToPath(new URL("./fixtures/daemon-with-router.mjs", import.meta.url));
   const child = spawn(process.execPath, [fixture, String(port), L, R, "rs-e"], {
-    env: { ...process.env, OPENRIG_HOME: home, OPENRIG_NO_KERNEL: "1", OPENRIG_BIND_HOST: "127.0.0.1" }, stdio: ["ignore", "pipe", "pipe"],
+    env: fixtureEnv(home, port), stdio: ["ignore", "pipe", "pipe"],
   });
   let log = "";
   child.stderr.on("data", (d) => (log += d));
@@ -137,6 +154,61 @@ test("end to end: startServer with the router; the daemon lists the remote seat,
     await new Promise((r) => (child.exitCode !== null ? r(null) : child.once("exit", r)));
     reset();
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("the fixture daemon refuses an inherited identity or a database outside its own temp home: nothing outside is opened or contacted", { skip, timeout: 120_000 }, async () => {
+  const elsewhere = mkdtempSync(join(tmpdir(), "pw32-sentinel-")); // stands in for a live seat's home: must stay empty
+  const homes: string[] = [];
+  const freshHome = () => { const h = mkdtempSync(join(tmpdir(), "pw32-home-")); homes.push(h); return h; };
+  const hits: string[] = [];
+  const sentinel = http.createServer((q, r) => { hits.push(`${q.method} ${q.url}`); r.writeHead(503).end(); });
+  await new Promise<void>((r) => sentinel.listen(0, "127.0.0.1", () => r()));
+  const sentinelUrl = `http://127.0.0.1:${(sentinel.address() as { port: number }).port}`;
+  const fixture = fileURLToPath(new URL("./fixtures/daemon-with-router.mjs", import.meta.url));
+  const target = join(elsewhere, "openrig.sqlite");
+  // Each case: the environment overrides on top of a clean fixtureEnv for a fresh home.
+  const cases: Record<string, (home: string) => Record<string, string>> = {
+    "leaked DB path": () => ({ OPENRIG_DB: target }),
+    "leaked daemon URL": () => ({ OPENRIG_URL: sentinelUrl }),
+    "leaked session name": () => ({ OPENRIG_SESSION_NAME: "sentinel@seat" }),
+    "leaked node id": () => ({ OPENRIG_NODE_ID: "SENTINEL" }),
+    "leaked hook token": () => ({ OPENRIG_ACTIVITY_HOOK_TOKEN: "sentinel-token" }),
+    "leaked TMUX": () => ({ TMUX: "/nonexistent/sentinel,1,0" }),
+    "traversal out of the home": (home) => ({ OPENRIG_DB: join(home, "..", basename(elsewhere), "openrig.sqlite") }),
+    "symlinked directory in the home": (home) => { symlinkSync(elsewhere, join(home, "sub")); return { OPENRIG_DB: join(home, "sub", "openrig.sqlite") }; },
+    "symlinked database file": (home) => { symlinkSync(target, join(home, "openrig.sqlite")); return {}; },
+    "symlinked WAL file": (home) => { symlinkSync(join(elsewhere, "wal"), join(home, "openrig.sqlite-wal")); return {}; },
+    "symlinked home": (home) => { const link = join(home, "home-link"); symlinkSync(elsewhere, link); return { OPENRIG_HOME: link, OPENRIG_DB: join(link, "openrig.sqlite"), HOME: link }; },
+  };
+  try {
+    for (const [name, make] of Object.entries(cases)) {
+      const home = freshHome();
+      const before = new Set(readdirSync(home));
+      const env = { ...fixtureEnv(home, 1), ...make(home) };
+      const created = readdirSync(home).filter((f) => !before.has(f));
+      const run = await new Promise<{ code: number | null; stderr: string }>((resolve) => {
+        const child = spawn(process.execPath, [fixture, "1", "l", "r", "rs-x"], { env, stdio: ["ignore", "ignore", "pipe"] });
+        let stderr = "";
+        child.stderr.on("data", (d) => (stderr += d));
+        child.once("exit", (code) => resolve({ code, stderr }));
+      });
+      assert.equal(run.code, 2, `${name}: ${run.stderr}`);
+      assert.match(run.stderr, /refusing to start/, name);
+      assert.deepEqual(readdirSync(home).sort(), created.sort(), `${name}: the refused fixture wrote nothing to its home`);
+      assert.deepEqual(readdirSync(elsewhere), [], `${name}: nothing was written outside the home`);
+    }
+    assert.deepEqual(hits, [], "the leaked daemon URL was never contacted");
+    // the environment the end-to-end test uses carries none of the parent's identity, whatever the parent holds
+    const home = freshHome();
+    const env = fixtureEnv(home, 1);
+    assert.deepEqual(Object.keys(env).filter((k) => /^(OPENRIG_|TMUX)/.test(k)).sort(),
+      ["OPENRIG_BIND_HOST", "OPENRIG_DB", "OPENRIG_HOME", "OPENRIG_NO_KERNEL", "OPENRIG_PORT", "TMUX_TMPDIR"]);
+    assert.equal(env.OPENRIG_DB, join(home, "openrig.sqlite"));
+  } finally {
+    sentinel.close();
+    for (const h of homes) rmSync(h, { recursive: true, force: true });
+    rmSync(elsewhere, { recursive: true, force: true });
   }
 });
 
