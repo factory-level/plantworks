@@ -151,6 +151,32 @@ class with `slots: 0` could never run a job, so submit refuses its jobs (`400 cl
 rather than queue them. A spec may still declare one, like the ADR sample's `long`, and raising
 its `slots` enables it.
 
+**Recovery (W3-A, `recoverHandoff`).** A handoff that a crash or a failed call left between
+`reserve` and `confirmClaim` is finished by retrying the same steps with the same stored qitem
+id, for the same seat. Reconciliation does this once a reservation is older than
+`RESERVATION_LEASE_MS`, so a claim-next that is still in flight is never raced.
+- **The daemon answers 404:** the broker creates the qitem. A retried create is idempotent
+  upstream, so a create that did land answers as the same qitem. A refused create (4xx) releases
+  the reservation, the same rule claim-next applies.
+- **The qitem is pending for that seat:** the broker claims it.
+- **After that,** reconciliation confirms the broker-side claim only once the daemon shows the
+  qitem claimed. A pending qitem is never confirmed.
+- **Anything else** leaves the reservation as it is: no answer, a 5xx, a qitem addressed to
+  another seat, or one in another state.
+
+**Precondition: the daemon's queue outlives a broker crash.** A 404 counts as "never created" only
+while the daemon's `$OPENRIG_HOME` is persistent. If it is lost (an emptyDir, or a daemon restart
+without its volume), a qitem that was delivered, and possibly worked on, would 404, and recovery
+would deliver it again. Mount the volume that `fork/container/README.md` asks for at
+`OPENRIG_HOME=/var/lib/fork`. A failing retry past the lease is tried again on every
+reconciliation pass (2 s), with no backoff.
+
+Age only decides when a retry is attempted. Nothing releases on age, moves the job to another
+seat, or closes a qitem.
+
+A draining seat still gets its own reserved job delivered: that job was reserved before the
+drain, and the drain waits for it.
+
 ### Slot cap (PW-19, `slots.ts`)
 
 `PLANTWORKS_SLOT_CAP` caps the jobs in flight per `slotBudgetKey`, counted across every team that
