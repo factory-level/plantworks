@@ -101,6 +101,17 @@ broker remains the authority.
 
 Output: `{ jobId, state, created }`. `created: false` means an existing job came back.
 
+**Submit never reveals another team's job.** A `jobId` is unique across the whole broker,
+and the broker's 409 `job_conflict` body carries the existing record in `job`, which can be
+another team's. The server:
+
+- never forwards the broker's `job` field, or any record from an error body;
+- answers a 409 with only `{ code: "job_conflict", jobId }`. Whether the clash is with this
+  team or another, it adds no state, team, class or detail;
+- checks `team` on a 200 or 201 record as well. A record of another team is never returned:
+  it answers the same terse `job_conflict` (the broker matches whole envelopes, team
+  included, so this can't happen today; the check is there in case that changes).
+
 ### `job_inspect`
 
 Reads one job and, once it has ended, a bounded part of its result.
@@ -150,7 +161,7 @@ idempotent.
 | `invalid_envelope` | the inputs fail `validateEnvelope()`. The message names the field |
 | `not_found` | no job with that `jobId` exists **in this team** |
 | `not_cancellable` | cancel on a job that is not `queued`, `held` or `cancelled` (broker 409) |
-| `job_conflict` | submit reuses a `jobId` with a different envelope (broker 409). Nothing changes |
+| `job_conflict` | submit reuses a `jobId` with a different envelope (broker 409), possibly another team's. It carries only the `jobId`. Nothing changes |
 | `broker_rejected` | the broker returned another 400: `unknown_class`, `timeout_over_ceiling`, `unknown_team`, or `approval_unsupported` (a class that needs approval is refused until PW-23). It carries the broker's `error` and `message` |
 | `broker_auth_failed` | the broker answered 401: the server's broker token is missing or wrong. This is a configuration fault, so repeating the call does not help |
 | `broker_unavailable` | network error, timeout or 5xx. The call may be repeated: submit and cancel are idempotent |
@@ -216,6 +227,11 @@ calls the server over stdio and over HTTP. The tests check:
 - cancel of a running job refused
 - HTTP without a token or with a wrong one refused
 - no broker credential in any output
+- negative tests for team isolation, against a stub broker holding another team's job:
+  - submit hitting a 409 whose `job` is another team's record returns no field of it
+  - a 200 replay carrying another team's record is refused
+  - inspect of another team's `jobId` is `not_found`
+  - cancel of another team's `jobId` is `not_found`, and the stub records no cancel call
 
 No real Hermes, broker or inference is involved.
 
