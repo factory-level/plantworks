@@ -4,10 +4,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createProgram } from "../../packages/cli/src/index.ts";
-import { COMMAND_LOADERS } from "../../packages/cli/src/lazy-program.ts";
-import { parsePiModelsJson } from "../../packages/daemon/src/adapters/pi-readiness.ts";
-import { piSeatPinReadings } from "../../packages/daemon/src/domain/model-divergence/effective-model-readers.ts";
+import { createProgram } from "../../packages/cli/dist/index.js";
+import { COMMAND_LOADERS } from "../../packages/cli/dist/lazy-program.js";
+import { parsePiModelsJson } from "../../packages/daemon/dist/adapters/pi-readiness.js";
+import { piSeatPinReadings } from "../../packages/daemon/dist/domain/model-divergence/effective-model-readers.js";
 
 test("upstream CLI exposes createProgram and its lazy loader map matches the eager command names", () => {
   const program = createProgram();
