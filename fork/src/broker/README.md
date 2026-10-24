@@ -261,6 +261,14 @@ kept in the broker's SQLite file (`seat_drains`), so it survives a broker restar
        with this qitem. Call it only on evidence that the qitem was never delivered.
 
   A reservation leaves the job `queued` and emits nothing. Any transition clears it.
+- **History.** `transitions({afterId?, jobId?, limit?})` reads `job_transitions`, oldest first:
+  one row per state a job enters. That is its initial `queued` or `held` (`from_state` null) and
+  then every transition. Each row has the checked PW-09 `detail` and the row `columns` it set. A
+  row is written in the same transaction as the state change, so the table never disagrees with
+  `jobs`. Ids are monotonic across the store, so a reader can resume after the last id it saw.
+  Reservations and releases are not state changes and are not recorded. A broker file created
+  before this table has no rows for the earlier states of its existing jobs. There is no HTTP
+  route for it yet.
 
 ## Defaults open for review
 
