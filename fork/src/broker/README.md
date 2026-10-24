@@ -47,7 +47,7 @@ The record is `fork/schema/job-record.schema.json`:
 `{jobId, team, class, state, detail, createdAt, updatedAt, result}`.
 - `class` is the resolved class.
 - `detail` is the PW-09 detail for the current state.
-- `result` is `null` until a worker reports (PW-21).
+- `result` is `null` until reconciliation records an authenticated logical completion (PW-21).
 
 Errors are `{error, message}`, plus `errors` for an invalid envelope and `job` for a conflict:
 
@@ -239,8 +239,9 @@ verify that work stopped before any manual recovery.
 
 - Event delivery is in memory (PW-10). A broker that stops while an event is still retrying
   loses that event. The job row is kept. The persistent outbox remains a follow-up.
-- Worker reconciliation stores only the qitem ID as its result; it does not capture the worker's
-  output or infer process exit.
+- Worker reconciliation does not capture the worker's output; until that reporting path exists, it
+  stores `{text: null, artifacts: []}` after authenticated logical completion. It does not infer
+  process exit.
 - A held job cancelled through `/cancel` gets `plantworks.job.state cancelled` (reason
   `front-door`) but no `approval.resolved`. Any token holder can cancel, not only the front door.
   **Consumer rule:** close any open approval prompt on `job.state cancelled`, whatever the
