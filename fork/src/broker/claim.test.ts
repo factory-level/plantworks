@@ -125,6 +125,8 @@ test("fail-closed: an ambiguous handoff keeps the reservation, counted and uncla
     // A day later the reservation still holds its slot (cap 1), and no seat can take the job.
     clock = new Date(clock.getTime() + DAY);
     assert.equal((await t.claim("dev-b@team")).status, 429, `${name}: still counted`);
+    assert.deepEqual(reservationOf(t, "t_1"), ["queued", "dev-a@team", "qitem-test-1"], `${name}: the exact qitem id survives, unchanged`);
+    assert.throws(() => t.store.transition("kb-social-media-t_1-a1", "cancelled", { reason: "front-door" }), /is reserved for a seat/, `${name}: no side transition frees it`);
     const roomy = setup(make().daemon, () => clock);
     await roomy.submit("t_1");
     await roomy.claim("dev-a@team");

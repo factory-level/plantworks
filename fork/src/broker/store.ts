@@ -106,6 +106,9 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
      */
     transition(jobId: string, to: JobState, detail: Record<string, unknown> = {}, columns: TransitionColumns = {}): { row: JobRow; detail: TransitionDetail } {
       if (to === "claimed") throw new Error("claim through confirmClaim, which checks the reservation");
+      // A reserved job is mid-handoff and its qitem may be delivered (PW-19 fail-closed): only
+      // confirmClaim or a verified release may end the reservation, never a side transition.
+      if (get(jobId)?.reserved_by) throw new Error(`job ${jobId} is reserved for a seat; settle the handoff with confirmClaim or release first`);
       return apply(jobId, to, detail, columns);
     },
 
