@@ -25,7 +25,7 @@ const definition = {
   events: { callbackDefault: "${PLANTWORKS_FRONTDOOR_CALLBACK}", approvalConsumer: "frontdoor" },
 };
 
-test("worker and broker restarts preserve drain and never skip a seat's unresolved job", async (t) => {
+test("broker restart preserves drain; worker restart resumes the seat without skipping held work", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "pw-drain-restart-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const teams = join(dir, "teams");
@@ -39,6 +39,7 @@ test("worker and broker restarts preserve drain and never skip a seat's unresolv
 
   const daemonCalls: string[] = [];
   const claimAttempts: string[] = [];
+  const drainLookups: string[] = [];
   const daemon: DaemonQueue = {
     async create(i) { daemonCalls.push(`create:${i.qitemId}:${i.destination}`); },
     async claim(qitem, destination) { daemonCalls.push(`claim:${qitem}:${destination}`); },
@@ -57,7 +58,11 @@ test("worker and broker restarts preserve drain and never skip a seat's unresolv
     claimAttempts.push(store.get(first)?.state ?? "missing");
     await next();
   });
-  const routes = [observeClaims, claimNextRoutes({ daemon, brokerSession: "plantworks-broker", slotCaps: caps, newQitemId: () => "qitem-second", log: () => {} }), runtimeRoutes({ slotCaps: caps })];
+  const observeDrainLookups: BrokerRoutes = (app) => app.use("*", async (c, next) => {
+    if (c.req.method === "GET" && c.req.path === `${API}/seats/${encodeURIComponent(seat)}/drain`) drainLookups.push(c.req.path);
+    await next();
+  });
+  const routes = [observeDrainLookups, observeClaims, claimNextRoutes({ daemon, brokerSession: "plantworks-broker", slotCaps: caps, newQitemId: () => "qitem-second", log: () => {} }), runtimeRoutes({ slotCaps: caps })];
   const options = { store, teams: loadTeams(teams, { ...PHASE_0_1, slotCaps: { t: 1 } }), routes, host: "127.0.0.1", port: 0, send: () => {}, env: {} };
   let broker = await startBroker(options);
   t.after(async () => { await broker.close(); store.close(); });
@@ -87,7 +92,7 @@ test("worker and broker restarts preserve drain and never skip a seat's unresolv
   worker.stderr.setEncoding("utf8").on("data", (s) => workerErr += s);
   t.after(() => { if (worker.exitCode === null) worker.kill("SIGKILL"); });
   await until(() => { if (worker.exitCode !== null) throw new Error(`worker exited ${worker.exitCode}: ${workerErr}`); return !store.isDraining(seat); });
-  await pause(400);
+  await until(() => drainLookups.length >= 1);
   assert.equal(store.get(second)!.state, "queued", "restart resumes the seat but waits for its existing work");
   assert.deepEqual(claimAttempts, [], "the worker must wait before even requesting another claim");
   assert.deepEqual(daemonCalls, []);
@@ -100,7 +105,7 @@ test("worker and broker restarts preserve drain and never skip a seat's unresolv
   broker = await startBroker({ ...options, store });
   const restarted = spawn(process.execPath, [bin, "pw", "worker", "run", "--team", "t", "--seat", seat, "--poll-ms", "250", "--governor-port", "0"], { env: { ...workerEnv, PLANTWORKS_BROKER_URL: broker.url }, stdio: "ignore" });
   t.after(() => { if (restarted.exitCode === null) restarted.kill("SIGKILL"); });
-  await pause(400);
+  await until(() => drainLookups.length >= 2);
   assert.equal(store.get(second)!.state, "queued", "worker death and broker restart do not skip unresolved work");
   assert.deepEqual(claimAttempts, [], "the restarted worker still waits before requesting another claim");
   assert.deepEqual(daemonCalls, []);
