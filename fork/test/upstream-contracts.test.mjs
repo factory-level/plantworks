@@ -9,7 +9,7 @@ import { COMMAND_LOADERS } from "../../packages/cli/dist/lazy-program.js";
 import { parsePiModelsJson } from "../../packages/daemon/dist/adapters/pi-readiness.js";
 import { piSeatPinReadings } from "../../packages/daemon/dist/domain/model-divergence/effective-model-readers.js";
 
-test("upstream CLI exposes createProgram and its lazy loader map matches the eager command names", () => {
+test("upstream CLI createProgram() at packages/cli/src/index.ts:174-195 and COMMAND_LOADERS at lazy-program.ts:14-15 stay in sync", () => {
   const program = createProgram();
   assert.equal(typeof createProgram, "function");
   assert.equal(typeof program.commands, "object");
@@ -21,7 +21,7 @@ test("upstream CLI exposes createProgram and its lazy loader map matches the eag
   assert.deepEqual([...COMMAND_LOADERS.keys()], names);
 });
 
-test("Pi model configuration keeps the provider model contract readable", () => {
+test("Pi models.json parsing at packages/daemon/src/adapters/pi-readiness.ts:55-59 and seat reader at effective-model-readers.ts:225-242 stay compatible", () => {
   const text = `\uFEFF{
     // Pi accepts comments and trailing commas in models.json.
     "providers": { "local": { "models": [
