@@ -58,6 +58,7 @@ test("worker waits on an ambiguous reservation until logical completion before c
       res.end(JSON.stringify({ state }));
       return;
     }
+    if (req.method === "GET" && req.url === "/plantworks/v1/seats/s/drain") { res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ seat: "s", draining: false, inFlight: [] })); return; }
     res.writeHead(404).end();
   });
   server.listen(0, "127.0.0.1");
@@ -91,6 +92,7 @@ test("worker run resumes only its own seat at start, and a failed resume does no
   const server = createServer((req, res) => {
     seen.push(`${req.method} ${req.url}`);
     if (req.method === "DELETE") { res.writeHead(500).end("broker hiccup"); return; }
+    if (req.method === "GET" && req.url!.endsWith("/drain")) { res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ inFlight: [] })); return; }
     if (req.url === "/plantworks/v1/claim-next") { claims++; res.writeHead(204).end(); return; }
     res.writeHead(404).end();
   });
@@ -125,6 +127,7 @@ test("worker run governs its seat with the team spec class: perCall caps output 
   const broker = createServer((req, res) => {
     brokerCalls.push(`${req.method} ${req.url}`);
     if (req.method === "DELETE") { res.writeHead(200, { "content-type": "application/json" }).end("{}"); return; }
+    if (req.url!.endsWith("/drain")) { res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ inFlight: [] })); return; }
     if (req.url === "/plantworks/v1/claim-next") {
       if (brokerCalls.filter((c) => c.endsWith("claim-next")).length > 1) { res.writeHead(204).end(); return; }
       res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ job: { jobId: "job-a" } }));
@@ -182,7 +185,7 @@ test("worker run governs its seat with the team spec class: perCall caps output 
   assert.ok(Date.now() - started < 5_000, "cut at the team's 1 s deadline, not the built-in 60 s");
 
   assert.deepEqual([...new Set(brokerCalls.map((c) => c.split(" ")[0]))].sort(), ["DELETE", "GET", "POST"]);
-  assert.ok(brokerCalls.every((c) => c.startsWith("GET /plantworks/v1/jobs/job-a") || c.endsWith("/claim-next") || c.startsWith("DELETE")), "a 503 or a cut call changes nothing in the broker: the job stays as the broker has it");
+  assert.ok(brokerCalls.every((c) => c.startsWith("GET /plantworks/v1/jobs/job-a") || c.endsWith("/claim-next") || c.endsWith("/drain")), "a 503 or a cut call changes nothing in the broker: the job stays as the broker has it");
   process.emit("SIGTERM" as NodeJS.Signals);
   await running;
   await assert.rejects(fetch(`${provider.baseUrl}/chat/completions`, { method: "POST", body: "{}" }), "a stopped worker's governor takes no more calls");
@@ -201,4 +204,88 @@ test("worker run refuses to start without a valid team spec or an endpoint, befo
   await assert.rejects(governSeat({ ...base, env: {} }), /PLANTWORKS_LLM_URL/);
   // The default platform has no slot cap for `t`, so the spec doesn't validate against it.
   await assert.rejects(governSeat({ ...base, platform: undefined }), /over the platform cap/);
+});
+
+/** Runs `worker run` against `handler` as the broker; returns the broker's calls and a stop function. */
+async function runWorker(t: { after: (fn: () => void) => void }, seat: string, handler: (req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse) => void, llmUrl?: string) {
+  const calls: string[] = [];
+  const broker = createServer((req, res) => { calls.push(`${req.method} ${req.url}`); handler(req, res); });
+  broker.listen(0, "127.0.0.1");
+  await once(broker, "listening");
+  t.after(() => broker.close());
+  const home = workerEnv(t, (broker.address() as { port: number }).port, llmUrl);
+  const oldArgv = process.argv;
+  const oldWrite = process.stderr.write;
+  const errors: string[] = [];
+  process.stderr.write = ((chunk: string) => { errors.push(String(chunk)); return true; }) as typeof process.stderr.write;
+  process.argv = ["node", "plantworks", "worker", "run", "--team", "t", "--seat", seat, "--poll-ms", "250"];
+  t.after(() => { process.argv = oldArgv; process.stderr.write = oldWrite; });
+  const program = new Command();
+  const [{ workerVerb }, { runProgram }] = await Promise.all([import("./worker.ts"), import("../../../packages/cli/dist/index.js")]);
+  workerVerb(program);
+  const running = runProgram(program, process.argv);
+  const stop = async () => { process.emit("SIGTERM" as NodeJS.Signals); await running; };
+  t.after(() => { process.emit("SIGTERM" as NodeJS.Signals); });
+  return { calls, errors, home, stop };
+}
+const json = (res: import("node:http").ServerResponse, body: unknown, status = 200) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
+const until = async (ok: () => boolean) => { while (!ok()) await new Promise((r) => setTimeout(r, 20)); };
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+test("a restarted worker waits on the work its seat still holds, and claims nothing while it can't read that", async (t) => {
+  let lookups = 0;
+  let state = "queued"; // a reservation of any age: the qitem may have been delivered
+  const w = await runWorker(t, "worker-0@t", (req, res) => {
+    if (req.method === "DELETE") return json(res, {});
+    if (req.method === "GET" && req.url!.endsWith("/drain")) return ++lookups < 3 ? json(res, { error: "busy" }, 500) : json(res, { seat: "worker-0@t", draining: false, inFlight: ["job-held"] });
+    if (req.url === "/plantworks/v1/jobs/job-held") return json(res, { state });
+    if (req.url === "/plantworks/v1/claim-next") return res.writeHead(204).end();
+    res.writeHead(404).end();
+  });
+  const claims = () => w.calls.filter((c) => c.endsWith("/claim-next")).length;
+  await until(() => lookups >= 3);
+  assert.equal(claims(), 0, "no claim while the seat's held work is unknown");
+  assert.match(w.errors.join(""), /cannot read what worker-0@t holds \(500\); not claiming/);
+  await until(() => w.calls.includes("GET /plantworks/v1/jobs/job-held"));
+  state = "running";
+  await pause(600);
+  for (const s of ["failed", "cancelled"]) {
+    state = s;
+    await pause(600);
+    assert.equal(claims(), 0, `a broker ${s} is not the seat's completion, so no next claim`);
+  }
+  assert.match(w.errors.join(""), /job-held is failed in the broker, which isn't the seat's completion; worker-0@t takes no next job/);
+  state = "done";
+  await until(() => claims() >= 1);
+  await w.stop();
+});
+
+test("at the job's timeout the seat's model calls are cut off, but the job and its slot stay held and no next job is claimed", async (t) => {
+  const llm = createServer((_req, res) => json(res, { choices: [] }));
+  llm.listen(0, "127.0.0.1");
+  await once(llm, "listening");
+  t.after(() => { llm.closeAllConnections(); llm.close(); });
+  let state = "running";
+  let handed = 0;
+  const w = await runWorker(t, "worker-1@t", (req, res) => {
+    if (req.method === "DELETE") return json(res, {});
+    if (req.url!.endsWith("/drain")) return json(res, { inFlight: [] });
+    if (req.url === "/plantworks/v1/claim-next") return handed++ ? res.writeHead(204).end() : json(res, { job: { jobId: "job-t" }, qitemId: "q", envelope: { timeoutSeconds: 1 } });
+    if (req.url === "/plantworks/v1/jobs/job-t") return json(res, { state });
+    res.writeHead(404).end();
+  }, `http://127.0.0.1:${(llm.address() as { port: number }).port}/v1`);
+  const baseUrl = () => (Object.values(JSON.parse(readFileSync(join(w.home, "state", "pi", "worker-1@t", "agent", "models.json"), "utf8")).providers)[0] as { baseUrl: string }).baseUrl;
+  const call = () => fetch(`${baseUrl()}/chat/completions`, { method: "POST", body: "{}" }).then((r) => r.status);
+  await until(() => w.calls.includes("GET /plantworks/v1/jobs/job-t"));
+  assert.equal(await call(), 200, "before the timeout the seat's calls go through");
+  await until(() => w.errors.join("").includes("passed its 1s timeout"));
+  assert.equal(await call(), 403, "after the timeout they are cut off");
+  assert.match(w.errors.join(""), /Pi and its tools may still be running, so the job and its slot stay held/);
+  await pause(600);
+  assert.equal(handed, 1, "no next claim after a timeout");
+  assert.ok(w.calls.every((c) => !c.startsWith("POST /plantworks/v1/jobs")), "the worker changes no job state");
+  state = "done";
+  await until(() => handed >= 2);
+  assert.equal(await call(), 200, "once the broker records done, the seat's calls go through again");
+  await w.stop();
 });

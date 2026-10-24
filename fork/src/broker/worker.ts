@@ -16,7 +16,7 @@ export const GOVERNOR_PORT = 7535;
  * Pi seat reads them from $OPENRIG_HOME/state/pi/<seat>/agent when it launches, so the worker must
  * start before the seat does. Pi never sees the endpoint or its key; the governor adds the key.
  */
-export async function governSeat(opts: { team: string; seat: string; class?: string; teamsDir?: string; platform?: string; port: number; openrigHome?: string; env?: NodeJS.ProcessEnv; log?: (line: string) => void }): Promise<{ governor: Governor; agentDir: string; className: string }> {
+export async function governSeat(opts: { team: string; seat: string; class?: string; teamsDir?: string; platform?: string; port: number; openrigHome?: string; env?: NodeJS.ProcessEnv; log?: (line: string) => void }): Promise<{ governor: Governor; agentDir: string; className: string; timeoutSeconds: number }> {
   const log = opts.log ?? ((line) => process.stderr.write(`${line}\n`));
   if (!opts.teamsDir) throw new Error("no team specs: pass --teams or set PLANTWORKS_TEAMS_DIR");
   if (!opts.openrigHome) throw new Error("OPENRIG_HOME is not set, so the seat's Pi directory is unknown");
@@ -34,7 +34,7 @@ export async function governSeat(opts: { team: string; seat: string; class?: str
   });
   try {
     const agentDir = writeSeatFiles({ openrigHome: opts.openrigHome, session: opts.seat, className, governorUrl: governor.url, workerClass });
-    return { governor, agentDir, className };
+    return { governor, agentDir, className, timeoutSeconds: spec.classes[className]!.timeoutSeconds };
   } catch (e) {
     await governor.close();
     throw e;
@@ -60,34 +60,77 @@ export function workerVerb(pw: Command): void {
       if (!Number.isInteger(pollMs) || pollMs < 250 || pollMs > 60_000) throw new Error("--poll-ms must be 250..60000");
       const port = Number(opts.governorPort);
       if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new Error("--governor-port must be 0..65535");
-      const { governor, agentDir, className } = await governSeat({ team: opts.team, seat: opts.seat, class: opts.class, teamsDir: opts.teams ?? process.env.PLANTWORKS_TEAMS_DIR, platform: opts.platform ?? process.env.PLANTWORKS_PLATFORM_FILE, port, openrigHome: process.env.OPENRIG_HOME });
+      const { governor, agentDir, className, timeoutSeconds } = await governSeat({ team: opts.team, seat: opts.seat, class: opts.class, teamsDir: opts.teams ?? process.env.PLANTWORKS_TEAMS_DIR, platform: opts.platform ?? process.env.PLANTWORKS_PLATFORM_FILE, port, openrigHome: process.env.OPENRIG_HOME });
       process.stdout.write(`${opts.seat}: class ${className} governed at ${governor.url}; Pi files in ${agentDir}\n`);
+      let stopping = false;
+      process.once("SIGINT", () => { stopping = true; });
+      process.once("SIGTERM", () => { stopping = true; });
+      const sleep = () => new Promise((resolve) => setTimeout(resolve, pollMs));
+      const seatUrl = `${base}/plantworks/v1/seats/${encodeURIComponent(opts.seat)}/drain`;
+
+      /**
+       * Waits until the broker records the job `done`, the only state reconciliation reaches from the
+       * seat's own authenticated closure; nothing else lets this seat take its next job. At the
+       * timeout the governor cuts off the seat's model calls. That stops no tool or process, so the
+       * job and its slot stay held and the wait goes on.
+       */
+      const waitForDone = async (jobId: string, timeoutS: number) => {
+        process.stdout.write(`waiting for broker completion of ${jobId}\n`);
+        const timer = setTimeout(() => {
+          governor.cutOff(`${jobId} passed its ${timeoutS}s timeout`);
+          process.stderr.write(`plantworks worker: ${jobId} passed its ${timeoutS}s timeout; the seat's model calls are cut off. Pi and its tools may still be running, so the job and its slot stay held until the seat closes it\n`);
+        }, timeoutS * 1000);
+        let noted = "";
+        try {
+          while (!stopping) {
+            await sleep();
+            const status = await fetch(`${base}/plantworks/v1/jobs/${encodeURIComponent(jobId)}`, { headers, signal: AbortSignal.timeout(15_000) }).catch(() => null);
+            if (!status?.ok) continue; // broker/daemon uncertainty keeps this worker from taking another job
+            const record = await status.json() as { state: string };
+            if (record.state === "done") return;
+            if (["failed", "cancelled", "retried"].includes(record.state) && noted !== record.state) {
+              noted = record.state;
+              process.stderr.write(`plantworks worker: ${jobId} is ${record.state} in the broker, which isn't the seat's completion; ${opts.seat} takes no next job\n`);
+            }
+          }
+        } finally {
+          clearTimeout(timer);
+          governor.restore();
+        }
+      };
+
       try {
         // PW-22: a (re)started worker resumes its own seat, and only that seat, if a previous pod drained it.
-        const resumed = await fetch(`${base}/plantworks/v1/seats/${encodeURIComponent(opts.seat)}/drain`, { method: "DELETE", headers, signal: AbortSignal.timeout(15_000) }).catch((e: Error) => e);
+        const resumed = await fetch(seatUrl, { method: "DELETE", headers, signal: AbortSignal.timeout(15_000) }).catch((e: Error) => e);
         if (resumed instanceof Error || !resumed.ok) process.stderr.write(`could not resume ${opts.seat} (${resumed instanceof Error ? resumed.message : resumed.status}); claim-next will say if it is still draining\n`);
-        let stopping = false;
-        process.once("SIGINT", () => { stopping = true; });
-        process.once("SIGTERM", () => { stopping = true; });
-        const sleep = () => new Promise((resolve) => setTimeout(resolve, pollMs));
+        // A restarted worker first waits on whatever its seat still holds in the broker (claimed,
+        // running, or queued under its reservation), so a restart can't skip past held work. No
+        // answer means no claim: it asks again.
+        let held: string[] | undefined;
+        while (!stopping && !held) {
+          const view = await fetch(seatUrl, { headers, signal: AbortSignal.timeout(15_000) }).catch(() => null);
+          const answer = view?.ok ? await view.json().catch(() => null) as { inFlight?: unknown } | null : null;
+          if (Array.isArray(answer?.inFlight) && answer.inFlight.every((j) => typeof j === "string")) held = answer.inFlight as string[];
+          else { process.stderr.write(`plantworks worker: cannot read what ${opts.seat} holds (${view?.status ?? "no answer"}); not claiming\n`); await sleep(); }
+        }
+        // The timer starts now, not at the job's claim, so a cut-off after a restart comes late, never early.
+        for (const jobId of held ?? []) if (!stopping) await waitForDone(jobId, timeoutSeconds);
         while (!stopping) {
           const claim = await fetch(`${base}/plantworks/v1/claim-next`, { method: "POST", headers, body: JSON.stringify({ team: opts.team, seat: opts.seat, ...(opts.class ? { class: opts.class } : {}) }), signal: AbortSignal.timeout(15_000) });
           let jobId: string;
+          let timeoutS = timeoutSeconds;
           if (claim.status === 503 || claim.status === 409) {
             const body = await claim.json().catch(() => ({})) as { error?: string; jobId?: string };
             if ((body.error === "handoff_unconfirmed" || body.error === "reservation_lost") && body.jobId) jobId = body.jobId;
             else { await sleep(); continue; }
           } else if (claim.status === 204 || claim.status === 429) { await sleep(); continue; }
           else if (!claim.ok) throw new Error(`claim-next returned ${claim.status}: ${(await claim.text()).slice(0, 300)}`);
-          else jobId = (await claim.json() as { job: { jobId: string } }).job.jobId;
-          process.stdout.write(`waiting for broker completion of ${jobId}\n`);
-          while (!stopping) {
-            await sleep();
-            const status = await fetch(`${base}/plantworks/v1/jobs/${encodeURIComponent(jobId)}`, { headers, signal: AbortSignal.timeout(15_000) });
-            if (!status.ok) continue; // broker/daemon uncertainty keeps this worker from taking another job
-            const record = await status.json() as { state: string };
-            if (record.state === "done") break;
+          else {
+            const claimed = await claim.json() as { job: { jobId: string }; envelope?: { timeoutSeconds?: number } };
+            jobId = claimed.job.jobId;
+            timeoutS = claimed.envelope?.timeoutSeconds ?? timeoutSeconds;
           }
+          await waitForDone(jobId, timeoutS);
         }
       } finally {
         // Pi's model calls stop working with the governor: none goes to the endpoint ungoverned.
