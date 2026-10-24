@@ -3,6 +3,10 @@
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
+  "bin": {
+    "plantworks": "bin/plantworks.mjs",
+    "pwctl": "bin/plantworks.mjs"
+  },
   "engines": {
     "node": ">=22.18"
   },
