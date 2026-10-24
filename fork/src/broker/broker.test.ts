@@ -77,6 +77,9 @@ test("submit refuses what the team spec does not allow, before storing anything"
     assert.equal(res.status, 400, error);
     assert.equal((await res.json()).error, error);
   }
+  const huge = await t.call("POST", "/jobs", JSON.stringify(envelope({ task: { prompt: "x".repeat(600 * 1024) } })));
+  assert.equal(huge.status, 413);
+  assert.equal((await huge.json()).error, "too_large");
   assert.equal(t.store.db.prepare("SELECT count(*) AS n FROM jobs").get().n, 0);
   assert.equal(t.events.length, 0);
 });
@@ -96,11 +99,27 @@ test("inspect and cancel: queued -> cancelled once, cancelled again is 200, a cl
 
   const claimed = envelope({ jobId: "kb-social-media-t_3fa9c01e-a2" });
   await t.call("POST", "/jobs", claimed);
-  t.store.transition(claimed.jobId, "claimed", {}, { claimed_by: "pw-seat-1" });
+  t.store.reserve("social-media", "quick", "pw-seat-1", "q-1");
+  assert.notEqual(t.store.confirmClaim(claimed.jobId, "pw-seat-1", "q-1"), "lost");
   const refused = await t.call("POST", `/jobs/${claimed.jobId}/cancel`);
   assert.equal(refused.status, 409);
   assert.equal((await refused.json()).error, "not_cancellable");
   assert.equal((await t.call("POST", "/jobs/kb-social-media-t_00000000-a1/cancel")).status, 404);
+});
+
+test("submitting the next attempt retires a failed previous one as retried", async () => {
+  const t = setup();
+  const a1 = envelope();
+  await t.call("POST", "/jobs", a1);
+  t.store.reserve("social-media", "quick", "seat-1", "q-1");
+  t.store.confirmClaim(a1.jobId, "seat-1", "q-1");
+  t.store.transition(a1.jobId, "failed", { reason: "error" });
+  assert.equal((await t.call("POST", "/jobs", envelope({ jobId: "kb-social-media-t_3fa9c01e-a2" }))).status, 201);
+  assert.equal(t.store.get(a1.jobId)!.state, "retried");
+  assert.deepEqual(t.events.slice(-2), [["kb-social-media-t_3fa9c01e-a2", "queued", {}], [a1.jobId, "retried", {}]]);
+  // A previous attempt that has not failed is left alone.
+  await t.call("POST", "/jobs", envelope({ jobId: "kb-social-media-t_3fa9c01e-a3" }));
+  assert.equal(t.store.get("kb-social-media-t_3fa9c01e-a2")!.state, "queued");
 });
 
 test("with a token, every API route needs the bearer, including routes other cards add", async () => {
@@ -129,7 +148,9 @@ test("store: transitions are checked and atomic; reservations take the oldest jo
   const store = openStore(":memory:", () => new Date(clock));
   for (const n of [1, 2]) store.insert(envelope({ jobId: `kb-social-media-t_0000000${n}-a1` }) as any, "quick", "queued");
   assert.throws(() => store.transition("kb-social-media-t_00000001-a1", "done", { outcome: "succeeded" }), /illegal job transition queued -> done/);
-  assert.throws(() => store.transition("kb-social-media-t_00000001-a1", "claimed", {}, { state: "done" } as any), /cannot set state/);
+  assert.throws(() => store.transition("kb-social-media-t_00000001-a1", "running", {}, { state: "done" } as any), /illegal|cannot set state/);
+  assert.throws(() => store.transition("kb-social-media-t_00000001-a1", "cancelled", { reason: "front-door" }, { state: "done" } as any), /cannot set state/);
+  assert.throws(() => store.transition("kb-social-media-t_00000001-a1", "claimed"), /claim through confirmClaim/, "a stale seat cannot claim past the reservation");
   assert.equal(store.get("kb-social-media-t_00000001-a1")!.state, "queued");
 
   const a = store.reserve("social-media", "quick", "seat-a", "q-1", 1000)!;
@@ -169,7 +190,8 @@ test("team specs: an invalid spec, a misplaced one or an unset placeholder stops
   assert.throws(() => loadTeams(misplaced, { ...platform, slotCaps: { news: 1 } }), /team is news, but the directory is sports/);
   assert.throws(() => loadTeams(mkdtempSync(join(tmpdir(), "pw-empty-"))), /no team specs/);
 
-  assert.equal(expand("${A}/events", { A: "http://127.0.0.1:1" }), "http://127.0.0.1:1/events");
+  assert.equal(expand("${A_CALLBACK}/events", { A_CALLBACK: "http://127.0.0.1:1" }), "http://127.0.0.1:1/events");
+  assert.throws(() => expand("http://x.invalid/cb?t=${PLANTWORKS_BROKER_TOKEN}", { PLANTWORKS_BROKER_TOKEN: "s3cret" }), /only .*_CALLBACK.* not PLANTWORKS_BROKER_TOKEN/, "a spec cannot copy a broker secret into its callback");
   assert.throws(() => expand("${PLANTWORKS_FRONTDOOR_CALLBACK}", {}), /PLANTWORKS_FRONTDOOR_CALLBACK is not set/);
   const store = openStore(":memory:");
   assert.throws(() => createBroker({ store, teams: loadTeams(teamsDir(), platform), env: {} }), /not set/);

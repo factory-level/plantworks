@@ -66,6 +66,20 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
   const tx = <T>(fn: () => T): T => db.transaction(fn)();
   const get = (jobId: string) => db.prepare("SELECT * FROM jobs WHERE job_id = ?").get(jobId) as JobRow | undefined;
 
+  /** One PW-09 transition and its row update, atomically. Throws on an illegal transition. */
+  const apply = (jobId: string, to: JobState, detail: Record<string, unknown>, columns: TransitionColumns) => tx(() => {
+    const row = get(jobId);
+    if (!row) throw new Error(`no job ${jobId}`);
+    const checked = checkTransition(row.state, to, detail);
+    const names = Object.keys(columns);
+    const bad = names.filter((c) => !TRANSITION_COLUMNS.includes(c));
+    if (bad.length) throw new Error(`transition cannot set ${bad.join(", ")}`);
+    const sets = names.map((c) => `, ${c} = @${c}`).join("");
+    db.prepare(`UPDATE jobs SET state = @to, detail = @detail, updated_at = @at, reserved_by = NULL, reserved_at = NULL, reserved_qitem_id = NULL${sets} WHERE job_id = @jobId`)
+      .run({ ...columns, to, detail: JSON.stringify(checked), at: iso(), jobId });
+    return { row: get(jobId)!, detail: checked };
+  });
+
   const store = {
     db,
     tx,
@@ -81,20 +95,13 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
       });
     },
 
-    /** Applies one PW-09 transition and its row update atomically. Throws on an illegal transition. */
+    /**
+     * Applies one PW-09 transition and its row update atomically. Throws on an illegal transition.
+     * `claimed` is refused here: only confirmClaim may claim, because it checks the reservation.
+     */
     transition(jobId: string, to: JobState, detail: Record<string, unknown> = {}, columns: TransitionColumns = {}): { row: JobRow; detail: TransitionDetail } {
-      return tx(() => {
-        const row = get(jobId);
-        if (!row) throw new Error(`no job ${jobId}`);
-        const checked = checkTransition(row.state, to, detail);
-        const names = Object.keys(columns);
-        const bad = names.filter((c) => !TRANSITION_COLUMNS.includes(c));
-        if (bad.length) throw new Error(`transition cannot set ${bad.join(", ")}`);
-        const sets = names.map((c) => `, ${c} = @${c}`).join("");
-        db.prepare(`UPDATE jobs SET state = @to, detail = @detail, updated_at = @at, reserved_by = NULL, reserved_at = NULL, reserved_qitem_id = NULL${sets} WHERE job_id = @jobId`)
-          .run({ ...columns, to, detail: JSON.stringify(checked), at: iso(), jobId });
-        return { row: get(jobId)!, detail: checked };
-      });
+      if (to === "claimed") throw new Error("claim through confirmClaim, which checks the reservation");
+      return apply(jobId, to, detail, columns);
     },
 
     /**
@@ -123,7 +130,7 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
       return tx(() => {
         const row = get(jobId);
         if (!row || row.state !== "queued" || row.reserved_by !== seat || row.reserved_qitem_id !== qitemId) return "lost";
-        return store.transition(jobId, "claimed", {}, { claimed_by: seat, claimed_at: iso(), qitem_id: qitemId });
+        return apply(jobId, "claimed", {}, { claimed_by: seat, claimed_at: iso(), qitem_id: qitemId });
       });
     },
 

@@ -1,8 +1,12 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Broker (PW-17)
 
-The job broker for a set of teams. It owns its own SQLite file and touches no upstream state,
-routes or migrations.
+The job broker. It owns its own SQLite file and touches no upstream state, routes or migrations.
+
+**Run one broker per team**, as ADR 0204 deploys it (one broker StatefulSet per team). One
+process can load several teams, but that is for development only. The token, the jobs and every
+route are broker-wide, so any caller can read every team's jobs, and a `409 job_conflict` on
+another team's jobId returns that team's record.
 
 ```
 plantworks pw broker serve --teams <dir> [--platform platform.json] [--db file] [--host 127.0.0.1] [--port 7534]
@@ -18,17 +22,19 @@ plantworks pw broker serve --teams <dir> [--platform platform.json] [--db file] 
 - **Bind.** Loopback by default. Any other address needs `PLANTWORKS_BROKER_TOKEN`, the same rule
   the daemon follows (PW-16).
 - **Auth.** With `PLANTWORKS_BROKER_TOKEN` set, every request under `/plantworks/v1/` needs
-  `Authorization: Bearer <token>`, including routes other cards add. Without it (loopback, Phase
+  `Authorization: Bearer <token>`, including routes other cards add under `/plantworks/v1/`. Without it (loopback, Phase
   0-1 dev only), the API is open.
 - **Events.** `plantworks.job.state` (PW-10) is posted to the team's `events.callbackDefault`.
   `${NAME}` placeholders in that value are read from the broker's environment at start, so the
-  sample spec's `${PLANTWORKS_FRONTDOOR_CALLBACK}` works. An unset name stops the broker.
+  sample spec's `${PLANTWORKS_FRONTDOOR_CALLBACK}` works. Only names ending in `_CALLBACK` resolve,
+  so a spec cannot copy a broker secret (its token, an endpoint key) into the URL events go to.
+  Any other name, or an unset one, stops the broker.
 
 ## API
 
 | Request | Response |
 |---|---|
-| `POST /plantworks/v1/jobs` with the PW-09 envelope | `201` and the record for a new job. `200` and the existing record when the same envelope is posted again (key order doesn't matter). `409 job_conflict` when the jobId exists with a different envelope |
+| `POST /plantworks/v1/jobs` with the PW-09 envelope (at most 512 KiB) | `201` and the record for a new job. If the previous attempt (`-a<N-1>`) of the same card has `failed`, it becomes `retried`. `200` and the existing record when the same envelope is posted again (key order doesn't matter). `409 job_conflict` when the jobId exists with a different envelope |
 | `GET /plantworks/v1/jobs/{jobId}` | `200` and the record, or `404 not_found` |
 | `POST /plantworks/v1/jobs/{jobId}/cancel` | `queued` or `held` becomes `cancelled` with reason `front-door`: `200` and the record. Already `cancelled`: `200` (idempotent). Any other state: `409 not_cancellable`. Unknown job: `404 not_found` |
 
@@ -46,6 +52,7 @@ Errors are `{error, message}`, plus `errors` for an invalid envelope and `job` f
 | 401 | `unauthorized` |
 | 404 | `not_found` |
 | 409 | `job_conflict`, `not_cancellable` |
+| 413 | `too_large` |
 
 Submit checks, in order:
 1. A valid envelope.
@@ -65,7 +72,8 @@ cap belong to claim-next (PW-18, PW-19).
 - **Store.** `openStore(path)` returns:
   - `insert`, `get`, and `tx(fn)`;
   - `transition(jobId, to, detail, columns)`: one PW-09 transition and the row update, in one
-    transaction;
+    transaction. It refuses `claimed`, so a seat whose lease was taken over cannot claim around
+    `confirmClaim`;
   - claim-next, in three steps:
     1. `reserve(team, class, seat, qitemId, leaseMs = RESERVATION_LEASE_MS)` returns
        `{job, previousQitemId}`. `previousQitemId` is the expired holder's qitem when this
@@ -81,8 +89,10 @@ cap belong to claim-next (PW-18, PW-19).
 ## Defaults open for review
 
 - Port 7534, next to the daemon's 7533.
-- `${NAME}` placeholders in `callbackDefault` are expanded from the broker's environment. The
-  spec format leaves this undefined.
+- `${NAME}` placeholders in `callbackDefault` are expanded from the broker's environment, for
+  names ending in `_CALLBACK` only. The spec format leaves this undefined.
+- Submitting attempt N retires a `failed` attempt N-1 as `retried`. The ADR names the
+  transition but not its trigger.
 - Approval classes (`approval` other than `never`) are refused with `approval_unsupported` until
   PW-23 adds `held` and decisions, so no job runs unapproved.
 
