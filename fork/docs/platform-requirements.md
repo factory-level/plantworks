@@ -21,7 +21,7 @@ Plantworks runs no model server and manages no GPUs. Whoever runs the endpoint o
 | Requirement | Phase 0–1 value | Where |
 |---|---|---|
 | Served models | `qwen3.5:9b` | `CLASSES` (`fork/src/llm/classes.ts:14`) and the default platform `PHASE_0_1` (`fork/src/team/spec.ts:57`) |
-| Context per call | `quick`, the default: 16384 tokens. `long`: 32768 | `fork/src/llm/classes.ts:14`–`:20` |
+| Context per call | The built-in `pw job run` classes: `quick`, the default, 16384 tokens; `long`, 32768. A team spec's classes set their own `context.maxContextTokens`, within the rules in `fork/src/team/README.md` | `fork/src/llm/classes.ts:14`–`:20` |
 | Platform maximum context | 32768 tokens | `CEILINGS.maxContextTokens` (`fork/src/llm/classes.ts:22`) |
 | Output and time per call | up to 1536 tokens at 16K context or less, 1024 above it. At most 60 s | `CEILINGS`. The platform may **lower** these with `PLANTWORKS_MAX_CALL_OUTPUT` and `PLANTWORKS_MAX_CALL_SECONDS`, never raise them. A higher or malformed value stops the broker (`fork/src/llm/classes.ts:31`) |
 
@@ -49,8 +49,15 @@ team README's validation rules, `fork/src/team/README.md`.
 | The runtime cap on concurrent jobs per `slotBudgetKey` | `PLANTWORKS_SLOT_CAP`, for example `social-media=1` or `2,social-media=1`. **Unset means 1 per key, never unlimited.** `0` stops claims for a key. A malformed value stops the broker | `fork/src/broker/slots.ts:12`–`:22`. Read at broker start (`fork/src/broker/command.ts:36`) |
 
 The cap counts broker job states, not running Pi processes. See "Slot cap" in
-`fork/src/broker/README.md`. The platform file's `slotCaps` decides only whether a spec is valid.
-The broker enforces `PLANTWORKS_SLOT_CAP` at runtime, and the two should agree.
+`fork/src/broker/README.md`.
+
+- **At start:** `pw broker serve` **refuses to start** when the teams sharing a `slotBudgetKey` ask
+  for more `slots` than `PLANTWORKS_SLOT_CAP` gives that key (`fork/src/broker/command.ts:38`,
+  `slotCapProblems`). With the cap unset, that means more than 1. This is the most likely start
+  failure on a new platform.
+- **While running:** claim-next holds every key to its cap.
+- **Validation only:** the platform file's `slotCaps` decides whether a spec is valid
+  (`pw team validate`). It should agree with `PLANTWORKS_SLOT_CAP`.
 
 ## Not in this repository
 
