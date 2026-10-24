@@ -75,6 +75,11 @@ test("submit is idempotent on jobId: 201 new, 200 the same envelope, 409 job_con
   assert.equal(t.store.db.prepare("SELECT count(*) AS n FROM jobs").get().n, 1);
 });
 
+test("rule 5 boundary: a contextBudget equal to the class context is accepted", async () => {
+  const t = setup();
+  assert.equal((await t.call("POST", "/jobs", envelope({ contextBudget: 16384 }))).status, 201);
+});
+
 test("submit refuses what the team spec does not allow, before storing anything", async () => {
   const t = setup();
   const cases: [unknown, string][] = [
