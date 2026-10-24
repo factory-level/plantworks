@@ -13,7 +13,7 @@ function readJson(path: string): unknown {
   }
 }
 
-function loadPlatform(path?: string): Platform {
+export function loadPlatform(path?: string): Platform {
   if (!path) return PHASE_0_1;
   const p = readJson(path);
   const errors = validatePlatform(p);

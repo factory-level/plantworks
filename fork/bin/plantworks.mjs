@@ -29,7 +29,8 @@ if (refused) {
   const { jobVerb } = await import("../src/job/command.ts");
   const { llmVerb } = await import("../src/llm/command.ts");
   const { teamVerb } = await import("../src/team/command.ts");
+  const { brokerVerb } = await import("../src/broker/command.ts");
   // A command may set process.exitCode itself (for example a failed preflight); keep it.
-  const code = await runProgram(createPlantworksProgram([llmVerb, jobVerb, teamVerb]), process.argv);
+  const code = await runProgram(createPlantworksProgram([llmVerb, jobVerb, teamVerb, brokerVerb]), process.argv);
   process.exitCode = process.exitCode || code;
 }
