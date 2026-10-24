@@ -1,0 +1,9 @@
+#!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// The `plantworks` and `pwctl` binaries. Needs the upstream CLI built (`npm run build` at the root).
+// ponytail: always loads the full upstream program (no lazy per-command fast path like `rig`'s
+// bin-wrapper); add one if startup time matters for seats calling this in a loop.
+import { runProgram } from "../../packages/cli/dist/index.js";
+import { createPlantworksProgram } from "../src/cli/program.ts";
+
+process.exitCode = await runProgram(createPlantworksProgram(), process.argv);
