@@ -5,5 +5,8 @@
 // bin-wrapper); add one if startup time matters for seats calling this in a loop.
 import { runProgram } from "../../packages/cli/dist/index.js";
 import { createPlantworksProgram } from "../src/cli/program.ts";
+import { llmVerb } from "../src/llm/command.ts";
 
-process.exitCode = await runProgram(createPlantworksProgram(), process.argv);
+// A command may set process.exitCode itself (for example a failed preflight); keep it.
+const code = await runProgram(createPlantworksProgram([llmVerb]), process.argv);
+process.exitCode = process.exitCode || code;
