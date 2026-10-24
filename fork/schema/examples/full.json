@@ -1,0 +1,17 @@
+{
+  "jobId": "kb-social-media-t_3fa9c01e-a2",
+  "team": "social-media",
+  "class": "long",
+  "task": {
+    "prompt": "Prepare a release announcement",
+    "title": "Release announcement"
+  },
+  "timeoutSeconds": 900,
+  "repo": "factory-level/plantworks",
+  "contextBudget": 8192,
+  "origin": {
+    "kind": "card",
+    "ref": "PW-09"
+  },
+  "priority": "high"
+}
