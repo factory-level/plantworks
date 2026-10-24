@@ -27,12 +27,17 @@ const platform = { ...PHASE_0_1, slotCaps: { "social-media": 1 } };
 const spec = (edit: (d: any) => void = () => {}) => { const d: any = definition(); edit(d); return buildSpec(d) as any; };
 const problems = (edit: (d: any) => void, p = platform) => validateSpec(spec(edit), p);
 
+// The kit's references stay literal: Hermes resolves them, and refuses to connect while one is unset.
+const PROFILE_CONFIG = "kanban:\n  max_in_progress_per_profile: 1\n" +
+  'mcp_servers:\n  plantworks:\n    url: "${PLANTWORKS_MCP_URL}"\n    headers:\n      Authorization: "Bearer ${PLANTWORKS_MCP_TOKEN}"\n' +
+  "    tools:\n      include: [job_submit, job_inspect, job_cancel]\n";
+
 test("the ADR sample is valid, and its profile carries trains × orchestrators as an integer", () => {
   const s = spec();
   assert.deepEqual(validateSpec(s, platform), []);
   assert.deepEqual(s.hermesProfile, { name: "social-media", kanban: { max_in_progress_per_profile: 1 } });
   assert.equal(buildSpec({ ...definition(), trains: 3 }).hermesProfile.kanban.max_in_progress_per_profile, 3);
-  assert.equal(hermesProfileConfig(s as TeamSpec), "kanban:\n  max_in_progress_per_profile: 1\n");
+  assert.equal(hermesProfileConfig(s as TeamSpec), PROFILE_CONFIG);
 });
 
 test("the ADR's map form of max_in_progress_per_profile is rejected (Hermes 0.22.5 would read it as no cap)", () => {
@@ -80,7 +85,9 @@ test("emit writes the spec and an unmodified Hermes profile file, or nothing whe
   const result = emitTeam(definition(), out, platform);
   assert.ok("files" in result);
   assert.deepEqual(JSON.parse(readFileSync(join(out, "social-media", "team.json"), "utf8")), spec());
-  assert.equal(readFileSync(join(out, "social-media", "hermes-profile", "config.yaml"), "utf8"), "kanban:\n  max_in_progress_per_profile: 1\n");
+  assert.equal(readFileSync(join(out, "social-media", "hermes-profile", "config.yaml"), "utf8"), PROFILE_CONFIG);
+  const skill = readFileSync(join(out, "social-media", "hermes-profile", "skills", "plantworks-bridge", "SKILL.md"), "utf8");
+  assert.match(skill, /^---\n[\s\S]*\nname: plantworks-bridge\n/);
 
   const bad = mkdtempSync(join(tmpdir(), "pw-team-"));
   assert.ok("errors" in emitTeam({ ...definition(), trains: 0 }, bad, platform));

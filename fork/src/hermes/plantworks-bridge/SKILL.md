@@ -48,7 +48,8 @@ Do not use it for questions you can answer yourself in the conversation.
      the SRE agent. Do not contact it yourself.
    - `failed`: report the reason. Retry only if the person or the card asks for it, by
      submitting the same card with `attempt` plus 1.
-   - `cancelled`: report the reason.
+   - `cancelled`: report the reason. It is terminal whoever cancelled it. Close any approval
+     prompt you opened for this job: cancelling a held job sends no approval result.
 5. **Cancel.** `job_cancel` works only before the job starts (`queued` or `held`). For a
    running job it returns `not_cancellable`. Say so; the job will end on its own timeout.
 

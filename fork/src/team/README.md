@@ -15,7 +15,8 @@ plantworks pw team validate out/<team>/team.json [--platform platform.json]
 | File | Read by |
 |---|---|
 | `<out>/<team>/team.json` | The team spec: the definition, plus `specVersion` and the derived `hermesProfile`. Schema: `../../schema/fleet.schema.json` |
-| `<out>/<team>/hermes-profile/config.yaml` | A Hermes profile `config.yaml` in Hermes' own format, for #991 to register |
+| `<out>/<team>/hermes-profile/config.yaml` | A Hermes profile `config.yaml` in Hermes' own format, for #991 to register. It includes the `mcp_servers.plantworks` entry of the Hermes kit (`../hermes/README.md`) |
+| `<out>/<team>/hermes-profile/skills/plantworks-bridge/SKILL.md` | The kit's bridge skill, copied as is |
 
 - `spec.ts` holds the types, `buildSpec()`, `validateSpec()` and `hermesProfileConfig()`.
 - `command.ts` holds `emitTeam()` and the CLI.

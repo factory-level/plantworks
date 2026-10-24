@@ -11,11 +11,11 @@ Plantworks team. It has two parts, and needs no Hermes code:
 - **`plantworks-bridge/SKILL.md`**: a Hermes skill that tells the team profile when and how
   to use those tools.
 
-**Status: contract only.** The implementation waits for PW-17 (broker jobs API) and PW-20
-(team/profile emitter) to merge. Anything marked *proposed* still needs the counterpart
-owner's acknowledgement. The jobs API paths and the result fields below are **coordination
-drafts**: no broker stores or serves results yet. They hold only once PW-17 settles them and
-review verifies them.
+**Status:** implemented in `kit.ts` (the tools and both transports) and `command.ts` (the
+verb). The PW-20 emitter writes the profile entry and the skill. It is built against the
+merged PW-17 jobs API (`../broker/README.md`). **No broker stores results yet**: `result`
+stays null until the worker report path (PW-21) exists, so result paging is tested against a
+stub only.
 
 ## Transport and placement
 
@@ -27,10 +27,11 @@ binary in it, so **in a cluster it has to be HTTP**. stdio is for local use and 
 | Mode | Started as | Use |
 |---|---|---|
 | stdio | `plantworks pw mcp serve` | Local Hermes, scripts, tests against a stub broker |
-| HTTP | `plantworks pw mcp serve --http --bind <host:port>` | Hermes in the cluster. Serves `/mcp` and runs in the team's namespace next to its broker |
+| HTTP | `plantworks pw mcp serve --http [--bind <host:port>]` (default `127.0.0.1:7535`) | Hermes in the cluster. Serves `/mcp` and runs in the team's namespace next to its broker |
 
 There is one server per team, and **the team is fixed by the server, never chosen by a
-caller**. The server reads `PLANTWORKS_BROKER_URL` (the team's broker) and `PLANTWORKS_TEAM`.
+caller**. The server reads `PLANTWORKS_TEAM` (required) and `PLANTWORKS_BROKER_URL` (default
+`http://127.0.0.1:7534`).
 A tool call has no `team` argument, so a profile cannot submit to another team's queue.
 
 A broker can serve several teams (PW-17 loads every team spec in its directory), and a
@@ -40,9 +41,10 @@ job first and cancels only if it is this team's. A job's team never changes, so 
 safe. The broker token itself is broker-wide. The team scope is this server's, for the
 Hermes profile.
 
-Hermes profile entry. PW-24 adds it to the PW-20 emitter (`hermesProfileConfig()`) after PW-20
-merges, along with the skill at `hermes-profile/skills/plantworks-bridge/SKILL.md`. A Hermes
-0.22.5 profile home reads its skills from `skills/`:
+The Hermes profile entry. `plantworks pw team emit` writes it into
+`hermes-profile/config.yaml` (`hermesProfileConfig()`), and writes the skill to
+`hermes-profile/skills/plantworks-bridge/SKILL.md`, because a Hermes 0.22.5 profile home reads
+its skills from `skills/`:
 
 ```yaml
 mcp_servers:
@@ -147,7 +149,6 @@ with reason `front-door`.
 | Input | Required | Meaning |
 |---|---|---|
 | `jobId` | yes | a full `jobId` |
-| `message` | no | at most 500 characters, stored as the cancel `message` |
 
 A running job cannot be cancelled. The state machine has no `running -> cancelled`. The
 answer is then `code: "not_cancellable"` with the current `state`, and nothing changes.
@@ -209,14 +210,16 @@ The tools never block or wait server-side. Each call returns at once.
 
 ## Out of scope
 
-- Approval decisions (PW-23). The kit shows `held` but does not approve or deny.
+- Approval decisions (PW-23). The kit shows `held` but does not approve or deny. The server
+  holds the broker token, so it must never act as a decider: it calls only the three jobs
+  routes above and never a `decisionUrl` (the tests check every path it calls).
 - Registering the profile on the shared Hermes and deploying the HTTP server. Both belong
   to the platform.
 - Any change to Hermes, the broker's state machine or the event fields.
 
-## Acceptance (for the implementation PR)
+## Acceptance
 
-Stub-only: a stub broker in the test answers the jobs API, and an MCP client from the SDK
+Stub-only (`kit.test.ts`): a stub broker in the test answers the jobs API, and an MCP client from the SDK
 calls the server over stdio and over HTTP. The tests check:
 
 - idempotent submit
@@ -246,5 +249,5 @@ merges and review verifies them:
 | Jobs API | build (PW-17) | `POST /plantworks/v1/jobs`: 201 for a new job, 200 when the same envelope is repeated, 409 `job_conflict` when a `jobId` is reused with a different envelope, 400 `invalid_envelope`/`unknown_team`/`unknown_class`/`timeout_over_ceiling`/`approval_unsupported`, and 401 `unauthorized`. Error bodies are `{ error, message }`. `GET /plantworks/v1/jobs/{jobId}`: the record, or 404. `POST /plantworks/v1/jobs/{jobId}/cancel`: 200 for `queued`/`held` (and for an already `cancelled` job), 409 for other states, 404 when unknown |
 | Job record | build (PW-17) | `{ jobId, team, class, state, detail, createdAt, updatedAt, result }`. `result` is null until the job is terminal, then `{ text \| null, artifacts: [{ name, bytes, sha256 }] }`. It stays null until the worker report path (PW-21) exists, and `artifacts` stays `[]` until artifact storage is scheduled. **No result storage exists yet.** PW-17 sets no cap on stored text, because nothing writes it yet. PW-21 adds the cap. The 16,000-character paging is client-side |
 | Broker auth | build (PW-17) | Bearer `PLANTWORKS_BROKER_TOKEN` on every `/plantworks/v1/` route. The default bind is `127.0.0.1:7534`. Loopback with no token configured is unauthenticated, for Phase 0–1 development only |
-| `mcp_servers.plantworks` and the skill in the emitted profile | build2 (PW-20) | PW-24 adds both to the emitter after PW-20 merges. The `${}` references stay literal |
+| `mcp_servers.plantworks` and the skill in the emitted profile | build2 (PW-20) | Done in this PR: `hermesProfileConfig()` and `emitTeam()`. The `${}` references stay literal |
 | Event push into Hermes | lead | Unsupported; a future integration gap. No signing or relay in this card |
