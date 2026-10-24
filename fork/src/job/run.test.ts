@@ -21,8 +21,11 @@ afterEach(async () => {
 });
 
 async function setup(piMode = "ok") {
+  // Each server is tracked the moment it listens, so one that started is closed even if the next fails to.
   const model = await stubModel("hello from the stub");
+  open.add(model.close);
   const consumer = await stubConsumer();
+  open.add(consumer.close);
   const home = mkdtempSync(join(tmpdir(), "pw-run-"));
   const opts = (over: Partial<RunOptions> = {}): RunOptions => ({
     envelope, callbackUrl: consumer.url, openrigHome: home, cwd: home, piCommand: fakePi,
@@ -30,7 +33,6 @@ async function setup(piMode = "ok") {
   });
   let closed: Promise<unknown> | undefined;
   const close = () => (closed ??= Promise.all([model.close(), consumer.close()]));
-  open.add(close);
   return { model, consumer, home, opts, close };
 }
 
