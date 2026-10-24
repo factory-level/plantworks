@@ -28,7 +28,8 @@ if (refused) {
   const { createPlantworksProgram } = await import("../src/cli/program.ts");
   const { jobVerb } = await import("../src/job/command.ts");
   const { llmVerb } = await import("../src/llm/command.ts");
+  const { teamVerb } = await import("../src/team/command.ts");
   // A command may set process.exitCode itself (for example a failed preflight); keep it.
-  const code = await runProgram(createPlantworksProgram([llmVerb, jobVerb]), process.argv);
+  const code = await runProgram(createPlantworksProgram([llmVerb, jobVerb, teamVerb]), process.argv);
   process.exitCode = process.exitCode || code;
 }
