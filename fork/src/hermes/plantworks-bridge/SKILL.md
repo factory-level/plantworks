@@ -31,9 +31,12 @@ Do not use it for questions you can answer yourself in the conversation.
    class. Record the returned `jobId` on the card.
 2. **Submitting again is safe.** The same board, card and attempt return the same job. Never
    raise `attempt` to "resend" a job that is still queued or running.
-3. **Follow.** Call `job_inspect` with the `jobId`, at most once every 60 seconds, until the
-   state is `done`, `failed` or `cancelled`. While the job is `held`, it is waiting for an
-   approval; tell the person rather than polling.
+3. **Follow, within a budget.** Call `job_inspect` with the `jobId` at most 5 times, at
+   least 60 seconds apart, until the state is `done`, `failed` or `cancelled`. If the budget
+   runs out first, stop and tell the person the job is **pending**, with its `jobId` and last
+   state; check again only when asked or on a later scheduled turn. Never poll in an
+   open-ended loop. A `held` job waits for an approval, not for time: say so and stop.
+   Nothing pushes job events to you; you learn the state only by inspecting.
 4. **Report.**
    - `done` with outcome `succeeded`: summarise `result.text` for the person. If
      `result.truncated` is true and the answer needs more, call `job_inspect` again with

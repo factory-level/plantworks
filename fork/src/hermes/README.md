@@ -13,7 +13,9 @@ Plantworks team. It has two parts, and needs no Hermes code:
 
 **Status: contract only.** The implementation waits for PW-17 (broker jobs API) and PW-20
 (team/profile emitter) to merge. Anything marked *proposed* still needs the counterpart
-owner's acknowledgement.
+owner's acknowledgement. The jobs API paths and the result fields below are **coordination
+drafts**: no broker stores or serves results yet. They hold only once PW-17 settles them and
+review verifies them.
 
 ## Transport and placement
 
@@ -155,22 +157,31 @@ This is what a caller can retrieve, and how much.
    `jobId`. There is no list or search tool, so a caller cannot enumerate jobs or read
    another team's results.
 4. **Retention is the broker's.** A result is readable while the broker keeps the job
-   (PW-17 owns retention). Once it is gone, inspect returns `not_found`, and the kit keeps
+   (PW-17 owns retention, and result storage does not exist yet). Once it is gone, inspect returns `not_found`, and the kit keeps
    no copy.
 5. **Results are untrusted data.** A Pi worker that runs code produced them. The skill tells
    Hermes to treat result text as data to report, never as instructions to follow.
 6. **Errors stay terse.** The `message` of a failed job is passed through, at most 2,000
    characters. Stack traces and broker internals are never returned.
 
-## How Hermes learns a job finished
+## How Hermes learns a job finished: by pulling, within a budget
 
-The broker sends `plantworks.job.state` (PW-10) to the operator-set `events.callbackDefault`.
-An unmodified Hermes accepts inbound events only through its webhook adapter, which needs
-an HMAC signature (`X-Webhook-Signature-V2` plus `X-Webhook-Timestamp`). The PW-10 emitter
-does not sign today. **Until it does, or until a relay signs on its behalf, the kit does not
-claim event push into Hermes.** The skill polls with `job_inspect` (at most once every 60
-seconds, while the job is not terminal). Signing is a gap outside PW-24, raised with the
-lead. It changes no event fields.
+**Event push into Hermes is unsupported.** The broker sends `plantworks.job.state` (PW-10)
+to the operator-set `events.callbackDefault`. An unmodified Hermes accepts inbound events only
+through its webhook adapter, which needs an HMAC signature (`X-Webhook-Signature-V2` plus
+`X-Webhook-Timestamp`), and the PW-10 emitter does not sign. Push stays unsupported until
+signature and auth integration is built and verified against the pinned Hermes version. That
+is a future integration gap. This kit adds no signing and no relay.
+
+Hermes pulls with `job_inspect` instead, on a **bounded budget per request**:
+
+- at most 5 inspects, at least 60 seconds apart (about 5 minutes in all);
+- if the job is still not terminal after that, Hermes stops and tells the caller the job is
+  **pending**, with its `jobId` and last state. It inspects again only when asked again or on
+  a later scheduled turn, never in an open-ended loop;
+- a `held` job ends the budget at once: it waits on an approval, not on time.
+
+The tools never block or wait server-side. Each call returns at once.
 
 ## Out of scope
 
