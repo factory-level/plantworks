@@ -36,6 +36,30 @@ test("rewriting a seat replaces its files, and unsafe session names or classes a
   assert.throws(() => writeSeatFiles({ openrigHome: h, session: "s2", className: "huge", governorUrl: "http://127.0.0.1:1" }), /unknown worker class/);
 });
 
+test("every rendered field is one the pinned Pi 1.4.0 schemas declare, with the declared type", () => {
+  const schema = (n: string) => JSON.parse(readFileSync(new URL(`../../test/fixtures/pi-1.4.0/${n}.schema.json`, import.meta.url), "utf8"));
+  const models = schema("models");
+  const settings = schema("settings");
+  const provider = models.properties.providers.patternProperties["^.*$"].properties;
+  const typeOf = (v: unknown) => (Array.isArray(v) ? "array" : typeof v);
+  const check = (where: string, value: Record<string, unknown>, declared: Record<string, { type?: string }>) => {
+    for (const [k, v] of Object.entries(value)) {
+      assert.ok(Object.hasOwn(declared, k), `${where}.${k} is not a Pi 1.4.0 field`);
+      if (typeof declared[k].type === "string") assert.equal(typeOf(v), declared[k].type, `${where}.${k}`);
+    }
+  };
+  for (const className of Object.keys(CLASSES)) {
+    const dir = writeSeatFiles({ openrigHome: home(), session: "s", className, governorUrl: "http://127.0.0.1:1" });
+    const m = read(dir, "models.json");
+    const s = read(dir, "settings.json");
+    check("models", m, models.properties);
+    check(`providers.${PROVIDER}`, m.providers[PROVIDER], provider);
+    check("models[0]", m.providers[PROVIDER].models[0], provider.models.items.properties);
+    check("settings", s, settings.properties);
+    assert.ok(settings.$defs.ModelThinkingLevel.enum.includes(s.defaultThinkingLevel));
+  }
+});
+
 test("the upstream daemon reads the rendered models.json as Pi's model config", () => {
   const dir = writeSeatFiles({ openrigHome: home(), session: "s", className: "quick", governorUrl: "http://127.0.0.1:1" });
   const config = parsePiModelsJson(readFileSync(join(dir, "models.json"), "utf8"));
