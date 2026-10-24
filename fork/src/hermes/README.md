@@ -89,7 +89,7 @@ return the existing job and do not create a second one.
 |---|---|---|
 | `board` | yes | the `jobId` board slug (Hermes kanban board) |
 | `cardId` | yes | the `jobId` card (Hermes kanban task ID, for example `t_3fa9c01e`) |
-| `attempt` | yes | positive integer. A new attempt is how Hermes retries a `failed` job |
+| `attempt` | yes | positive integer. A new attempt is how Hermes retries a `failed` job. It creates a new job; the broker does not move the previous attempt to `retried` (a documented PW-17 gap), so that one stays `failed` |
 | `prompt` | yes | `task.prompt`, at most 65,536 characters |
 | `title` | no | `task.title`, at most 200 characters |
 | `class` | no | queue class. When absent the broker uses the team's default (16K) class |
