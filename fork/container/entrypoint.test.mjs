@@ -3,7 +3,8 @@
 // without Docker. fork/container/smoke.sh checks the real image.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:http";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,11 +15,11 @@ const entrypoint = fileURLToPath(new URL("./entrypoint.sh", import.meta.url));
 function run(args, env = {}) {
   const bin = mkdtempSync(join(tmpdir(), "pw-ep-"));
   const log = join(bin, "calls");
-  // The fake records each call; `daemon status` reports a stopped daemon, so the daemon role exits.
-  writeFileSync(join(bin, "plantworks"), `#!/usr/bin/env bash\necho "$*" >> "${log}"\n`);
+  // The fake records each call. `daemon status` prints $FAKE_STATUS (empty: a stopped daemon, so the daemon role exits).
+  writeFileSync(join(bin, "plantworks"), `#!/usr/bin/env bash\necho "$*" >> "${log}"\n[ "$*" = "daemon status" ] && printf '%s\\n' "\${FAKE_STATUS:-}"\nexit 0\n`);
   chmodSync(join(bin, "plantworks"), 0o755);
   writeFileSync(log, "");
-  const r = spawnSync("bash", [entrypoint, ...args], { encoding: "utf8", env: { PATH: `${bin}:/usr/bin:/bin`, ...env } });
+  const r = spawnSync("bash", [entrypoint, ...args], { encoding: "utf8", env: { PATH: `${bin}:${process.env.PATH}`, FORK_ROLE_FILE: join(bin, "role"), ...env } });
   return { code: r.status, stderr: r.stderr, stdout: r.stdout, calls: readFileSync(log, "utf8").trim().split("\n").filter(Boolean) };
 }
 
@@ -63,4 +64,54 @@ test("anything else goes to the plantworks CLI unchanged; help prints the roles"
   assert.equal(help.code, 0);
   assert.match(help.stdout, /daemon`, `broker` or `worker`/);
   assert.deepEqual(help.calls, []);
+});
+
+// Health runs separately from the role, so it reads the role from FORK_ROLE_FILE.
+function health(role, env = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "pw-health-"));
+  const roleFile = join(dir, "role");
+  if (role) writeFileSync(roleFile, `${role}\n`);
+  return run(["health"], { FORK_ROLE_FILE: roleFile, ...env });
+}
+
+test("each role records itself for the health check", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pw-role-"));
+  for (const [args, env, role] of [[["broker"], {}, "broker"], [["worker"], { PLANTWORKS_TEAM: "t", PLANTWORKS_SEAT: "s@t" }, "worker"], [["daemon"], {}, "daemon"]]) {
+    const file = join(dir, role);
+    run(args, { FORK_ROLE_FILE: file, ...env });
+    assert.match(readFileSync(file, "utf8").trim(), role === "worker" ? /^worker \d+$/ : new RegExp(`^${role}$`));
+  }
+});
+
+test("health: broker is healthy only on a 200 from /healthz", async () => {
+  let status = 200;
+  const server = createServer((req, res) => res.writeHead(req.url === "/healthz" ? status : 404).end("{}"));
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = String(server.address().port);
+  // spawnSync would block the stub server, so run the check asynchronously.
+  const check = (env) => new Promise((resolve) => {
+    const dir = mkdtempSync(join(tmpdir(), "pw-health-"));
+    writeFileSync(join(dir, "role"), "broker\n");
+    spawn("bash", [entrypoint, "health"], { env: { ...process.env, FORK_ROLE_FILE: join(dir, "role"), PLANTWORKS_BROKER_PORT: port, ...env } }).on("exit", resolve);
+  });
+  try {
+    assert.equal(await check({}), 0);
+    assert.equal(await check({ PLANTWORKS_BROKER_HOST: "0.0.0.0" }), 0, "a wildcard bind is probed on loopback");
+    status = 503;
+    assert.equal(await check({}), 1, "503 unavailable is unhealthy");
+  } finally {
+    server.close();
+  }
+  assert.equal(await check({ PLANTWORKS_BROKER_PORT: "9" }), 1, "no broker is unhealthy");
+});
+
+test("health: daemon must be running and not UNHEALTHY; a dead worker or no role behaves as documented", () => {
+  assert.equal(health("daemon", { FAKE_STATUS: "Daemon running on port 7533 (pid 42)" }).code, 0);
+  assert.equal(health("daemon", { FAKE_STATUS: "Daemon running on port 7533 (pid 42) — process present but UNHEALTHY: healthz failed" }).code, 1);
+  assert.equal(health("daemon", { FAKE_STATUS: "Daemon not running" }).code, 1);
+  assert.equal(health(`worker ${process.pid}`).code, 0, "the recorded worker process is alive");
+  const gone = spawnSync("true").pid;
+  assert.equal(health(`worker ${gone}`).code, 1, "the recorded worker process is gone");
+  assert.equal(health("worker").code, 1, "no recorded worker process");
+  assert.equal(health(null).code, 0, "a one-off command has no role to check");
 });

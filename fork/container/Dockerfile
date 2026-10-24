@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # The fork's runtime image: one image, three roles (daemon, broker, worker), chosen by the first
 # argument to the entrypoint. Built only by fork/container/build.sh, from a clean `git archive` of
-# one commit, so untracked files (and anything secret in a working tree) can't reach the image.
+# one commit: untracked and local files can't reach the image, but every file tracked at that
+# commit does, so a secret committed to the repository would too.
 # Nothing is pushed: the image is tagged locally (fork-runtime:<commit>).
 #
 # Pins:
@@ -62,5 +63,7 @@ ENV OPENRIG_HOME=/var/lib/fork \
     NODE_ENV=production
 USER fork
 WORKDIR /var/lib/fork
+# Health by role (see entrypoint.sh `health`): the broker's /healthz, the daemon's status, the worker's process.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 CMD ["/app/fork/container/entrypoint.sh", "health"]
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/fork/container/entrypoint.sh"]
 CMD ["help"]

@@ -28,6 +28,8 @@ ok "plantworks --version is ${want}"
 ok "runs as non-root uid 10001"
 docker run --rm --entrypoint sh "${img}" -c 'npm ls -g --depth=0 2>/dev/null' | grep -q "@earendil-works/pi-coding-agent@1.4.0" || fail "Pi 1.4.0 is not the installed Pi"
 ok "Pi is the pinned @earendil-works/pi-coding-agent@1.4.0"
+docker inspect -f '{{json .Config.Healthcheck.Test}}' "${img}" | grep -q 'entrypoint.sh","health"' || fail "the image declares no role-aware HEALTHCHECK"
+ok "the image declares the role-aware HEALTHCHECK"
 
 set +e
 docker run --rm -e OPENRIG_BIND_HOST=0.0.0.0 "${img}" daemon >/dev/null 2>"${work}/refuse.err"
@@ -44,6 +46,8 @@ tcp="$(docker exec "${id}-d" cat /proc/net/tcp /proc/net/tcp6 | awk '$4 == "0A" 
 echo "${tcp}" | grep -q '^0100007F:1D6D$' || fail "the daemon is not listening on 127.0.0.1:7533"
 ! echo "${tcp}" | grep ':1D6D$' | grep -qv '^0100007F:' || fail "the daemon listens beyond loopback"
 ok "daemon listens on 127.0.0.1:7533 only"
+docker exec "${id}-d" /app/fork/container/entrypoint.sh health || fail "daemon health check failed"
+ok "daemon health check passes"
 
 cat > "${work}/def.json" <<'JSON'
 {"team":"smoke","trains":1,"perTrain":{"orchestrators":1,"workers":{"quick":1}},"endpoint":{"url":"${PLANTWORKS_LLM_URL}","slotBudgetKey":"smoke"},"defaultClass":"quick",
@@ -63,6 +67,8 @@ ok "broker role starts on 127.0.0.1:7534 in the daemon's network namespace"
 api /jobs POST '{"jobId":"kb-smoke-t_1-a1","team":"smoke","task":{"prompt":"smoke"}}' | grep -q '^201' || fail "submitting a job failed"
 api /jobs/kb-smoke-t_1-a1 GET | grep -q '"state":"queued"' || fail "the submitted job is not queued"
 ok "broker accepts a job (201, queued)"
+docker exec "${id}-b" /app/fork/container/entrypoint.sh health || fail "broker health check (/healthz) failed"
+ok "broker health check (/healthz 200) passes"
 
 set +e
 docker run --rm "${img}" worker >/dev/null 2>"${work}/worker.err"
@@ -73,6 +79,8 @@ ok "worker role refuses to start without PLANTWORKS_TEAM/PLANTWORKS_SEAT"
 docker run -d --name "${id}-w" --network "container:${id}-d" -e PLANTWORKS_TEAM=smoke -e PLANTWORKS_SEAT=smoke-worker@smoke "${img}" worker >/dev/null
 sleep 6
 [ "$(docker inspect -f '{{.State.Running}}' "${id}-w")" = true ] || { docker logs "${id}-w" | tail -20; fail "the worker exited"; }
+docker exec "${id}-w" /app/fork/container/entrypoint.sh health || fail "worker health check failed"
+ok "worker health check passes"
 # The seat smoke-worker@smoke doesn't exist, so this checks the worker loop runs, not a handoff to Pi.
 echo "   job after the worker ran: $(api /jobs/kb-smoke-t_1-a1 GET | cut -c1-160)"
 echo "   worker log: $(docker logs "${id}-w" 2>&1 | tail -n 3 | tr '\n' ' ' | cut -c1-240)"

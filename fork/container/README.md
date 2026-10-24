@@ -13,13 +13,14 @@ fork/container/smoke.sh [image]    # checks every role against stubs (needs Dock
 | `daemon` | `plantworks daemon start` (PW-16: Pi-only, no kernel), then follows its log; the container stops when the daemon does | `127.0.0.1:7533` only. Any other `OPENRIG_BIND_HOST` is refused (exit 2) |
 | `broker` | `plantworks pw broker serve` (PW-17/18/19) | `PLANTWORKS_BROKER_HOST:PLANTWORKS_BROKER_PORT`, default `127.0.0.1:7534`. A non-loopback bind needs `PLANTWORKS_BROKER_TOKEN` (the broker refuses otherwise) |
 | `worker` | `plantworks pw worker run --team $PLANTWORKS_TEAM --seat $PLANTWORKS_SEAT [--class $PLANTWORKS_CLASS]` (PW-21) | nothing |
-| anything else | `plantworks <args>`, for example `--version`, `pw team emit ...` or `pw worker drain ...` once PW-22 merges | |
+| `health` | the role-aware health check the image's `HEALTHCHECK` runs | |
+| anything else | `plantworks <args>`, for example `--version`, `pw team emit ...` or `pw worker drain ...` | |
 
 **Environment and paths:**
 - **State:** `OPENRIG_HOME=/var/lib/fork` holds the daemon home and the broker's SQLite, so mount a volume there.
 - **Team specs:** these are read from `/etc/fork/teams/<team>/team.json`; mount the emitted files read-only.
 - **Broker settings:** `PLANTWORKS_PLATFORM_FILE` and `PLANTWORKS_BROKER_DB` pass `--platform` and `--db` through.
-- **Secrets:** `PLANTWORKS_SLOT_CAP`, `PLANTWORKS_BROKER_TOKEN`, `PLANTWORKS_LLM_URL`, `PLANTWORKS_LLM_API_KEY` and `*_CALLBACK` are read as usual. No secret is baked into the image.
+- **Secrets:** `PLANTWORKS_SLOT_CAP`, `PLANTWORKS_BROKER_TOKEN`, `PLANTWORKS_LLM_URL`, `PLANTWORKS_LLM_API_KEY` and `*_CALLBACK` are passed at run time. The build adds no secret of its own.
 
 ## How the roles fit together, and what this doesn't solve
 
@@ -29,17 +30,24 @@ fork/container/smoke.sh [image]    # checks every role against stubs (needs Dock
   `PLANTWORKS_SEAT` that stays the same across restarts, and no two workers may ever run for the
   same seat at once. So don't run workers as one Deployment with replicas sharing a `--seat`:
   give each seat its own workload (for example a StatefulSet ordinal or one Deployment per seat).
-  Overlapping workers on a seat can interfere with each other's drain (PW-22) and with
-  reconciliation.
+  A second worker on the seat resumes it and voids an in-progress drain (which then exits 4),
+  and overlapping workers interfere with reconciliation. A StatefulSet with seat = pod name is the
+  safe shape. The seat must also be a Pi seat that the daemon in that pod actually runs.
 - **The slot cap is unchanged.** It counts broker job states, not physical Pi execution. An ambiguous handoff keeps its slot, and stopping a worker container proves nothing about a Pi run in progress.
-- **No health check yet; it's tracked in this card.** The image defines no `HEALTHCHECK` until PW-22 (the broker's `/healthz` and `worker drain`) merges. PW-25 then adds it, with a delta review and a smoke run on the final head. Until then, `worker drain` isn't available.
+- **Health is liveness only.** The image's `HEALTHCHECK` runs `entrypoint.sh health`, which checks by role:
+  - broker: `GET /healthz` (PW-22, unauthenticated) answers 200, so the broker serves and its store answers;
+  - daemon: `daemon status` reports it running and not UNHEALTHY;
+  - worker: the `pw worker run` process the role started (its recorded PID) is alive.
+
+  It says nothing about jobs, slots or any Pi run.
+- **Drain doesn't stop termination.** Use `plantworks pw worker drain --seat <seat> --timeout-s <n>` as the worker's preStop hook. It exits 0 when drained, 3 on timeout and 4 when another worker resumed the seat. A non-zero exit doesn't stop Kubernetes (or `docker stop`) from terminating the container after the grace period. Termination after 3 or 4 doesn't prove that Pi stopped, so the slot cap still counts only broker job states.
 
 ## Pins and how the image is built
 
 - **Base:** upstream's digest-pinned Debian, `docker/testbed/base-image`. `build.sh` refuses a reference without `@sha256:`.
 - **Node:** 22.22.1, upstream's testbed pin, checked against nodejs.org's `SHASUMS256.txt`.
 - **Pi:** `@earendil-works/pi-coding-agent@1.4.0`, whose npm integrity is checked against the platform pin before install. Pi's own dependencies are still resolved from the npm registry at build time; they aren't pinned.
-- **Source:** the build context is a clean `git archive` of one commit, so untracked files can't reach the image. The CLI and daemon are built with `npm ci` from the committed lockfile, and the fork imports their `dist/` by path.
+- **Source:** the build context is a clean `git archive` of one commit. Untracked and local files can't reach the image, but every file tracked at that commit does, so a secret committed to the repository would be included too; the archive is no substitute for keeping secrets out of git. The CLI and daemon are built with `npm ci` from the committed lockfile, and the fork imports their `dist/` by path.
 - **Runtime:** the image runs as uid 10001 under `tini`. It is tagged locally only, with no registry and no published digest.
 
 ## Deliberately left out

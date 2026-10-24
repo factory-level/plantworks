@@ -11,6 +11,10 @@
 set -euo pipefail
 
 role="${1:-help}"
+# The image's HEALTHCHECK runs `entrypoint.sh health` and can't see which role started the
+# container, so each long-running role records itself here.
+role_file="${FORK_ROLE_FILE:-/tmp/fork-role}"
+loopback_of() { case "$1" in 0.0.0.0|::|"") echo 127.0.0.1 ;; *) echo "$1" ;; esac; }
 case "${role}" in
   daemon)
     shift
@@ -19,6 +23,7 @@ case "${role}" in
       127.0.0.1|localhost|::1) ;;
       *) echo "fork-runtime: refusing to bind the daemon on ${host}; it binds loopback only (its queue routes are unauthenticated)" >&2; exit 2 ;;
     esac
+    echo daemon > "${role_file}"
     plantworks daemon start --host "${host}" "$@"
     # `daemon start` detaches the daemon. Follow its log into the container's output, and stop
     # the container when the daemon stops.
@@ -33,6 +38,7 @@ case "${role}" in
     args=(pw broker serve --host "${PLANTWORKS_BROKER_HOST:-127.0.0.1}" --port "${PLANTWORKS_BROKER_PORT:-7534}")
     [ -n "${PLANTWORKS_PLATFORM_FILE:-}" ] && args+=(--platform "${PLANTWORKS_PLATFORM_FILE}")
     [ -n "${PLANTWORKS_BROKER_DB:-}" ] && args+=(--db "${PLANTWORKS_BROKER_DB}")
+    echo broker > "${role_file}"
     exec plantworks "${args[@]}" "$@"
     ;;
   worker)
@@ -41,7 +47,28 @@ case "${role}" in
     : "${PLANTWORKS_SEAT:?set PLANTWORKS_SEAT to the Pi seat session this worker drives}"
     args=(pw worker run --team "${PLANTWORKS_TEAM}" --seat "${PLANTWORKS_SEAT}")
     [ -n "${PLANTWORKS_CLASS:-}" ] && args+=(--class "${PLANTWORKS_CLASS}")
+    # exec keeps this PID, so health checks exactly this worker process.
+    echo "worker $$" > "${role_file}"
     exec plantworks "${args[@]}" "$@"
+    ;;
+  health)
+    # Container health, by role. The broker: its unauthenticated /healthz (PW-22) answers 200, which
+    # means the process serves and its store answers. The daemon: `daemon status` reports it running
+    # and not UNHEALTHY. The worker: the `pw worker run` process the role started is alive. Health says nothing about
+    # jobs or about any Pi run.
+    read -r recorded pid < "${role_file}" 2>/dev/null || true
+    case "${recorded:-}" in
+      broker)
+        url="http://$(loopback_of "${PLANTWORKS_BROKER_HOST:-127.0.0.1}"):${PLANTWORKS_BROKER_PORT:-7534}/healthz"
+        exec node -e 'fetch(process.argv[1], { signal: AbortSignal.timeout(4000) }).then((r) => process.exit(r.status === 200 ? 0 : 1), () => process.exit(1))' "${url}"
+        ;;
+      daemon)
+        status="$(plantworks daemon status 2>/dev/null || true)"
+        echo "${status}" | grep -q "^Daemon running" && ! echo "${status}" | grep -q "UNHEALTHY"
+        ;;
+      worker) [ -n "${pid:-}" ] && kill -0 "${pid}" 2>/dev/null ;;
+      *) exit 0 ;;  # a one-off command, not a long-running role
+    esac
     ;;
   help)
     sed -n '3,9p' "$0" | sed 's/^# \{0,1\}//'
