@@ -31,11 +31,12 @@ const definition = {
 const platform = { ...PHASE_0_1, slotCaps: { "social-media": 2 } };
 
 type Call = [string, ...unknown[]];
-function fakeDaemon(hooks: { create?: () => void | Promise<void>; claim?: () => void | Promise<void> } = {}) {
+function fakeDaemon(hooks: { create?: () => void | Promise<void>; claim?: () => void | Promise<void>; inspect?: (id: string) => QueueObservation | Promise<QueueObservation> } = {}) {
   const calls: Call[] = [];
   const daemon: DaemonQueue = {
     async create(i) { calls.push(["create", i.qitemId, i.destination, i.source]); await hooks.create?.(); },
     async claim(q, seat) { calls.push(["claim", q, seat]); await hooks.claim?.(); },
+    async inspect(q) { if (!hooks.inspect) throw new Error("qitem unavailable"); return hooks.inspect(q); },
   };
   return { daemon, calls };
 }
