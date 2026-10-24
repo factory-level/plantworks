@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { test } from "node:test";
+import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,6 +11,15 @@ import { stubConsumer, stubModel } from "./fixtures/stubs.ts";
 const fakePi = [process.execPath, fileURLToPath(new URL("./fixtures/fake-pi.mjs", import.meta.url))];
 const envelope = { jobId: "kb-social-media-t_3fa9c01e-a1", team: "social-media", task: { prompt: "Say hi" } };
 
+// Every stub server a test opened is closed after it, pass or fail: a server left listening keeps
+// this file's process alive, and node --test then prints nothing more and never finishes.
+const open = new Set<() => Promise<unknown>>();
+afterEach(async () => {
+  const closing = [...open];
+  open.clear();
+  await Promise.all(closing.map((close) => close()));
+});
+
 async function setup(piMode = "ok") {
   const model = await stubModel("hello from the stub");
   const consumer = await stubConsumer();
@@ -19,7 +28,9 @@ async function setup(piMode = "ok") {
     envelope, callbackUrl: consumer.url, openrigHome: home, cwd: home, piCommand: fakePi,
     env: { ...process.env, PLANTWORKS_LLM_URL: model.url, PI_FAKE_MODE: piMode }, log: () => {}, ...over,
   });
-  const close = () => Promise.all([model.close(), consumer.close()]);
+  let closed: Promise<unknown> | undefined;
+  const close = () => (closed ??= Promise.all([model.close(), consumer.close()]));
+  open.add(close);
   return { model, consumer, home, opts, close };
 }
 
@@ -111,6 +122,7 @@ test("a job repository that ships its own Pi system prompt is refused before any
 test("events the consumer refuses are reported, and the job still completes", async () => {
   const t = await setup();
   const refusing = await stubConsumer(400);
+  open.add(refusing.close);
   const result = await runJob(t.opts({ callbackUrl: refusing.url }));
   assert.equal(result.state, "done");
   assert.deepEqual(result.undelivered, ["queued", "claimed", "running", "done"].map((s) => `${envelope.jobId}:${s}`));
@@ -132,7 +144,15 @@ test("on timeout the runner aborts Pi, so its tool processes do not outlive the 
   const result = await runJob(t.opts({ envelope: { ...envelope, timeoutSeconds: 1 }, env: { ...t.opts().env, PI_FAKE_PIDFILE: pidfile } }));
   assert.equal((result.detail as { reason: string }).reason, "timeout");
   const pid = Number(readFileSync(pidfile, "utf8"));
-  assert.throws(() => process.kill(pid, 0), { code: "ESRCH" }, "tool process still running");
+  // SIGKILL is delivered at once, but the process lingers as a zombie until it is reaped, and
+  // kill(pid, 0) still finds a zombie. So wait for it to be gone, briefly.
+  const gone = async () => {
+    for (const until = Date.now() + 3000; Date.now() < until; await new Promise((r) => setTimeout(r, 50))) {
+      try { process.kill(pid, 0); } catch (e) { if ((e as NodeJS.ErrnoException).code === "ESRCH") return true; }
+    }
+    return false;
+  };
+  assert.ok(await gone(), "tool process still running 3 s after the job ended");
   await t.close();
 });
 
