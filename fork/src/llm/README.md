@@ -31,8 +31,10 @@ Pi's third retry never runs. With the quick class, that takes about 3 × 60 s + 
 the 3-consecutive rule counts Pi's retries of one prompt, not 3 distinct prompts. Each of the 3
 calls did miss the deadline. Whether that is the intended reading of PW-11 is a product decision.
 This sequence is inferred from `governor.ts` and the observed Pi retry. It has **not** been run
-end to end with real deadlines: the gated tests use a stub that answers `504` directly. "The call is retried after backoff" (PW-11) is Pi's retry. The governor only counts
-deadlines and stops the job at 3 in a row.
+end to end with real deadlines: the gated tests use a stub that answers `504` directly.
+
+"The call is retried after backoff" (PW-11) is Pi's retry. The governor only counts deadlines and
+stops the job at 3 in a row.
 
 **Where Pi's behaviour comes from.** These are Pi 1.4.0's own defaults, the platform pin in
 `fork/container/Dockerfile`:
