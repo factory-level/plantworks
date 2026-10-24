@@ -93,7 +93,8 @@ export async function runJob(opts: RunOptions): Promise<RunResult> {
       onFail: (reason) => stop({ state: "failed", detail: { reason, message: "3 consecutive model calls hit the deadline" } }),
     });
     const agentDir = writeSeatFiles({ openrigHome: opts.openrigHome, session: sessionFor(job.jobId), className, governorUrl: governor.url });
-    pi = startPi(opts.piCommand, { cwd: opts.cwd, env: { ...env, PI_CODING_AGENT_DIR: agentDir } }, log);
+    pi = startPi(opts.piCommand, { cwd: opts.cwd, env: piEnv(env, agentDir) }, log);
+    await pi.started; // a Pi that cannot start fails the job from `claimed`, never `running`
     pi.exited.then((code) => stop({ state: "failed", detail: { reason: "error", message: `pi exited (${code}) before the job settled` } }));
 
     enter("running");
@@ -108,9 +109,12 @@ export async function runJob(opts: RunOptions): Promise<RunResult> {
         else if (result.lastStopReason === "error" || result.lastStopReason === "aborted") {
           ending = { state: "failed", detail: { reason: "error", message: result.lastError ?? `model call ended with ${result.lastStopReason}` } };
         } else {
-          const reply = await pi.request({ type: "get_last_assistant_text" });
-          text = (reply.data as { text?: string | null } | undefined)?.text ?? null;
-          ending = { state: "done", detail: { outcome: "succeeded" } };
+          const reply = await Promise.race([pi.request({ type: "get_last_assistant_text" }), stopped]);
+          if ("state" in reply) ending = reply;
+          else {
+            text = (reply.data as { text?: string | null } | undefined)?.text ?? null;
+            ending = { state: "done", detail: { outcome: "succeeded" } };
+          }
         }
       }
     } finally {
@@ -128,12 +132,27 @@ export async function runJob(opts: RunOptions): Promise<RunResult> {
   return { jobId: job.jobId, state: ending.state, detail: ending.detail as TransitionDetail, text, undelivered };
 }
 
+/**
+ * Pi, and every command its model runs, sees only this environment: the basics a shell needs,
+ * Pi's own PI_* settings, and the seat directory. Never the endpoint URL, its key or the
+ * callback, so a model-driven command cannot go around the governor.
+ */
+const PASS_ENV = /^(PATH|HOME|USER|LOGNAME|SHELL|LANG|LC_[A-Z_]+|TERM|TMPDIR|TZ|PI_[A-Z0-9_]+)$/;
+export function piEnv(env: NodeJS.ProcessEnv, agentDir: string): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(env)) if (PASS_ENV.test(k)) out[k] = v;
+  // Fully local: no model catalog refresh, version check or telemetry from the seat.
+  return { ...out, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1", PI_TELEMETRY: "0" };
+}
+
 // --- Pi RPC client: just what one job needs -------------------------------------------------
 
 type Response = { type: "response"; id?: string; command: string; success: boolean; error?: string; data?: unknown };
 type Settled = { lastStopReason?: string; lastError?: string };
 
 interface PiRpc {
+  /** Resolves once the process is running; rejects if it could not start. */
+  started: Promise<void>;
   request(cmd: Record<string, unknown>): Promise<Response>;
   /** Resolves on agent_settled with the last assistant message's stop reason. */
   settled: Promise<Settled>;
@@ -154,6 +173,11 @@ function startPi(command: string[], spawnOpts: { cwd: string; env: NodeJS.Proces
     child.on("exit", (code, signal) => resolve(code ?? signal ?? "unknown"));
     child.on("error", (err) => { log(`pi failed to start: ${err.message}`); resolve(`spawn error: ${err.message}`); });
   });
+  const started = new Promise<void>((resolve, reject) => {
+    child.once("spawn", resolve);
+    child.once("error", (err) => reject(new Error(`pi could not start: ${err.message}`)));
+  });
+  started.catch(() => {});
   // A request still waiting when Pi goes away fails instead of hanging.
   exited.then((code) => {
     for (const [id, resolve] of pending) resolve({ type: "response", id, command: "?", success: false, error: `pi exited (${code})` });
@@ -186,13 +210,24 @@ function startPi(command: string[], spawnOpts: { cwd: string; env: NodeJS.Proces
         child.stdin!.write(`${JSON.stringify({ id, ...cmd })}\n`);
       });
     },
+    started,
     settled,
     exited,
+    // Abort first: Pi's tools run in their own process groups, and only Pi's own abort path kills
+    // them. Then ask Pi to exit (stdin closed), then SIGTERM, then SIGKILL.
+    // ponytail: a Pi that ignores all of this is SIGKILLed and cannot clean up its tool processes;
+    // in-cluster the worker pod's boundary does. On a host, Phase 0 runs one job at a time.
     async stop() {
-      if (child.exitCode !== null || child.signalCode !== null) return;
-      child.stdin!.end(); // orderly shutdown
-      const gone = await Promise.race([exited.then(() => true), new Promise((r) => setTimeout(() => r(false), 5000))]);
-      if (!gone) { child.kill("SIGKILL"); await exited; }
+      const alive = () => child.exitCode === null && child.signalCode === null;
+      const within = (ms: number, p: Promise<unknown>) => Promise.race([p.then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), ms))]);
+      if (!alive()) return;
+      await within(3000, this.request({ type: "abort" }));
+      child.stdin!.end();
+      if (await within(5000, exited)) return;
+      child.kill("SIGTERM");
+      if (await within(2000, exited)) return;
+      child.kill("SIGKILL");
+      await exited;
     },
   };
 }

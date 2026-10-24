@@ -17,7 +17,7 @@ async function setup(piMode = "ok") {
   const home = mkdtempSync(join(tmpdir(), "pw-run-"));
   const opts = (over: Partial<RunOptions> = {}): RunOptions => ({
     envelope, callbackUrl: consumer.url, openrigHome: home, cwd: home, piCommand: fakePi,
-    env: { ...process.env, PLANTWORKS_LLM_URL: model.url, FAKE_PI_MODE: piMode }, log: () => {}, ...over,
+    env: { ...process.env, PLANTWORKS_LLM_URL: model.url, PI_FAKE_MODE: piMode }, log: () => {}, ...over,
   });
   const close = () => Promise.all([model.close(), consumer.close()]);
   return { model, consumer, home, opts, close };
@@ -103,6 +103,49 @@ test("events the consumer refuses are reported, and the job still completes", as
   assert.equal(result.state, "done");
   assert.deepEqual(result.undelivered, ["queued", "claimed", "running", "done"].map((s) => `${envelope.jobId}:${s}`));
   await Promise.all([t.close(), refusing.close()]);
+});
+
+test("a Pi that settles but never answers still ends at the timeout", async () => {
+  const t = await setup("mute");
+  const result = await runJob(t.opts({ envelope: { ...envelope, timeoutSeconds: 1 } }));
+  assert.equal(result.state, "failed");
+  assert.equal((result.detail as { reason: string }).reason, "timeout");
+  assert.deepEqual(t.consumer.states(), ["queued", "claimed", "running", "failed"]);
+  await t.close();
+});
+
+test("on timeout the runner aborts Pi, so its tool processes do not outlive the job", async () => {
+  const t = await setup("child");
+  const pidfile = join(t.home, "child.pid");
+  const result = await runJob(t.opts({ envelope: { ...envelope, timeoutSeconds: 1 }, env: { ...t.opts().env, PI_FAKE_PIDFILE: pidfile } }));
+  assert.equal((result.detail as { reason: string }).reason, "timeout");
+  const pid = Number(readFileSync(pidfile, "utf8"));
+  assert.throws(() => process.kill(pid, 0), { code: "ESRCH" }, "tool process still running");
+  await t.close();
+});
+
+test("Pi gets an allow-listed environment: no endpoint, key or callback", async () => {
+  const t = await setup("env");
+  const dump = join(t.home, "env.json");
+  const env = { ...t.opts().env, PLANTWORKS_LLM_API_KEY: "secret-test-key", PLANTWORKS_FRONTDOOR_CALLBACK: "http://x.example.invalid", PI_FAKE_ENV_OUT: dump, UNRELATED_TOKEN: "x" };
+  const result = await runJob(t.opts({ env }));
+  assert.equal(result.state, "done");
+  const seen = JSON.parse(readFileSync(dump, "utf8"));
+  for (const k of ["PLANTWORKS_LLM_URL", "PLANTWORKS_LLM_API_KEY", "PLANTWORKS_FRONTDOOR_CALLBACK", "UNRELATED_TOKEN"]) assert.equal(k in seen, false, k);
+  assert.equal(seen.PI_OFFLINE, "1");
+  assert.equal(seen.PI_TELEMETRY, "0");
+  assert.match(seen.PI_CODING_AGENT_DIR, /state\/pi\/pw-/);
+  assert.equal(seen.PATH, process.env.PATH);
+  await t.close();
+});
+
+test("a Pi that cannot start fails from claimed, never reporting running", async () => {
+  const t = await setup();
+  const result = await runJob(t.opts({ piCommand: [join(t.home, "no-such-pi")] }));
+  assert.equal(result.state, "failed");
+  assert.match((result.detail as { message: string }).message, /pi could not start/);
+  assert.deepEqual(t.consumer.states(), ["queued", "claimed", "failed"]);
+  await t.close();
 });
 
 test("session names map Hermes task ids onto the seat name alphabet", () => {

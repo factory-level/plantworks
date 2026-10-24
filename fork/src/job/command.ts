@@ -40,9 +40,13 @@ export function jobVerb(pw: Command): void {
         console.log(JSON.stringify(result));
         process.exitCode = result.state === "done" ? 0 : 1;
       } catch (e) {
-        if (!(e instanceof RejectedJob)) throw e;
-        console.error(`job rejected: ${e.message}`);
-        process.exitCode = 2;
+        if (e instanceof RejectedJob) {
+          console.error(`job rejected: ${e.message}`);
+          process.exitCode = 2;
+        } else {
+          console.error(`runner error: ${(e as Error).stack ?? e}`);
+          process.exitCode = 3;
+        }
       }
     });
 }

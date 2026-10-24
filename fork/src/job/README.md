@@ -17,7 +17,8 @@ plantworks pw job run job.json --cwd ./workspace --pi /path/to/pi
    `--mode rpc --no-session` and `PI_CODING_AGENT_DIR` set to the seat.
 4. Emits `running`, sends the prompt, and waits for Pi's `agent_settled`.
 5. Emits `done` (`outcome: succeeded`) or `failed`, then prints the result JSON
-   (`jobId`, `state`, `detail`, `text`, `undelivered`). Exit 0 for `done`, 1 for `failed`.
+   (`jobId`, `state`, `detail`, `text`, `undelivered`). Exit 0 for `done`, 1 for `failed`, 2 for a
+   rejected job, 3 for a runner error.
 
 | Failure | Reason |
 |---|---|
@@ -25,8 +26,21 @@ plantworks pw job run job.json --cwd ./workspace --pi /path/to/pi
 | The job runs past `timeoutSeconds` (default: the class ceiling, 900 s for `quick` or 3600 s for `long`) | `timeout` |
 | Pi reports a model error, rejects the prompt or exits early; setup fails after the claim | `error` |
 
-A setup failure (for example `PLANTWORKS_LLM_URL` unset) moves `claimed -> failed` and never
-reports `running`.
+A setup failure, or a Pi that cannot start, moves `claimed -> failed` and never reports
+`running`.
+
+**Pi's environment** is an allow-list: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`,
+`LC_*`, `TERM`, `TMPDIR`, `TZ`, Pi's own `PI_*`, and the seat's `PI_CODING_AGENT_DIR`, with
+`PI_OFFLINE=1` and `PI_TELEMETRY=0` set. The endpoint URL, its key and the callback are never
+passed, so a command the model runs cannot go around the governor.
+
+**Stopping Pi** (at the end, or on a timeout or `call-deadline`):
+1. Send Pi's RPC `abort`, which kills its tool processes.
+2. Close Pi's stdin.
+3. Send SIGTERM, then SIGKILL.
+
+A Pi that has to be SIGKILLed cannot clean up its tool processes. In-cluster, the worker pod's
+boundary does that.
 
 Events go to `--callback` or `$PLANTWORKS_FRONTDOOR_CALLBACK`, which is operator config. Delivery
 runs alongside the job, so a slow consumer never holds the seat. Events the consumer never
