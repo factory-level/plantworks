@@ -170,7 +170,9 @@ are checked against them when the broker starts, and a class over a ceiling stop
 
 A value can only tighten the ADR ceilings, never loosen them. A malformed, zero, negative or
 larger value stops the broker. The ceilings bind the broker's start check only. The worker's
-governor still enforces the ADR values and the class's own `perCall`.
+governor still enforces the ADR values and the class's own `perCall`. `pw team validate` also
+uses the ADR values, so a spec that validates can still be refused at broker start where the
+platform has tightened a ceiling.
 
 #### Runbook: moving the Phase 1 slot between teams
 
@@ -189,8 +191,10 @@ a job on a timeout.
    - the platform file's `slotCaps` gets the same values;
    - `a`'s class `slots` become 0;
    - `b`'s class `slots` total 1, within its worker seats (rule 4).
-4. **Roll the broker.** On start it rejects any mismatch between those four values, so a partial
-   change doesn't come up. With no slots, nothing in `a`'s classes is claimed again. Once the
+4. **Roll the broker.** The start refuses a change where any key's classes ask for more slots than
+   its cap, in `PLANTWORKS_SLOT_CAP` or in the platform file. It does **not** catch a cap left
+   higher than the slots, for example `PLANTWORKS_SLOT_CAP` still `a=1`. So after the roll, check
+   that `GET /plantworks/v1/stats` shows `slots.a.cap: 0` and `slots.b.cap: 1`. With no slots, nothing in `a`'s classes is claimed again. Once the
    per-class slot check from #58 is on main, they also refuse new jobs (`400 class_disabled`).
 5. **Resume `b`'s seats.** A starting `worker run` resumes its own seat. `a`'s seats can stay
    drained.
