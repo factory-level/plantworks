@@ -33,6 +33,13 @@ There is one server per team, and **the team is fixed by the server, never chose
 caller**. The server reads `PLANTWORKS_BROKER_URL` (the team's broker) and `PLANTWORKS_TEAM`.
 A tool call has no `team` argument, so a profile cannot submit to another team's queue.
 
+A broker can serve several teams (PW-17 loads every team spec in its directory), and a
+`jobId` does not name its team. So the server also **checks `record.team` on every read**:
+a job of another team answers `not_found`, exactly as an unknown job does. Cancel reads the
+job first and cancels only if it is this team's. A job's team never changes, so the order is
+safe. The broker token itself is broker-wide. The team scope is this server's, for the
+Hermes profile.
+
 Hermes profile entry. PW-24 adds it to the PW-20 emitter (`hermesProfileConfig()`) after PW-20
 merges, along with the skill at `hermes-profile/skills/plantworks-bridge/SKILL.md`. A Hermes
 0.22.5 profile home reads its skills from `skills/`:
@@ -144,7 +151,8 @@ idempotent.
 | `not_found` | no job with that `jobId` exists **in this team** |
 | `not_cancellable` | cancel on a job that is not `queued`, `held` or `cancelled` (broker 409) |
 | `job_conflict` | submit reuses a `jobId` with a different envelope (broker 409). Nothing changes |
-| `broker_rejected` | the broker returned another 4xx (for example, timeout above the class ceiling, or an unknown class). It carries the broker's code and message |
+| `broker_rejected` | the broker returned another 400: `unknown_class`, `timeout_over_ceiling`, `unknown_team`, or `approval_unsupported` (a class that needs approval is refused until PW-23). It carries the broker's `error` and `message` |
+| `broker_auth_failed` | the broker answered 401: the server's broker token is missing or wrong. This is a configuration fault, so repeating the call does not help |
 | `broker_unavailable` | network error, timeout or 5xx. The call may be repeated: submit and cancel are idempotent |
 
 ## Result retrieval limits
@@ -158,8 +166,8 @@ This is what a caller can retrieve, and how much.
 2. **Artifacts as metadata only.** The kit lists the name, size and sha256 of each artifact
    and never returns artifact bytes. Fetching artifacts belongs to a later card, if it is
    needed.
-3. **Team scope only.** A server reads only its own team's broker, and only by exact
-   `jobId`. There is no list or search tool, so a caller cannot enumerate jobs or read
+3. **Team scope only.** A server returns only its own team's jobs (it checks `record.team`),
+   and only by exact `jobId`. There is no list or search tool, so a caller cannot enumerate jobs or read
    another team's results.
 4. **Retention is the broker's.** A result is readable while the broker keeps the job
    (PW-17 owns retention, and result storage does not exist yet). Once it is gone, inspect returns `not_found`, and the kit keeps
@@ -213,13 +221,14 @@ No real Hermes, broker or inference is involved.
 
 ## Counterpart positions
 
-Provisional acknowledgements from the owners, which hold until PW-17 publishes its schema and review
-verifies them:
+PW-17 published its contract in PR #37 (`fork/schema/job-record.schema.json`,
+`fork/src/broker/README.md`). That PR is not merged, so these positions hold only once it
+merges and review verifies them:
 
 | Item | Owner | Position |
 |---|---|---|
-| Jobs API | build (PW-17) | `POST /plantworks/v1/jobs`: 201 for a new job, 200 when the same envelope is repeated, 409 when a `jobId` is reused with a different envelope, 400 for a bad envelope or an unknown team. `GET /plantworks/v1/jobs/{jobId}`: the record, or 404. `POST /plantworks/v1/jobs/{jobId}/cancel`: 200 for `queued`/`held` (and for an already `cancelled` job), 409 for other states, 404 when unknown |
-| Job record | build (PW-17) | `{ jobId, team, class, state, detail, createdAt, updatedAt, result }`. `result` is null until the job is terminal, then `{ text \| null, artifacts: [{ name, bytes, sha256 }] }`. It stays null until the worker report path (PW-21) exists, and `artifacts` stays `[]` until artifact storage is scheduled. **No result storage exists yet.** The broker caps the stored text, and the 16,000-character paging is client-side |
-| Broker auth | build (PW-17) | Bearer `PLANTWORKS_BROKER_TOKEN`. Loopback with no token configured is unauthenticated, for Phase 0–1 development only |
+| Jobs API | build (PW-17) | `POST /plantworks/v1/jobs`: 201 for a new job, 200 when the same envelope is repeated, 409 `job_conflict` when a `jobId` is reused with a different envelope, 400 `invalid_envelope`/`unknown_team`/`unknown_class`/`timeout_over_ceiling`/`approval_unsupported`, and 401 `unauthorized`. Error bodies are `{ error, message }`. `GET /plantworks/v1/jobs/{jobId}`: the record, or 404. `POST /plantworks/v1/jobs/{jobId}/cancel`: 200 for `queued`/`held` (and for an already `cancelled` job), 409 for other states, 404 when unknown |
+| Job record | build (PW-17) | `{ jobId, team, class, state, detail, createdAt, updatedAt, result }`. `result` is null until the job is terminal, then `{ text \| null, artifacts: [{ name, bytes, sha256 }] }`. It stays null until the worker report path (PW-21) exists, and `artifacts` stays `[]` until artifact storage is scheduled. **No result storage exists yet.** PW-17 sets no cap on stored text, because nothing writes it yet. PW-21 adds the cap. The 16,000-character paging is client-side |
+| Broker auth | build (PW-17) | Bearer `PLANTWORKS_BROKER_TOKEN` on every `/plantworks/v1/` route. The default bind is `127.0.0.1:7534`. Loopback with no token configured is unauthenticated, for Phase 0–1 development only |
 | `mcp_servers.plantworks` and the skill in the emitted profile | build2 (PW-20) | PW-24 adds both to the emitter after PW-20 merges. The `${}` references stay literal |
 | Event push into Hermes | lead | Unsupported; a future integration gap. No signing or relay in this card |
