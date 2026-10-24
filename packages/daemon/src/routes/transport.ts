@@ -90,7 +90,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     // the 401 only ever stopped honest uncounted callers. Instead the send DELIVERS, the
     // already-nullable audit actor records null (projected "unknown"), and the response carries
     // the sign-it notice below.
-    if (body.typeWithoutChecking && !body.dangerouslyInteract) return c.json({ ok: false, reason: "invalid_dangerously_interact",
+    if (body.typeWithoutChecking && (!body.dangerouslyInteract || !body.reason?.trim())) return c.json({ ok: false, reason: "invalid_dangerously_interact",
       error: "--type-without-checking requires --dangerously-interact and --reason. No text was sent." }, 400);
     const derivedActor = transportSenderSession(c) ?? null;
 
@@ -289,7 +289,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     // transport header (see /send). An absent header no longer refuses — the send proceeds and the
     // audit's already-nullable actor records null (projected "unknown"); the response carries the
     // sign-it notice below.
-    if (body.typeWithoutChecking && !body.dangerouslyInteract) return c.json({ ok: false, reason: "invalid_dangerously_interact",
+    if (body.typeWithoutChecking && (!body.dangerouslyInteract || !body.reason?.trim())) return c.json({ ok: false, reason: "invalid_dangerously_interact",
       error: "--type-without-checking requires --dangerously-interact and --reason. No text was sent." }, 400);
     const derivedActor = transportSenderSession(c) ?? null;
 

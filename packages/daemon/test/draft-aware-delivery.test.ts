@@ -639,10 +639,10 @@ describe("deliberate override preserves existing input", () => {
     expect(f.submissions).toEqual([]); // Unreadable input cannot prove the answer staged for Enter.
   });
 
-  it("ordinary API calls cannot select the unchecked override accidentally", async () => {
+  it("unchecked API requests require explicit interaction and a reason", async () => {
     const f = fixture();
-    for (const route of ["send", "broadcast"]) {
-      const response = await f.post(`/api/transport/${route}`, { session: "worker@test", sessions: ["worker@test"], text: "ordinary", typeWithoutChecking: true });
+    for (const [route, dangerouslyInteract] of [["send", false], ["broadcast", true]] as const) {
+      const response = await f.post(`/api/transport/${route}`, { dangerouslyInteract, session: "worker@test", sessions: ["worker@test"], text: "ordinary", typeWithoutChecking: true });
       expect(response.status).toBe(400);
       expect(await response.json()).toMatchObject({ reason: "invalid_dangerously_interact" });
     }
