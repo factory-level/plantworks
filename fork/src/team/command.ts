@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// `plantworks pw team emit` and `plantworks pw team validate`.
+// `plantworks pw team emit`, `plantworks pw team validate` and `plantworks pw team render`.
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -76,5 +76,25 @@ export function teamVerb(pw: Command): void {
         console.error(`invalid team spec:\n  ${errors.join("\n  ")}`);
         process.exitCode = 1;
       } else console.log("team spec ok");
+    });
+  team
+    .command("render")
+    .description("Render the fleet for every team spec under --teams: per-class workers.max, seat names and Pi seat files, into a fresh --out")
+    .option("--teams <dir>", "directory of emitted <team>/team.json (default: $PLANTWORKS_TEAMS_DIR)")
+    .requiredOption("--out <dir>", "fresh output directory; never a live OpenRig home")
+    .requiredOption("--governor-url <url>", "the PW-11 governor URL the seat files point Pi at")
+    .option("--platform <file>", "platform limits JSON, as for validate")
+    .action(async (opts: { teams?: string; out: string; governorUrl: string; platform?: string }) => {
+      try {
+        const dir = opts.teams ?? process.env.PLANTWORKS_TEAMS_DIR;
+        if (!dir) throw new Error("no team specs: pass --teams or set PLANTWORKS_TEAMS_DIR");
+        // The broker's loader: the same validation and directory rules the broker starts with.
+        const { loadTeams } = await import("../broker/server.ts");
+        const { renderFleet } = await import("./render.ts");
+        console.log(renderFleet(loadTeams(dir, loadPlatform(opts.platform)), opts.out, opts.governorUrl).join("\n"));
+      } catch (e) {
+        console.error(`render: ${(e as Error).message}`);
+        process.exitCode = 1;
+      }
     });
 }

@@ -82,6 +82,39 @@ The value is checked against the pinned Hermes, `NousResearch/hermes-agent` v0.2
   and directories such as `skills/` (`hermes_cli/profiles.py:35`). PW-24 adds its MCP server
   block and bridge skill to the emitted profile.
 
+## Render (PW-20, `render.ts`)
+
+The card names this verb `plantworks fleet render`; here it is `pw team render`, beside emit and
+validate. A usage example:
+
+```
+plantworks pw team render --teams <dir> --out <fresh dir> --governor-url <url> [--platform <file>]
+```
+
+It loads every `<team>/team.json` under `--teams` with the broker's own loader, so it applies the
+same validation and directory rules the broker starts with. For each team it writes:
+
+- **`<out>/<team>/fleet.json`.** `{team, classes: {<class>: {workersMax, seats}}}`, where
+  `workersMax` = `trains × perTrain.workers[class]`. Seats are named `<class>-NN@<team>`, starting
+  at `01`.
+- **Each seat's Pi files.** `models.json` and `settings.json` go to
+  `<out>/<team>/state/pi/<seat>/agent`, written by PW-12's `writeSeatFiles` from the spec's class
+  (`classFromSpec`) and pointed at `--governor-url`. That is the layout a worker writes under its
+  home.
+
+Output goes only to `--out`. A render refuses, before writing anything:
+- an `--out` inside a live home: `$OPENRIG_HOME`, the directory of `$OPENRIG_DB`, `~/.openrig` or
+  `~/.plantworks`;
+- an existing `<out>/<team>`.
+
+It never deletes or rewrites a file it did not create.
+
+**Removing a team.** Delete its `<team>/` directory from the spec set. A re-render no longer
+contains it. The broker reads specs only at start, so after a restart it answers the team's jobs
+`400 unknown_team`. Deregistering the Hermes profile is #991's, outside the fork. The removed
+team's existing jobs stay in the broker's file, and their events have no callback left, so the
+emitter keeps retrying them. Cancel or finish the team's live jobs before removing it.
+
 ## Deliberately left out
 
 - **Input is JSON only.** YAML is a superset of JSON, so `team.json` is also valid YAML for
