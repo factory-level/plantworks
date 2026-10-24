@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -32,19 +32,37 @@ test("home: PLANTWORKS_HOME wins over OPENRIG_HOME; OPENRIG_HOME is the fallback
 
 test("with PLANTWORKS_HOME set, a seat's daemon URL, host, port and outside database are dropped; without it nothing is", () => {
   const seat = { OPENRIG_HOME: "/seat/.openrig", OPENRIG_DB: "/seat/.openrig/openrig.sqlite", OPENRIG_PORT: "7433", OPENRIG_URL: "http://127.0.0.1:7433",
-    RIGGED_URL: "http://127.0.0.1:7433", OPENRIG_HOST: "127.0.0.1", RIGGED_DB: "/seat/old.sqlite", OPENRIG_SESSION_NAME: "dev-x@rig" };
+    RIGGED_URL: "http://127.0.0.1:7433", OPENRIG_HOST: "127.0.0.1", RIGGED_DB: "/seat/old.sqlite", OPENRIG_SESSION_NAME: "dev-x@rig",
+    OPENRIG_TRANSCRIPTS_PATH: "/seat/.openrig/transcripts", OPENRIG_WORK_ROOT: "/work/project" };
   const env: Record<string, string | undefined> = { ...seat, PLANTWORKS_HOME: "/srv/pw" };
   const dropped = applyHomeDefaults(env);
-  assert.deepEqual(dropped.sort(), ["OPENRIG_DB", "OPENRIG_HOST", "OPENRIG_PORT", "OPENRIG_URL", "RIGGED_DB", "RIGGED_URL"]);
+  assert.deepEqual(dropped.sort(), ["OPENRIG_DB", "OPENRIG_HOST", "OPENRIG_PORT", "OPENRIG_TRANSCRIPTS_PATH", "OPENRIG_URL", "RIGGED_DB", "RIGGED_URL"]);
+  assert.equal(env.OPENRIG_WORK_ROOT, "/work/project", "a read-only project lookup is left alone");
   for (const k of dropped) assert.equal(env[k], undefined, k);
   assert.equal(env.OPENRIG_HOME, "/srv/pw");
   assert.equal(env.OPENRIG_SESSION_NAME, "dev-x@rig", "identity is not a daemon locator and is left alone");
   applyDaemonDefaults(env, argv("daemon", "start"));
   assert.equal(env.OPENRIG_PORT, "7533", "the port falls back to the Plantworks default, not the seat's");
 
-  const inside: Record<string, string | undefined> = { PLANTWORKS_HOME: "/srv/pw", OPENRIG_DB: "/srv/pw/data/pw.sqlite" };
+  const inside: Record<string, string | undefined> = { PLANTWORKS_HOME: "/srv/pw", OPENRIG_DB: "/srv/pw/data/pw.sqlite", OPENRIG_TRANSCRIPTS_PATH: "/srv/pw/t" };
   assert.deepEqual(applyHomeDefaults(inside), []);
   assert.equal(inside.OPENRIG_DB, "/srv/pw/data/pw.sqlite", "a database inside the selected home is kept");
+
+  // A symlink inside the home that leads out of it is outside, for the database and its directory alike.
+  const home = mkdtempSync(join(tmpdir(), "pw-home-"));
+  const live = mkdtempSync(join(tmpdir(), "pw-live-"));
+  try {
+    writeFileSync(join(live, "openrig.sqlite"), "");
+    symlinkSync(join(live, "openrig.sqlite"), join(home, "linked.sqlite"));
+    symlinkSync(live, join(home, "linked-dir"));
+    for (const db of [join(home, "linked.sqlite"), join(home, "linked-dir", "openrig.sqlite"), join(home, "linked-dir", "new.sqlite")]) {
+      assert.deepEqual(applyHomeDefaults({ PLANTWORKS_HOME: home, OPENRIG_DB: db }), ["OPENRIG_DB"], db);
+    }
+    assert.deepEqual(applyHomeDefaults({ PLANTWORKS_HOME: home, OPENRIG_DB: join(home, "real", "pw.sqlite") }), [], "a not-yet-created path inside is kept");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(live, { recursive: true, force: true });
+  }
   assert.deepEqual(applyHomeDefaults({ PLANTWORKS_HOME: "/srv/pw", OPENRIG_DB: "/srv/pw/../or/x.sqlite" }), ["OPENRIG_DB"], "a traversal out of the home is outside it");
 
   const plain: Record<string, string | undefined> = { ...seat };

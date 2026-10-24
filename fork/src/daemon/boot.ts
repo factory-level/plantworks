@@ -4,7 +4,8 @@
 // OpenRig install, and never on a non-loopback address without a bearer token.
 // Everything here is environment the upstream CLI and daemon already read; nothing upstream changes.
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isLoopbackBind } from "../../../packages/daemon/dist/middleware/auth-bearer-token.js";
 
 /** Upstream's defaults are ~/.openrig, 7433 and a database-conflict warning. */
@@ -27,26 +28,41 @@ export function applyHomeDefaults(env: Env): string[] {
   return dropped;
 }
 
+/** Where another daemon is: its address, always dropped. */
+const DAEMON_LOCATORS = ["OPENRIG_URL", "RIGGED_URL", "OPENRIG_HOST", "RIGGED_HOST", "OPENRIG_PORT", "RIGGED_PORT"];
+/** Paths a daemon writes to: kept only inside the selected home. (OPENRIG_WORK_ROOT, a read-only project lookup, is left.) */
+const DAEMON_PATHS = ["OPENRIG_DB", "RIGGED_DB", "OPENRIG_TRANSCRIPTS_PATH", "RIGGED_TRANSCRIPTS_PATH", "OPENRIG_SHARED_DOCS_ROOT",
+  "OPENRIG_SLICES_ROOT", "OPENRIG_DOGFOOD_EVIDENCE_ROOT"];
+
 /**
- * With PLANTWORKS_HOME set, the variables that point at some other daemon are dropped: an OpenRig session
- * carries its own daemon's URL, host, port and database, and moving the home alone would still reach them.
- * A database inside the selected home is kept; the port and database then come from that home's config or
- * the Plantworks defaults. Returns the names dropped.
+ * With PLANTWORKS_HOME set, what points at some other daemon is dropped: an OpenRig session carries its own
+ * daemon's URL, host, port, database and transcripts path, and moving the home alone would still reach them.
+ * The port then comes from the selected home's `daemon.port` or 7533, even an intentional OPENRIG_PORT.
+ * Returns the names dropped.
  */
 function dropInheritedDaemon(env: Env, home: string): string[] {
   const dropped: string[] = [];
-  for (const name of ["OPENRIG_URL", "RIGGED_URL", "OPENRIG_HOST", "RIGGED_HOST", "OPENRIG_PORT", "RIGGED_PORT"]) {
+  for (const name of DAEMON_LOCATORS) {
     if (env[name] !== undefined) { delete env[name]; dropped.push(name); }
   }
-  for (const name of ["OPENRIG_DB", "RIGGED_DB"]) {
-    const db = env[name]?.trim();
-    if (db === undefined) continue;
-    const rel = relative(resolve(home), resolve(db));
-    if (db && !rel.startsWith("..") && !isAbsolute(rel)) continue; // inside the selected home
+  const realHome = realPath(home);
+  for (const name of DAEMON_PATHS) {
+    const path = env[name]?.trim();
+    if (path === undefined) continue;
+    const rel = relative(realHome, realPath(path));
+    if (path && rel && !rel.startsWith("..") && !isAbsolute(rel)) continue; // inside the selected home, through any symlink
     delete env[name];
     dropped.push(name);
   }
   return dropped;
+}
+
+/** The path with every symlink in its longest existing prefix resolved; the rest is appended as written. */
+function realPath(path: string): string {
+  let head = resolve(path);
+  const tail: string[] = [];
+  while (!existsSync(head) && dirname(head) !== head) { tail.unshift(basename(head)); head = dirname(head); }
+  return join(existsSync(head) ? realpathSync(head) : head, ...tail);
 }
 
 /** Values the home's config file sets (`plantworks config set daemon.port ...`); they win over our defaults. */

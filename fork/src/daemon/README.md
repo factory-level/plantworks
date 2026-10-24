@@ -8,7 +8,7 @@ already reads, before any upstream module loads. Nothing outside `fork/` changes
 
 | Setting | Plantworks | Upstream `rig` | Overridden by |
 |---|---|---|---|
-| Home | `~/.plantworks` | `~/.openrig` | `PLANTWORKS_HOME`, then `OPENRIG_HOME`. `PLANTWORKS_HOME` wins when both are set: inside an OpenRig seat `OPENRIG_HOME` is that seat's own home. With `PLANTWORKS_HOME` set, the inherited `OPENRIG_URL`, `OPENRIG_HOST` and `OPENRIG_PORT` (and their `RIGGED_` names), and an `OPENRIG_DB` outside that home, are ignored with a notice, so the port and database come from the selected home or the defaults |
+| Home | `~/.plantworks` | `~/.openrig` | `PLANTWORKS_HOME`, then `OPENRIG_HOME`. `PLANTWORKS_HOME` wins when both are set: inside an OpenRig seat `OPENRIG_HOME` is that seat's own home. With `PLANTWORKS_HOME` set, the inherited `OPENRIG_URL`, `OPENRIG_HOST` and `OPENRIG_PORT` (and their `RIGGED_` names) are ignored with a notice, even an intentional port: it comes from the selected home's `daemon.port`, else 7533. So are the database, transcripts, shared-docs, slices and dogfood-evidence paths that resolve outside that home, through any symlink |
 | Port | 7533 | 7433 | `OPENRIG_PORT`, `daemon.port` in the home's config file, `--port` |
 | Bind | `127.0.0.1` only | loopback, plus the Tailscale interface when one is detected | in precedence order: `daemon start --host` (the last one wins), `OPENRIG_BIND_HOST`, `daemon.host` in the config file |
 | A second daemon on a database another daemon holds (`daemon.db_conflict`) | `stop`: it exits before opening the database | `warn` | `OPENRIG_DAEMON_DB_CONFLICT`, or `daemon.dbConflict` in the home's config file. `daemon start --allow-db-conflict` lets one start through |
