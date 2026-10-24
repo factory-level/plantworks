@@ -78,6 +78,12 @@ export function workerVerb(pw: Command): void {
        * timeout the governor cuts off the seat's model calls. That stops no tool or process, so the
        * job and its slot stay held and the wait goes on.
        */
+      /** A job's stored effective priority from the broker; the class base if the broker can't say. */
+      const storedPriority = async (jobId: string): Promise<number> => {
+        const res = await fetch(`${base}/plantworks/v1/jobs/${encodeURIComponent(jobId)}`, { headers, signal: AbortSignal.timeout(15_000) }).catch(() => null);
+        const record = res?.ok ? await res.json().catch(() => null) as { priority?: unknown } | null : null;
+        return typeof record?.priority === "number" ? record.priority : classPriority;
+      };
       const waitForDone = async (jobId: string, timeoutS: number) => {
         process.stdout.write(`waiting for broker completion of ${jobId}\n`);
         const timer = setTimeout(() => {
@@ -118,10 +124,10 @@ export function workerVerb(pw: Command): void {
           else { process.stderr.write(`plantworks worker: cannot read what ${opts.seat} holds (${view?.status ?? "no answer"}); not claiming\n`); await sleep(); }
         }
         // The timer starts now, not at the job's claim, so a cut-off after a restart comes late, never early.
-        // PW-29: a held job's envelope isn't at hand, so it runs at the class base priority.
+        // PW-29: a held job's envelope isn't at hand; its stored priority comes from the broker.
         for (const jobId of held ?? []) {
           if (stopping) break;
-          governor.setPriority(classPriority);
+          governor.setPriority(await storedPriority(jobId));
           await waitForDone(jobId, timeoutSeconds);
           governor.setPriority(undefined);
         }
@@ -133,17 +139,17 @@ export function workerVerb(pw: Command): void {
             const body = await claim.json().catch(() => ({})) as { error?: string; jobId?: string };
             if ((body.error === "handoff_unconfirmed" || body.error === "reservation_lost") && body.jobId) {
               jobId = body.jobId;
-              governor.setPriority(classPriority); // no envelope in this answer: the class base
+              governor.setPriority(await storedPriority(jobId)); // no envelope in this answer: ask the broker
             }
             else { await sleep(); continue; }
           } else if (claim.status === 204 || claim.status === 429) { await sleep(); continue; }
           else if (!claim.ok) throw new Error(`claim-next returned ${claim.status}: ${(await claim.text()).slice(0, 300)}`);
           else {
-            const claimed = await claim.json() as { job: { jobId: string }; envelope?: { timeoutSeconds?: number; priority?: JobPriority } };
+            const claimed = await claim.json() as { job: { jobId: string; priority?: number }; envelope?: { timeoutSeconds?: number; priority?: JobPriority } };
             jobId = claimed.job.jobId;
             timeoutS = claimed.envelope?.timeoutSeconds ?? timeoutSeconds;
             // PW-29: the same effective priority the broker ordered the claim by. The seat runs one job at a time.
-            governor.setPriority(classPriority + JOB_PRIORITIES[claimed.envelope?.priority ?? "normal"]);
+            governor.setPriority(typeof claimed.job.priority === "number" ? claimed.job.priority : classPriority + JOB_PRIORITIES[claimed.envelope?.priority ?? "normal"]);
           }
           await waitForDone(jobId, timeoutS);
           governor.setPriority(undefined);
