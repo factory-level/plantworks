@@ -15,7 +15,7 @@ timeout, a drain result or a container stopping is never evidence that Pi stoppe
 | `daemon` | The upstream daemon (detached by `daemon start`), plus the entrypoint's bash loop and a `daemon logs --follow` child | One per pod. Every broker and worker of that pod talks to it | `fork/container/entrypoint.sh:27`–`:32` |
 | Pi seat | One tmux session per seat, holding upstream's `pi-runner`. The runner spawns `pi --mode rpc`, and Pi spawns its tool processes | One per seat session, inside the daemon's container. Upstream launches these; nothing in `fork/` does | `packages/daemon/src/adapters/pi-runner-protocol.ts:10`–`:12` |
 | `broker` | One Node process (`pw broker serve`), with an in-process reconciler on a 2 s interval | One per SQLite file is the tested shape. Several on one file can't exceed the slot cap, which is counted in one SQLite transaction; nothing else is claimed for that shape | `fork/src/broker/command.ts:33`, `:40`–`:47`; `fork/src/broker/README.md` "Slot cap" |
-| `worker` | One Node process (`pw worker run`). It is the container's PID after `exec` | **Exactly one per seat name**, with a seat name that stays the same across restarts. A second process on the same name resumes the seat and voids a drain | `fork/container/entrypoint.sh:51`–`:52`; `fork/src/broker/worker.ts:18`–`:20` |
+| `worker` | One Node process (`pw worker run`). It is the container's PID after `exec` | 0..N per team: **exactly one per seat name**, with a seat name that stays the same across restarts. A second process on the same name resumes the seat and voids a drain | `fork/container/entrypoint.sh:51`–`:52`; `fork/src/broker/worker.ts:18`–`:20` |
 | Hermes kit (optional) | One Node process (`pw mcp serve --http`) | One per team | `fork/src/hermes/command.ts:9` |
 | `pw job run` (Phase 0 only) | One Node process, an in-process per-seat governor, and one Pi child | One job at a time, with no daemon and no broker | `fork/src/job/run.ts:90`–`:96` |
 
@@ -44,13 +44,16 @@ too unless `--db` points elsewhere. A worker reads nothing from disk.
 | `PLANTWORKS_TEAMS_DIR` | broker | yes, or `--teams` | `/etc/fork/teams` in the image | |
 | `PLANTWORKS_DAEMON_URL` | broker | no | `http://127.0.0.1:7533` | `fork/src/broker/command.ts:14`, `:36` |
 | `PLANTWORKS_BROKER_HOST`, `PLANTWORKS_BROKER_PORT` | image `broker` role | no | `127.0.0.1`, `7534` | `fork/container/entrypoint.sh:38` |
-| `PLANTWORKS_BROKER_TOKEN` | broker, worker, kit | for a non-loopback broker bind | | When set, every `/plantworks/v1/` request needs it (`fork/src/broker/server.ts:168`–`:171`) |
-| `PLANTWORKS_BROKER_PUBLIC_URL` | broker | off loopback, when a class needs approval | the listen address | Used for approval `decisionUrl`s |
+| `PLANTWORKS_BROKER_TOKEN` | broker, worker, kit | for a non-loopback broker bind | | When set, every `/plantworks/v1/` request needs it (`fork/src/broker/server.ts:95`–`:97`). Without it, a non-loopback bind is refused (`:168`–`:171`) |
+| `PLANTWORKS_BROKER_PUBLIC_URL` | broker | for any non-loopback bind, unless `--public-url` is given | the listen address | The broker refuses to start without it off loopback (`fork/src/broker/server.ts:174`–`:176`). Used for approval `decisionUrl`s |
+| `PLANTWORKS_PLATFORM_FILE`, `PLANTWORKS_BROKER_DB` | image `broker` role | no | | Passed as `--platform` and `--db` (`fork/container/entrypoint.sh:39`–`:40`) |
 | `PLANTWORKS_SLOT_CAP` | broker | no | 1 per `slotBudgetKey` | A malformed value stops the broker (`fork/src/broker/command.ts:38`) |
 | `PLANTWORKS_BROKER_SESSION` | broker | no | `plantworks-broker` | The qitem source session |
 | `*_CALLBACK` | broker, `pw job run` | when a team spec names one | | Only `_CALLBACK` names resolve into a spec's callback URL |
 | `PLANTWORKS_BROKER_URL` | worker, kit | no | `http://127.0.0.1:7534` | `fork/src/broker/worker.ts:11` |
 | `PLANTWORKS_TEAM`, `PLANTWORKS_SEAT`, `PLANTWORKS_CLASS` | image `worker` role | team and seat | | `fork/container/entrypoint.sh:46`–`:49` |
+| `PLANTWORKS_TEAM` | kit | yes | | The kit serves exactly one team (`fork/src/hermes/command.ts:12`–`:13`) |
+| `FORK_ROLE_FILE` | image entrypoint | no | `/tmp/fork-role` | Where a long-running role records itself for `HEALTHCHECK` (`fork/container/entrypoint.sh:16`) |
 | `PLANTWORKS_LLM_URL`, `PLANTWORKS_LLM_API_KEY` | `pw job run` (governor), `pw llm preflight` | for those commands | | Never passed to Pi (`fork/src/job/run.ts:140`) |
 | `PLANTWORKS_MCP_TOKEN` | kit, `--http` | yes with `--http` | | |
 
@@ -72,15 +75,28 @@ calls only the broker.
 | Process | On SIGTERM | Bound | Source |
 |---|---|---|---|
 | worker | Sets a stop flag. The loop leaves at its next check, which is after the current sleep (`--poll-ms`, default 2000) and any request in flight (15 s timeout). It does not touch the job it waits for: the broker still counts it | about poll + 15 s | `fork/src/broker/worker.ts:21`–`:42` |
-| `worker drain` (preStop) | Sets the drain, then polls until the seat holds nothing, until `--timeout-s` (default 300) runs out, or until another worker resumes the seat. It exits 0, 3 or 4 | up to 15 s for the first request, plus `--timeout-s`, plus one poll | `fork/src/broker/worker.ts:47`–`:82` |
+| `worker drain` (preStop) | Sets the drain, then polls until the seat holds nothing, until `--timeout-s` (default 300) runs out, or until another worker resumes the seat. It exits 0, 3 or 4 `--timeout-s` (its first request counts inside it), then at most one more poll sleep and one 15 s request | `fork/src/broker/worker.ts:47`–`:82` |
 | broker | Closes the HTTP server, stops the reconciler, closes SQLite | not bounded in source | `fork/src/broker/command.ts:51`–`:53`; `fork/src/broker/server.ts:191` |
 | daemon role | The entrypoint traps TERM and runs `plantworks daemon stop` | not bounded in source | `fork/container/entrypoint.sh:31` |
 | `pw job run` | No signal handler. Its Pi stop sequence (RPC `abort` 3 s, close stdin and wait 5 s, SIGTERM and wait 2 s, then SIGKILL) runs only when the job ends, times out or hits `call-deadline` | about 10 s, plus the exit after SIGKILL | `fork/src/job/run.ts:216`–`:231` |
 
-**Grace period.** Set the worker's termination grace period above the drain's worst case: 15 s,
-plus `--timeout-s`, plus one poll. With the default 300 s, that means more than 317 s. Kubernetes
-counts the preStop hook inside the grace period and kills the container when the period runs out,
-whatever the hook would have returned. `docker stop` runs no preStop hook at all.
+**Grace period.** A job can only finish before the kill if the drain waits as long as the job may
+run:
+- Set `--timeout-s` to at least the largest class `timeoutSeconds` that the seat serves (for
+  example, 3600 for a `long` class), not the default 300.
+- Set the worker's termination grace period above `--timeout-s` + one poll + 15 s. Add the
+  worker's own SIGTERM bound (about poll + 15 s) on top so it exits cleanly. Otherwise it is
+  SIGKILLed, which leaves broker state unchanged.
+- With the default drain timeout and poll, the drain alone needs more than 317 s.
+
+Even that bound doesn't guarantee a job ends. `timeoutSeconds` is checked only at submit, against
+the class ceiling (`fork/src/broker/server.ts:120`–`:121`). Nothing on the broker or worker path
+enforces it on a running job. A job that outlasts the drain ends the drain with exit 3, which is
+the expected outcome.
+
+Kubernetes counts the preStop hook inside the grace period, and kills the container when the
+period runs out whatever the hook would have returned. `docker stop` runs no preStop hook at
+all.
 
 **What a drain result proves:**
 - `0` means the broker records nothing in flight for the seat.
