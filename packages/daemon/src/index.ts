@@ -245,7 +245,8 @@ async function isTrustedLocalOrTailnetBind(host: string): Promise<boolean> {
   return false;
 }
 
-export async function startServer(port?: number) {
+// fork-seam: PW-31
+export async function startServer(port?: number, options?: Parameters<typeof createDaemon>[0]) {
   const p = port ?? parseInt(readOpenRigEnv("OPENRIG_PORT", "RIGGED_PORT") ?? "7433", 10);
   // D15 — anchor the default db under OPENRIG_HOME, never a bare CWD-relative
   // filename (which could open the shared fleet db). Explicit OPENRIG_DB wins.
@@ -310,6 +311,7 @@ export async function startServer(port?: number) {
   // The fresh-DB Codex probe runs inside createDaemon, before the shutdown handlers below exist.
   const disarmStartupSignals = endProbeGroupsOnStartupSignal();
   const { app, contextMonitor, deps, eventLoopMonitor, injectWebSocket } = await createDaemon({
+    ...options,
     dbPath,
     bearerToken,
     terminalBearerToken,

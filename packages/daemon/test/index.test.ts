@@ -91,4 +91,26 @@ describe("daemon startServer", () => {
       }),
     );
   });
+
+  // fork-seam: PW-31
+  it("passes optional daemon options through without overriding server-owned settings", async () => {
+    const { startServer } = await import("../src/index.js");
+    const tmuxExec = vi.fn();
+
+    await startServer(7441, {
+      tmuxExec,
+      dbPath: "/tmp/caller.sqlite",
+      bearerToken: "caller-token",
+      terminalBearerToken: "caller-terminal-token",
+      bindPlan: { mode: "explicit", hosts: ["192.0.2.8"], tailscaleDetected: true },
+    });
+
+    expect(createDaemonMock).toHaveBeenCalledWith(expect.objectContaining({
+      tmuxExec,
+      dbPath: expect.not.stringContaining("caller.sqlite"),
+      bearerToken: null,
+      terminalBearerToken: null,
+      bindPlan: expect.objectContaining({ mode: "default", hosts: expect.arrayContaining(["127.0.0.1"]) }),
+    }));
+  });
 });
