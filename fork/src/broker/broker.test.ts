@@ -133,16 +133,29 @@ test("store: transitions are checked and atomic; reservations take the oldest jo
   assert.equal(store.get("kb-social-media-t_00000001-a1")!.state, "queued");
 
   const a = store.reserve("social-media", "quick", "seat-a", "q-1", 1000)!;
-  assert.deepEqual([a.job_id, a.state, a.reserved_by, a.reserved_qitem_id], ["kb-social-media-t_00000001-a1", "queued", "seat-a", "q-1"]);
-  assert.equal(store.reserve("social-media", "quick", "seat-b", "q-2", 1000)!.job_id, "kb-social-media-t_00000002-a1", "a reserved job is skipped");
+  assert.deepEqual([a.job.job_id, a.job.state, a.job.reserved_by, a.job.reserved_qitem_id, a.previousQitemId], ["kb-social-media-t_00000001-a1", "queued", "seat-a", "q-1", null]);
+  assert.equal(store.reserve("social-media", "quick", "seat-b", "q-2", 1000)!.job.job_id, "kb-social-media-t_00000002-a1", "a reserved job is skipped");
   assert.equal(store.reserve("social-media", "quick", "seat-c", "q-3", 1000), undefined);
   clock += 1000;
-  assert.equal(store.reserve("social-media", "quick", "seat-c", "q-3", 1000)!.job_id, "kb-social-media-t_00000001-a1", "an expired lease is taken over");
+  const takeover = store.reserve("social-media", "quick", "seat-c", "q-3", 1000)!;
+  assert.deepEqual([takeover.job.job_id, takeover.previousQitemId], ["kb-social-media-t_00000001-a1", "q-1"], "an expired lease is taken over, naming the orphan qitem");
 
   store.release("kb-social-media-t_00000001-a1", "seat-a");
   assert.equal(store.get("kb-social-media-t_00000001-a1")!.reserved_by, "seat-c", "only the holder can release");
-  const claimed = store.transition("kb-social-media-t_00000001-a1", "claimed", {}, { claimed_by: "seat-c", qitem_id: "q-3" }).row;
+  // Seat A's late confirm loses to seat C's takeover; C's confirm wins.
+  assert.equal(store.confirmClaim("kb-social-media-t_00000001-a1", "seat-a", "q-1"), "lost");
+  assert.equal(store.confirmClaim("kb-social-media-t_00000001-a1", "seat-c", "q-other"), "lost", "the qitem must match too");
+  const won = store.confirmClaim("kb-social-media-t_00000001-a1", "seat-c", "q-3");
+  assert.notEqual(won, "lost");
+  const claimed = (won as { row: any }).row;
   assert.deepEqual([claimed.state, claimed.claimed_by, claimed.qitem_id, claimed.reserved_by, claimed.reserved_qitem_id], ["claimed", "seat-c", "q-3", null, null]);
+  assert.equal(claimed.claimed_at, new Date(clock).toISOString());
+  assert.equal(store.confirmClaim("kb-social-media-t_00000001-a1", "seat-c", "q-3"), "lost", "a claimed job cannot be confirmed twice");
+
+  // A job cancelled while reserved: the holder's confirm is lost.
+  store.reserve("social-media", "quick", "seat-d", "q-4", 1000);
+  store.transition("kb-social-media-t_00000002-a1", "cancelled", { reason: "front-door" });
+  assert.equal(store.confirmClaim("kb-social-media-t_00000002-a1", "seat-d", "q-4"), "lost");
 });
 
 test("team specs: an invalid spec, a misplaced one or an unset placeholder stops the broker", () => {

@@ -66,12 +66,17 @@ cap belong to claim-next (PW-18, PW-19).
   - `insert`, `get`, and `tx(fn)`;
   - `transition(jobId, to, detail, columns)`: one PW-09 transition and the row update, in one
     transaction;
-  - `reserve(team, class, seat, qitemId, leaseMs = RESERVATION_LEASE_MS)` and `release(jobId, seat)`
-    for claim-next.
+  - claim-next, in three steps:
+    1. `reserve(team, class, seat, qitemId, leaseMs = RESERVATION_LEASE_MS)` returns
+       `{job, previousQitemId}`. `previousQitemId` is the expired holder's qitem when this
+       call took over a lease, and the caller closes it.
+    2. `confirmClaim(jobId, seat, qitemId)` moves the job from `queued` to `claimed`, but only
+       while the reservation is still this seat's with this qitem (a compare-and-set).
+       Otherwise it returns `"lost"`, for example when a slow seat's lease was taken over or the
+       job was cancelled, and the caller closes its own qitem.
+    3. `release(jobId, seat)` drops a reservation the seat still holds.
 
-  A reservation leaves the job `queued` and emits nothing. Any transition clears it, so a job
-  cancelled while reserved makes the claimer's `queued -> claimed` throw. The claimer must then
-  close the qitem it reserved (`reserved_qitem_id`).
+  A reservation leaves the job `queued` and emits nothing. Any transition clears it.
 
 ## Defaults open for review
 

@@ -66,7 +66,7 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
   const tx = <T>(fn: () => T): T => db.transaction(fn)();
   const get = (jobId: string) => db.prepare("SELECT * FROM jobs WHERE job_id = ?").get(jobId) as JobRow | undefined;
 
-  return {
+  const store = {
     db,
     tx,
     get,
@@ -100,8 +100,9 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
     /**
      * PW-18's claim-next reservation: the oldest queued job for (team, class) that is unreserved
      * or whose lease has run out. The state stays queued and nothing is emitted.
+     * `previousQitemId` is the expired holder's qitem when this takes over a lease, for the caller to close.
      */
-    reserve(team: string, cls: string, seat: string, qitemId: string, leaseMs = RESERVATION_LEASE_MS): JobRow | undefined {
+    reserve(team: string, cls: string, seat: string, qitemId: string, leaseMs = RESERVATION_LEASE_MS): { job: JobRow; previousQitemId: string | null } | undefined {
       return tx(() => {
         const at = now();
         const expired = new Date(at.getTime() - leaseMs).toISOString();
@@ -109,7 +110,20 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
           .get(team, cls, expired) as JobRow | undefined;
         if (!row) return undefined;
         db.prepare("UPDATE jobs SET reserved_by = ?, reserved_at = ?, reserved_qitem_id = ? WHERE job_id = ?").run(seat, at.toISOString(), qitemId, row.job_id);
-        return get(row.job_id);
+        return { job: get(row.job_id)!, previousQitemId: row.reserved_qitem_id };
+      });
+    },
+
+    /**
+     * Turns a reservation into the claim: queued -> claimed, only if the job is still reserved by
+     * this seat with this qitem. Otherwise (lease taken over, job cancelled) returns "lost", and
+     * the caller closes its own qitem.
+     */
+    confirmClaim(jobId: string, seat: string, qitemId: string): { row: JobRow; detail: TransitionDetail } | "lost" {
+      return tx(() => {
+        const row = get(jobId);
+        if (!row || row.state !== "queued" || row.reserved_by !== seat || row.reserved_qitem_id !== qitemId) return "lost";
+        return store.transition(jobId, "claimed", {}, { claimed_by: seat, claimed_at: iso(), qitem_id: qitemId });
       });
     },
 
@@ -120,4 +134,5 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
 
     close: () => db.close(),
   };
+  return store;
 }
