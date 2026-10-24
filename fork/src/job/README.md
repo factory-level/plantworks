@@ -33,9 +33,12 @@ runs alongside the job, so a slow consumer never holds the seat. Events the cons
 acknowledged are listed in `undelivered`, and the caller owns re-sending them
 (`../events/README.md`).
 
-**Open question:** the `done` event carries no result. The text is only in the runner's
-stdout, and artifacts are not collected yet. A result field in the event needs a contract
-change (PW-09) and the front door's agreement.
+**Results (Phase 0 scope):** the job's result is the runner's own return. The caller reads the
+result JSON on stdout, or the value `runJob()` returns. State events carry only the state and
+its detail (the settled PW-09/PW-10 contract), so **the callback alone is not a result channel**.
+This fits Phase 0, where a script stands in for the front door. Storing and retrieving results
+and artifacts for the broker and front door is a follow-up. It is needed before the full ADR 0204
+flow ("result + artifacts" back to the front door) can be said to work.
 
 Pi is `@earendil-works/pi-coding-agent`, pinned in the platform's `versions.json`. Tests use
 a fake Pi (`fixtures/fake-pi.mjs`) and a stub OpenAI-compatible server. Set `PLANTWORKS_PI_BIN`
