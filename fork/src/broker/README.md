@@ -3,10 +3,13 @@
 
 The job broker. It owns its own SQLite file and touches no upstream state, routes or migrations.
 
-**Run one broker per team**, as ADR 0204 deploys it (one broker StatefulSet per team). One
-process can load several teams, but that is for development only. The token, the jobs and every
-route are broker-wide, so any caller can read every team's jobs, and a `409 job_conflict` on
-another team's jobId returns that team's record.
+**The API is multi-team, behind one trusted credential.** A broker serves every team under
+`--teams`. `PLANTWORKS_BROKER_TOKEN` is broker-wide, not scoped to a team: whoever holds it can
+submit, read and cancel any team's jobs, and a `409 job_conflict` returns the existing record
+whatever its team. The broker does not isolate teams. Its trusted caller, PW-24's MCP server, does
+that, independent of how brokers are deployed: it checks `record.team` on every record it
+returns and never forwards a conflict's `job`. ADR 0204 happens to deploy one broker per team,
+but that deployment shape is not the isolation mechanism.
 
 ```
 plantworks pw broker serve --teams <dir> [--platform platform.json] [--db file] [--host 127.0.0.1] [--port 7534]
@@ -105,7 +108,6 @@ cap belong to claim-next (PW-18, PW-19).
   broker has no trustworthy link from an attempt to its predecessor. Inferring one from the
   jobId string alone is not safe, so a failed attempt stays `failed` when Hermes submits the next
   one. The link is a recorded lifecycle gap.
-- **Team boundary.** The bearer token is one broker-wide trusted credential, not a per-team one.
-  The configured-team boundary (checking `record.team`, and not leaking another team's record
-  through a conflict, an error or a replay) is enforced by the caller, PW-24's MCP server, and
-  by running one broker per team.
+- **Team boundary.** There is no per-team authorization in the broker. The token is one
+  broker-wide trusted credential. Team isolation is the trusted caller's job (PW-24), whatever the
+  deployment shape (see the top of this file).
