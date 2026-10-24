@@ -156,14 +156,23 @@ test("recovery never takes over: a claimed, running or other-seat qitem is left 
   }
 });
 
-test("daemonQueue.inspect: a 404 for the qitem is QitemNotFound; any other failure is a plain Error", async () => {
+test("daemonQueue.inspect: a 404 for the qitem itself is QitemNotFound; any other failure, including a 404 on its transitions, is a plain Error", async () => {
   let status = 404;
-  const server = createServer((_req, res) => { res.writeHead(status, { "content-type": "application/json" }); res.end("{}"); });
+  let transitionsStatus = 200;
+  const server = createServer((req, res) => {
+    const code = req.url!.endsWith("/transitions") ? transitionsStatus : status;
+    res.writeHead(code, { "content-type": "application/json" });
+    res.end(req.url!.endsWith("/transitions") ? "[]" : JSON.stringify({ qitemId: "qitem-x", state: "pending", destinationSession: SEAT }));
+  });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const q = daemonQueue({ url: `http://127.0.0.1:${(server.address() as AddressInfo).port}` });
   try {
     await assert.rejects(q.inspect("qitem-x"), QitemNotFound);
     status = 503;
+    await assert.rejects(q.inspect("qitem-x"), (e: Error) => !(e instanceof QitemNotFound));
+    // Only the qitem's own 404 proves absence: a 404 on its transitions is an unknown.
+    status = 200;
+    transitionsStatus = 404;
     await assert.rejects(q.inspect("qitem-x"), (e: Error) => !(e instanceof QitemNotFound));
   } finally {
     server.close();

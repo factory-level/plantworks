@@ -152,6 +152,13 @@ id, for the same seat. Reconciliation does this once a reservation is older than
 - **Anything else** leaves the reservation as it is: no answer, a 5xx, a qitem addressed to
   another seat, or one in another state.
 
+**Precondition: the daemon's queue outlives a broker crash.** A 404 counts as "never created" only
+while the daemon's `$OPENRIG_HOME` is persistent. If it is lost (an emptyDir, or a daemon restart
+without its volume), a qitem that was delivered, and possibly worked on, would 404, and recovery
+would deliver it again. Mount the volume that `fork/container/README.md` asks for at
+`OPENRIG_HOME=/var/lib/fork`. A failing retry past the lease is tried again on every
+reconciliation pass (2 s), with no backoff.
+
 Age only decides when a retry is attempted. Nothing releases on age, moves the job to another
 seat, or closes a qitem.
 

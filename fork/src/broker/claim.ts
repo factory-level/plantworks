@@ -69,11 +69,12 @@ export function daemonQueue(opts: { url: string; token?: string; fetch?: typeof 
     const message = `daemon ${path} returned ${res.status}: ${(await res.text()).slice(0, 300)}`;
     throw res.status >= 400 && res.status < 500 && res.status !== 409 ? new DaemonRefused(message) : new Error(message);
   };
-  const read = async (path: string) => {
+  /** `item`: this is the qitem itself, so a 404 means the daemon has no such qitem. */
+  const read = async (path: string, item = false) => {
     const res = await f(`${opts.url.replace(/\/+$/, "")}/api/queue${path}`, { headers: { ...(opts.token ? { authorization: `Bearer ${opts.token}` } : {}) }, signal: AbortSignal.timeout(opts.timeoutMs ?? 10_000) });
     if (!res.ok) {
       const message = `daemon ${path} returned ${res.status}: ${(await res.text()).slice(0, 300)}`;
-      throw res.status === 404 ? new QitemNotFound(message) : new Error(message);
+      throw item && res.status === 404 ? new QitemNotFound(message) : new Error(message);
     }
     return res.json();
   };
@@ -83,7 +84,7 @@ export function daemonQueue(opts: { url: string; token?: string; fetch?: typeof 
     async inspect(qitemId) {
       const id = encodeURIComponent(qitemId);
       // The item first: a 404 there is the daemon saying it has no such qitem.
-      const item = await read(`/${id}`);
+      const item = await read(`/${id}`, true);
       const transitions = await read(`/${id}/transitions`);
       return { ...(item as object), transitions } as QueueObservation;
     },
