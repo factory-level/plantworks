@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/factory-level/plantworks/blob/main/fork/schema/job-record.schema.json",
+  "title": "Plantworks job record (v1)",
+  "description": "What the broker returns for a job (POST /plantworks/v1/jobs, GET /plantworks/v1/jobs/{jobId}, POST .../cancel). See fork/src/broker/README.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["jobId", "team", "class", "state", "detail", "createdAt", "updatedAt", "result"],
+  "properties": {
+    "jobId": { "type": "string" },
+    "team": { "type": "string" },
+    "class": { "type": "string", "description": "The resolved class: the envelope's class, or the team spec's defaultClass." },
+    "state": { "enum": ["held", "queued", "claimed", "running", "done", "failed", "cancelled", "retried"] },
+    "detail": { "type": "object", "description": "The PW-09 transition detail for the current state, for example {\"reason\": \"front-door\"} when cancelled. {} for states without detail." },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "result": {
+      "description": "null until a worker reports a terminal result (PW-21).",
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["text", "artifacts"],
+          "properties": {
+            "text": { "type": ["string", "null"] },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "bytes", "sha256"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "bytes": { "type": "integer", "minimum": 0 },
+                  "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
