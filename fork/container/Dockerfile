@@ -53,7 +53,7 @@ LABEL org.opencontainers.image.source="https://github.com/factory-level/plantwor
       org.opencontainers.image.revision="${SOURCE_COMMIT}"
 RUN set -eux; \
     apt-get update; \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates tini tmux git procps; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates tini tmux git procps lsof; \
     rm -rf /var/lib/apt/lists/*
 COPY --from=build /usr/local /usr/local
 COPY --from=build /app /app

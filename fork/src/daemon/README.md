@@ -29,8 +29,8 @@ PW-21).
 
 - A database conflict stops a start by default. Upstream confirms a conflict only when `lsof`
   shows another process holding the file and that daemon's `daemon.json` and `/healthz` agree.
-  Without `lsof` the holder is unknown and nothing stops. The runtime image doesn't install
-  `lsof` (`fork/container/Dockerfile`), so there the default can't detect a holder.
+  Without `lsof` the holder is unknown and nothing stops. The runtime image installs `lsof`
+  (`fork/container/Dockerfile`), and its smoke test checks for it.
 
 - The port is 7533, so the daemon can run next to an OpenRig daemon on 7433.
 - The kernel is always off. Plantworks never wants the operator or advisor seats.
