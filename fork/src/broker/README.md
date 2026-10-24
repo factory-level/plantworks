@@ -67,6 +67,37 @@ Submit checks, in order:
 Submit never creates an upstream queue item and limits no concurrency. Claiming and the slot
 cap belong to claim-next (PW-18, PW-19).
 
+### claim-next (PW-18, `claim.ts`)
+
+`POST /plantworks/v1/claim-next` with `{team, seat, class?}`. `seat` is the OpenRig session that
+will do the work, for example `dev-worker@team`. No `class` means the team's `defaultClass`.
+
+| Response | When |
+|---|---|
+| `200 {job, qitemId, seat, envelope}` | The oldest queued job of that class is now `claimed` by the seat. Its upstream qitem `qitemId` is addressed to the seat and claimed for it |
+| `204` | Nothing claimable in that class |
+| `400` | `invalid_claim`, `unknown_team`, `unknown_class` |
+| `409 reservation_lost` | The job was cancelled, or its lease taken over, while it was being handed to this seat. Ask again |
+| `503 daemon_unavailable` | The daemon refused or didn't answer. The job stays claimable at once |
+
+This is **late binding**: the upstream qitem exists only from the moment a seat claims, and its
+destination is that seat. Steps:
+1. `reserve`, with a qitem id chosen first.
+2. Close the expired holder's qitem, if this took over a lease.
+3. Create the qitem with that id. Upstream treats a retried create with the same id as
+   idempotent.
+4. Claim it for the seat.
+5. `confirmClaim`, then emit `claimed`.
+
+Failure handling: on a daemon failure, the reservation is released and the qitem closed. On
+`lost`, the broker's own qitem is closed. Nothing is ever emitted for a claim that didn't happen.
+
+The daemon is `PLANTWORKS_DAEMON_URL` (default `http://127.0.0.1:7533`, the PW-16 port), with
+`OPENRIG_AUTH_BEARER_TOKEN` when set. Qitems are created as `PLANTWORKS_BROKER_SESSION` (default
+`plantworks-broker`). The broker names the seat in the request body, so the daemon records it as
+a claimed identity (`claimed:v1`). It never sends `X-OpenRig-Session`, which would assert the
+seat's transport identity. Closing a qitem is `done` with `closureReason: canceled`.
+
 ## For other cards
 
 - **Routes.** `createBroker({store, teams, routes})` takes `BrokerRoutes` functions,
