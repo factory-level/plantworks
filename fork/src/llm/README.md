@@ -16,7 +16,22 @@ There are two retry layers, and each status is retried by exactly one of them.
 | Any other status (for example `500`) | Passes it through unchanged and doesn't retry | **Retries 3 times**, after 2 s, 4 s and 8 s, then the turn fails |
 
 So a busy endpoint costs Pi one call however long the queue lasts, and a 503 can't be retried
-twice. "The call is retried after backoff" (PW-11) is Pi's retry. The governor only counts
+twice.
+
+**Consequence: one stuck logical call can fail the job on its own.** Pi retries the governor's
+deadline `504` 3 times, and every retry is a new governor call that can also hit the deadline. So
+with an endpoint that never answers within `deadlineSeconds`, the sequence is:
+
+1. Pi's first call hits the deadline: count 1.
+2. Pi's first retry, 2 s later, hits it again: count 2.
+3. Pi's second retry, 4 s later, hits it again: count 3, and the governor fails the job as
+   `call-deadline`.
+
+Pi's third retry never runs. With the quick class, that takes about 3 × 60 s + 6 s. In effect,
+the 3-consecutive rule counts Pi's retries of one prompt, not 3 distinct prompts. Each of the 3
+calls did miss the deadline. Whether that is the intended reading of PW-11 is a product decision.
+This sequence is inferred from `governor.ts` and the observed Pi retry. It has **not** been run
+end to end with real deadlines: the gated tests use a stub that answers `504` directly. "The call is retried after backoff" (PW-11) is Pi's retry. The governor only counts
 deadlines and stops the job at 3 in a row.
 
 **Where Pi's behaviour comes from.** These are Pi 1.4.0's own defaults, the platform pin in
