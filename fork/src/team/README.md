@@ -103,14 +103,17 @@ same validation and directory rules the broker starts with. For each team it wri
   home.
 
 Output goes only to `--out`. A render refuses, before writing anything:
-- an `--out` inside a live home: `$OPENRIG_HOME`, `~/.openrig` or `~/.plantworks`;
+- an `--out` inside a live home: `$OPENRIG_HOME`, the directory of `$OPENRIG_DB`, `~/.openrig` or
+  `~/.plantworks`;
 - an existing `<out>/<team>`.
 
 It never deletes or rewrites a file it did not create.
 
 **Removing a team.** Delete its `<team>/` directory from the spec set. A re-render no longer
 contains it. The broker reads specs only at start, so after a restart it answers the team's jobs
-`400 unknown_team`. Deregistering the Hermes profile is #991's, outside the fork.
+`400 unknown_team`. Deregistering the Hermes profile is #991's, outside the fork. The removed
+team's existing jobs stay in the broker's file, and their events have no callback left, so the
+emitter keeps retrying them. Cancel or finish the team's live jobs before removing it.
 
 ## Deliberately left out
 

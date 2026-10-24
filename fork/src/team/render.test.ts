@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, symlinkSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -73,6 +73,14 @@ test("render refuses a live home, inside or exactly, and a bad governor URL, bef
     assert.throws(() => renderFleet(teams, out, GOVERNOR, { OPENRIG_HOME: home }), /inside the live home/, out);
   }
   assert.deepEqual(readdirSync(home), [], "nothing written into the home");
+  // A live home at a custom path is known from OPENRIG_DB even when OPENRIG_HOME is unset.
+  assert.throws(() => renderFleet(teams, join(home, "x"), GOVERNOR, { OPENRIG_DB: join(home, "openrig.sqlite") }), /inside the live home/);
+  // A dangling symlink planted as the team dir is refused by name, not written through.
+  const planted = fresh();
+  mkdirSync(planted);
+  symlinkSync(join(home, "nowhere"), join(planted, "social-media"));
+  assert.throws(() => renderFleet(teams, planted, GOVERNOR, env), /already exists; render into a fresh --out/);
+  assert.deepEqual(readdirSync(home), []);
   const out = fresh();
   assert.throws(() => renderFleet(teams, out, "not a url", env), /--governor-url/);
   assert.equal(existsSync(out), false);

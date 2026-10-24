@@ -3,7 +3,7 @@
 // class workers.max (trains × perTrain.workers[class]), its seat names (<class>-NN@<team>) and each
 // seat's Pi files through PW-12's writeSeatFiles. Output goes only to a fresh --out directory: it
 // never writes into a live OpenRig home and never touches a file it did not create.
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { classFromSpec } from "../llm/classes.ts";
@@ -27,10 +27,16 @@ export function fleetFor(spec: TeamSpec): FleetTeam {
   return { team: spec.team, classes };
 }
 
-/** Homes a render must never write into: $OPENRIG_HOME, ~/.openrig and the PW-16 default ~/.plantworks. */
+/**
+ * Homes a render must never write into: $OPENRIG_HOME, the directory of $OPENRIG_DB (a live home
+ * at a custom path, even with OPENRIG_HOME unset), ~/.openrig and the PW-16 default ~/.plantworks.
+ */
 function liveHomes(env: Record<string, string | undefined>): string[] {
-  return [env.OPENRIG_HOME, join(homedir(), ".openrig"), join(homedir(), ".plantworks")].filter((h): h is string => !!h).map(real);
+  return [env.OPENRIG_HOME, env.OPENRIG_DB && dirname(env.OPENRIG_DB), join(homedir(), ".openrig"), join(homedir(), ".plantworks")].filter((h): h is string => !!h).map(real);
 }
+
+/** Whether anything, a dangling symlink included, is at p. */
+const present = (p: string) => { try { lstatSync(p); return true; } catch { return false; } };
 
 /** The real path of p, or of its nearest existing ancestor joined with the rest. */
 function real(p: string): string {
@@ -51,7 +57,7 @@ export function renderFleet(teams: Map<string, TeamSpec>, out: string, governorU
     if (target === home || target.startsWith(home + sep)) throw new Error(`refusing to render into ${out}: it is inside the live home ${home}; pass a fresh --out`);
   }
   if (!/^https?:\/\/\S+$/.test(governorUrl)) throw new Error(`--governor-url must be an http(s) URL, got ${JSON.stringify(governorUrl)}`);
-  for (const team of teams.keys()) if (existsSync(join(out, team))) throw new Error(`refusing to render: ${join(out, team)} already exists; render into a fresh --out`);
+  for (const team of teams.keys()) if (present(join(out, team))) throw new Error(`refusing to render: ${join(out, team)} already exists; render into a fresh --out`);
 
   const files: string[] = [];
   for (const spec of teams.values()) {
