@@ -110,15 +110,19 @@ shares the key.
 - **Separate from other caps.** This runtime cap is independent of the team spec's validation
   caps (`pw team validate --platform`) and of Hermes' `kanban.max_in_progress_per_profile`.
 
-**Fail-closed: a slot is never freed on a timeout alone.** A seat that dies while holding a job
-keeps its slot, because Pi may still be running and the cap protects the shared inference lane.
-With cap 1, that stalls the key, which is the safe failure. The slot frees only on evidence that
-the work stopped:
-- the upstream qitem reaching a terminal state;
-- proven evidence that the seat's Pi process is gone;
-- an explicit, audited operator action.
+**What the cap enforces: broker job states, not physical execution.** The cap counts jobs by
+their state in this broker. A slot frees when the broker records a terminal state for the job,
+and only then. It doesn't observe Pi processes, and it can't prove that work physically stopped.
 
-Which of these exist is the worker lifecycle's job (PW-21).
+**Fail-closed.** Nothing frees a slot on a timeout alone. Node liveness doesn't free one
+automatically, and there's no force-free. A seat that dies while holding a job keeps its slot,
+because Pi may still be running. With cap 1, that stalls the key, which is the safe failure.
+
+Which events justify recording a terminal state belongs to the worker lifecycle and its
+reconciliation (PW-21). Those events must be verified, not assumed. For example, an upstream
+qitem closed by administrative cancel isn't by itself proof that Pi stopped. Recovering a stalled
+key is an operator procedure that first verifies the work stopped. It's documented with PW-21,
+not a broker endpoint.
 
 The daemon is `PLANTWORKS_DAEMON_URL` (default `http://127.0.0.1:7533`, the PW-16 port), with
 `OPENRIG_AUTH_BEARER_TOKEN` when set. Qitems are created as `PLANTWORKS_BROKER_SESSION` (default
