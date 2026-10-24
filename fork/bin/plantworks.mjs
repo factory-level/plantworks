@@ -3,12 +3,33 @@
 // The `plantworks` and `pwctl` binaries. Needs the upstream CLI built (`npm run build` at the root).
 // ponytail: always loads the full upstream program (no lazy per-command fast path like `rig`'s
 // bin-wrapper); add one if startup time matters for seats calling this in a loop.
-import { runProgram } from "../../packages/cli/dist/index.js";
-import { createPlantworksProgram } from "../src/cli/program.ts";
-import { jobVerb } from "../src/job/command.ts";
-import { llmVerb } from "../src/llm/command.ts";
-import { teamVerb } from "../src/team/command.ts";
+import { applyDaemonDefaults, applyHomeDefaults } from "../src/daemon/boot.ts";
 
-// A command may set process.exitCode itself (for example a failed preflight); keep it.
-const code = await runProgram(createPlantworksProgram([llmVerb, jobVerb, teamVerb]), process.argv);
-process.exitCode = process.exitCode || code;
+// Upstream modules read OPENRIG_HOME when they load, so they are imported only after this.
+applyHomeDefaults(process.env);
+const { ConfigStore } = await import("../../packages/cli/dist/config-store.js");
+const store = new ConfigStore();
+const fromFile = (key) => {
+  const r = store.resolveWithSource(key);
+  return r.source === "file" ? r.value : undefined;
+};
+
+let refused;
+try {
+  applyDaemonDefaults(process.env, process.argv, { port: fromFile("daemon.port"), host: fromFile("daemon.host") });
+} catch (e) {
+  refused = e;
+}
+if (refused) {
+  console.error(`plantworks: ${refused.message}`);
+  process.exitCode = 2;
+} else {
+  const { runProgram } = await import("../../packages/cli/dist/index.js");
+  const { createPlantworksProgram } = await import("../src/cli/program.ts");
+  const { jobVerb } = await import("../src/job/command.ts");
+  const { llmVerb } = await import("../src/llm/command.ts");
+  const { teamVerb } = await import("../src/team/command.ts");
+  // A command may set process.exitCode itself (for example a failed preflight); keep it.
+  const code = await runProgram(createPlantworksProgram([llmVerb, jobVerb, teamVerb]), process.argv);
+  process.exitCode = process.exitCode || code;
+}

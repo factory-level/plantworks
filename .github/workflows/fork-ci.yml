@@ -48,6 +48,8 @@ jobs:
       - run: npm ci
       - name: Build upstream (the fork imports its built CLI and daemon)
         run: npm run build
+      - name: tmux (the daemon boot test starts a real daemon)
+        run: command -v tmux || (sudo apt-get update && sudo apt-get install -y tmux)
       - name: Fork tests
         working-directory: fork
         run: npm test

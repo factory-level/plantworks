@@ -1,0 +1,45 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+# Daemon boot (PW-16)
+
+`plantworks daemon start` runs the unmodified upstream daemon as a Pi-only daemon. Every
+`plantworks` command shares these defaults, so `plantworks ps`, `plantworks queue ...` and the
+`pw` verbs all talk to the same daemon and home. `boot.ts` sets them as environment that upstream
+already reads, before any upstream module loads. Nothing outside `fork/` changes.
+
+| Setting | Plantworks | Upstream `rig` | Overridden by |
+|---|---|---|---|
+| Home | `~/.plantworks` | `~/.openrig` | `OPENRIG_HOME` |
+| Port | 7533 | 7433 | `OPENRIG_PORT`, `daemon.port` in the home's config file, `--port` |
+| Bind | `127.0.0.1` only | loopback, plus the Tailscale interface when one is detected | in precedence order: `daemon start --host` (the last one wins), `OPENRIG_BIND_HOST`, `daemon.host` in the config file |
+| Kernel (Claude/Codex operator and advisor) | always off (`OPENRIG_NO_KERNEL=1`) | on | not overridable |
+| Start-time bearer check (not request auth; see Limitations) | a token must be set before any non-loopback bind, Tailscale addresses included | required for public binds; Tailscale is exempt | `OPENRIG_AUTH_BEARER_TOKEN` |
+
+With a non-loopback bind and no `OPENRIG_AUTH_BEARER_TOKEN`, `plantworks daemon start` exits 2
+before it starts anything. Every other command only warns and pins any daemon it auto-starts
+(`up`, `context`) to `127.0.0.1`, so `plantworks config set daemon.host 127.0.0.1` still works
+as a fix. With a token, `OPENRIG_TERMINAL_BEARER_TOKEN` defaults to that token too, because
+upstream leaves the terminal routes open on a Tailscale bind.
+
+Pi-only means that nothing in the boot needs Claude or Codex. The test boots the daemon with
+neither of them on `PATH`. Pi seats are started later by the broker and the workers (PW-17 and
+PW-21).
+
+## Defaults open for review
+
+- The port is 7533, so the daemon can run next to an OpenRig daemon on 7433.
+- The kernel is always off. Plantworks never wants the operator or advisor seats.
+- The bearer token is required even on Tailscale binds. This is stricter than upstream, which
+  treats the tailnet's ACLs as the auth boundary.
+
+## Limitations
+
+- **A non-loopback bind is unsupported in Phase 0-1.** The token is not daemon authentication.
+  It gates only what upstream gates with it: the terminal routes, and the Mission Control, hosts
+  and rig-mode verbs. It does **not** authenticate queue reads or writes. On a non-loopback bind
+  with a token set, `/api/ps`, `/api/rigs` and `/api/queue/list` still answer without one, and
+  `POST /api/queue/create` with a self-asserted `X-OpenRig-Session` header still creates work for
+  a seat. So any network peer could read the fleet and queue work. Binding beyond loopback
+  needs real route-level auth first, which is not built.
+- The daemon still needs `tmux`, because upstream's preflight checks for it.
+- On boot, upstream tries to fetch its plugin bundle over the network. It falls back to the
+  vendored copy when the fetch fails, so the daemon also boots offline.
