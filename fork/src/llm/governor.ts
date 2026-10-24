@@ -87,8 +87,14 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
   let priority: number | undefined = opts.priority;
   // With hints on, a model call waits until the seat's job priority is known: the daemon can wake
   // Pi as soon as the qitem exists, before the worker has the claim response (PW-29).
-  const waiting: (() => void)[] = [];
-  const priorityKnown = () => (priority !== undefined ? Promise.resolve() : new Promise<void>((r) => waiting.push(r)));
+  // A held call whose client goes away is dropped, never sent later with another job's priority.
+  const waiting = new Set<() => void>();
+  const priorityKnown = (signal: AbortSignal) => new Promise<void>((resolve) => {
+    if (priority !== undefined || signal.aborted) return resolve();
+    const release = () => { waiting.delete(release); signal.removeEventListener("abort", release); resolve(); };
+    waiting.add(release);
+    signal.addEventListener("abort", release, { once: true });
+  });
   const inFlight = new Set<AbortController>();
 
   async function handle(req: IncomingMessage, res: ServerResponse) {
@@ -97,7 +103,13 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
     let body: Buffer | undefined = chunks.length ? Buffer.concat(chunks) : undefined;
     const path = req.url ?? "/";
     const completion = req.method === "POST" && /\/(chat\/)?completions$/.test(path.split("?")[0]);
-    if (completion && opts.priorityHints) await priorityKnown();
+    // Watch for the client going away from here on, including while the call is held below.
+    const abort = new AbortController();
+    res.on("close", () => abort.abort(new Error("client went away")));
+    if (completion && opts.priorityHints) {
+      await priorityKnown(abort.signal);
+      if (abort.signal.aborted) return;
+    }
     if (body && completion) body = governBody(body, c, opts.priorityHints ? priority : undefined);
 
     const headers: Record<string, string> = {};
@@ -112,9 +124,7 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
       res.end(JSON.stringify({ error: { message: `model calls are cut off: ${cut}`, type: "governor" } }));
     };
     if (cut) { refuse(); log(record); return; }
-    const abort = new AbortController();
     inFlight.add(abort);
-    res.on("close", () => abort.abort(new Error("client went away")));
     try {
       for (let delay = backoff.first; ; delay = Math.min(delay * 2, backoff.max)) {
         const started = Date.now();
@@ -183,7 +193,7 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
     restore() { cut = null; },
     setPriority(n) {
       priority = n;
-      if (n !== undefined) for (const release of waiting.splice(0)) release();
+      if (n !== undefined) for (const release of [...waiting]) release();
     },
   };
 }
