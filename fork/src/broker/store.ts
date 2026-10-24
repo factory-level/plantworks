@@ -68,11 +68,37 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS jobs_claimable ON jobs (team, class, state, seq);
 -- PW-22: seats told to take no new work (worker preStop). Kept across broker restarts.
 CREATE TABLE IF NOT EXISTS seat_drains (seat TEXT PRIMARY KEY, since TEXT NOT NULL);
+-- W3-A: every state a job enters, appended in the transaction that changes the state. Never updated.
+CREATE TABLE IF NOT EXISTS job_transitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id TEXT NOT NULL,
+  from_state TEXT,
+  to_state TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '{}',
+  columns TEXT NOT NULL DEFAULT '{}',
+  at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS job_transitions_job ON job_transitions (job_id, id);
 `;
 /** Columns added after PW-17, for a broker file created before them. */
 const ADDED_COLUMNS = ["approval_expires_at TEXT", "approval_decision TEXT", "priority INTEGER NOT NULL DEFAULT 0"];
 
 export type Store = ReturnType<typeof openStore>;
+
+/** One row of a job's durable history: every state it entered, written in the same transaction as the state. */
+export interface TransitionRow {
+  /** Monotonic across the store: a reader can resume after the last id it saw. */
+  id: number;
+  job_id: string;
+  /** null for the job's initial state (queued or held, at submit). */
+  from_state: JobState | null;
+  to_state: JobState;
+  /** JSON: the checked PW-09 detail of this transition, `{}` when it carries none. */
+  detail: string;
+  /** JSON: the job row columns this transition set (claimed_by, claimed_at, qitem_id, result, approval_decision). */
+  columns: string;
+  at: string;
+}
 
 export function openStore(path: string, now: () => Date = () => new Date()) {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
@@ -89,6 +115,8 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
   // against another broker process on the same file. Nested calls run as savepoints.
   const tx = <T>(fn: () => T): T => db.transaction(fn).immediate();
   const get = (jobId: string) => db.prepare("SELECT * FROM jobs WHERE job_id = ?").get(jobId) as JobRow | undefined;
+  const record = (jobId: string, from: JobState | null, to: JobState, detail: unknown, columns: TransitionColumns, at: string) =>
+    db.prepare("INSERT INTO job_transitions (job_id, from_state, to_state, detail, columns, at) VALUES (?, ?, ?, ?, ?, ?)").run(jobId, from, to, JSON.stringify(detail), JSON.stringify(columns), at);
 
   /**
    * One PW-09 transition and its row update, atomically. Throws on an illegal transition. A reserved
@@ -104,10 +132,12 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
     const bad = names.filter((c) => !TRANSITION_COLUMNS.includes(c));
     if (bad.length) throw new Error(`transition cannot set ${bad.join(", ")}`);
     const sets = names.map((c) => `, ${c} = @${c}`).join("");
+    const at = iso();
     const guard = holder ? "reserved_by = @seat AND reserved_qitem_id = @qitemId" : "reserved_by IS NULL";
     const r = db.prepare(`UPDATE jobs SET state = @to, detail = @detail, updated_at = @at, reserved_by = NULL, reserved_at = NULL, reserved_qitem_id = NULL${sets} WHERE job_id = @jobId AND state = @from AND ${guard}`)
-      .run({ ...columns, to, from: row.state, detail: JSON.stringify(checked), at: iso(), jobId, seat: holder?.seat ?? null, qitemId: holder?.qitemId ?? null });
+      .run({ ...columns, to, from: row.state, detail: JSON.stringify(checked), at, jobId, seat: holder?.seat ?? null, qitemId: holder?.qitemId ?? null });
     if (r.changes !== 1) throw new Error(`job ${jobId} changed while it was being moved to ${to}`);
+    record(jobId, row.state, to, checked, columns, at);
     return { row: get(jobId)!, detail: checked };
   });
 
@@ -131,6 +161,7 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
         const expires = approvalTtlSeconds === undefined ? null : new Date(now().getTime() + approvalTtlSeconds * 1000).toISOString();
         const r = db.prepare("INSERT OR IGNORE INTO jobs (job_id, team, class, state, envelope, created_at, updated_at, approval_expires_at, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
           .run(envelope.jobId, envelope.team, cls, state, JSON.stringify(envelope), at, at, expires, priority);
+        if (r.changes === 1) record(envelope.jobId, null, state, {}, {}, at);
         return { row: get(envelope.jobId)!, created: r.changes === 1 };
       });
     },
@@ -171,6 +202,15 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
         if (!row || row.state !== "queued" || row.reserved_by !== seat || row.reserved_qitem_id !== qitemId) return "lost";
         return apply(jobId, "claimed", {}, { claimed_by: seat, claimed_at: iso(), qitem_id: qitemId }, { seat, qitemId });
       });
+    },
+
+    /**
+     * Durable transition history, oldest first: rows after `afterId`, optionally for one job. A job
+     * submitted before this table existed has no rows for its earlier states.
+     */
+    transitions(opts: { afterId?: number; jobId?: string; limit?: number } = {}): TransitionRow[] {
+      return db.prepare(`SELECT * FROM job_transitions WHERE id > @afterId${opts.jobId === undefined ? "" : " AND job_id = @jobId"} ORDER BY id LIMIT @limit`)
+        .all({ afterId: opts.afterId ?? 0, jobId: opts.jobId, limit: opts.limit ?? 1000 }) as TransitionRow[];
     },
 
     /** PW-22: marks a seat draining (claim-next gives it no new work), or resumes it. */
