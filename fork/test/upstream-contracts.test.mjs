@@ -15,6 +15,8 @@ test("upstream CLI exposes createProgram and its lazy loader map matches the eag
   assert.equal(typeof program.commands, "object");
   const names = program.commands.map((command) => command.name());
   assert.ok(!names.includes("plantworks"));
+  assert.ok(!names.includes("pw"));
+  assert.ok(!COMMAND_LOADERS.has("pw"));
   assert.ok(names.includes("fork"));
   assert.deepEqual([...COMMAND_LOADERS.keys()], names);
 });
