@@ -3,13 +3,14 @@
 // mode behind the per-seat call governor, and plantworks.job.state events for each step. No
 // OpenRig daemon and no broker: the runner plays the broker's part for exactly one job.
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { randomBytes } from "node:crypto";
+import { existsSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, closeSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { DEFAULT_CLASS, classByName, type WorkerClass } from "../llm/classes.ts";
 import { readEndpoint } from "../llm/endpoint.ts";
 import { startGovernor, type Governor } from "../llm/governor.ts";
 import { writeSeatFiles } from "../seat/pi-seat-files.ts";
-import { transition, validateEnvelope, type JobState, type TransitionDetail } from "../contract/job.ts";
+import { transition, validateEnvelope, type JobEnvelope, type JobState, type TransitionDetail } from "../contract/job.ts";
 import { createEmitter, jobStateEvent, type DeliveryError } from "../events/job-state.ts";
 
 /** Job timeout ceilings per class, from the ADR 0204 sample team spec (quick 900 s, long 3600 s). */
@@ -28,6 +29,10 @@ export interface RunOptions {
   /** Test hook: replaces the named class's limits. */
   workerClass?: WorkerClass;
   log?: (line: string) => void;
+  /** Aborting it (Ctrl-C/SIGTERM in `pw job run`) stops Pi and ends the job `failed` with reason `interrupted`. */
+  signal?: AbortSignal;
+  /** The single-job lock. Default: <openrigHome>/plantworks/job.lock. */
+  lockPath?: string;
 }
 
 export interface RunResult {
@@ -70,6 +75,16 @@ export async function runJob(opts: RunOptions): Promise<RunResult> {
   for (const name of PROJECT_PROMPT_FILES) if (existsSync(join(opts.cwd, ".pi", name))) throw new RejectedJob(`the job's repository ships .pi/${name}, which would replace the seat's system prompt; refusing it`);
 
   const log = opts.log ?? ((line) => process.stderr.write(`${line}\n`));
+  // PW-13: one job at a time. Taken before any event, so a refused job emits nothing.
+  const lock = takeJobLock(opts.lockPath ?? join(opts.openrigHome, "plantworks", "job.lock"));
+  try {
+    return await runLocked(opts, job, className, workerClass, timeoutSeconds, log, lock);
+  } finally {
+    lock.release();
+  }
+}
+
+async function runLocked(opts: RunOptions, job: JobEnvelope, className: string, workerClass: WorkerClass, timeoutSeconds: number, log: (line: string) => void, lock: JobLock): Promise<RunResult> {
   const undelivered: string[] = [];
   const emitter = createEmitter({
     url: opts.callbackUrl,
@@ -89,6 +104,7 @@ export async function runJob(opts: RunOptions): Promise<RunResult> {
   enter("queued");
   enter("claimed");
 
+  let interrupted: Ending | undefined;
   let governor: Governor | undefined;
   let pi: PiRpc | undefined;
   let ending: Ending;
@@ -97,6 +113,10 @@ export async function runJob(opts: RunOptions): Promise<RunResult> {
     const env = opts.env ?? process.env;
     let stop: (e: Ending) => void = () => {};
     const stopped = new Promise<Ending>((resolve) => (stop = resolve));
+    const onAbort = () => { interrupted = { state: "failed", detail: { reason: "interrupted", message: "the runner was interrupted (SIGINT/SIGTERM)" } }; stop(interrupted); };
+    if (opts.signal?.aborted) onAbort();
+    else opts.signal?.addEventListener("abort", onAbort, { once: true });
+    if (interrupted) throw new Error("interrupted before Pi started");
     governor = await startGovernor({
       endpoint: readEndpoint(env),
       workerClass,
@@ -105,6 +125,8 @@ export async function runJob(opts: RunOptions): Promise<RunResult> {
     const agentDir = writeSeatFiles({ openrigHome: opts.openrigHome, session: sessionFor(job.jobId), className, governorUrl: governor.url });
     pi = startPi(opts.piCommand, { cwd: opts.cwd, env: piEnv(env, agentDir) }, log);
     await pi.started; // a Pi that cannot start fails the job from `claimed`, never `running`
+    lock.recordPi(pi.pid);
+    if (interrupted) throw new Error("interrupted before the job started running");
     pi.exited.then((code) => stop({ state: "failed", detail: { reason: "error", message: `pi exited (${code}) before the job settled` } }));
 
     enter("running");
@@ -131,11 +153,13 @@ export async function runJob(opts: RunOptions): Promise<RunResult> {
       clearTimeout(timer);
     }
   } catch (e) {
-    ending = { state: "failed", detail: { reason: "error", message: (e as Error).message } };
+    ending = interrupted ?? { state: "failed", detail: { reason: "error", message: (e as Error).message } };
   } finally {
+    // The ending is recorded only after this: Pi's process has been seen to exit (or was SIGKILLed and reaped).
     await pi?.stop();
     await governor?.close();
   }
+  if (interrupted) ending = interrupted;
 
   enter(ending.state, ending.detail);
   await Promise.all(sent);
@@ -163,6 +187,7 @@ type Settled = { lastStopReason?: string; lastError?: string };
 interface PiRpc {
   /** Resolves once the process is running; rejects if it could not start. */
   started: Promise<void>;
+  pid: number | undefined;
   request(cmd: Record<string, unknown>): Promise<Response>;
   /** Resolves on agent_settled with the last assistant message's stop reason. */
   settled: Promise<Settled>;
@@ -213,6 +238,7 @@ function startPi(command: string[], spawnOpts: { cwd: string; env: NodeJS.Proces
   child.stdin!.on("error", () => {});
 
   return {
+    pid: child.pid,
     request(cmd) {
       const id = `pw-${++nextId}`;
       return new Promise((resolve) => {
@@ -239,5 +265,71 @@ function startPi(command: string[], spawnOpts: { cwd: string; env: NodeJS.Proces
       child.kill("SIGKILL");
       await exited;
     },
+  };
+}
+
+// --- PW-13: the host's single-job lock --------------------------------------------------------
+
+/** The held lock: `recordPi` adds Pi's PID once it runs, `release` removes the lock if it is still ours. */
+export interface JobLock { recordPi(pid: number | undefined): void; release(): void }
+type LockRecord = { runner: number; pi: number | null; token: string; since: string };
+
+const alive = (pid: number) => {
+  try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; }
+};
+
+/**
+ * Takes `path` with an exclusive create, or throws RejectedJob. Fail-closed: a lock is stale, and
+ * replaced, only when the runner and the Pi it records are both gone; a lock that can't be read or
+ * parsed is refused and left in place, since nothing proves its job stopped.
+ */
+export function takeJobLock(path: string, now = () => new Date()): JobLock {
+  mkdirSync(dirname(path), { recursive: true });
+  const mine: LockRecord = { runner: process.pid, pi: null, token: randomBytes(8).toString("hex"), since: now().toISOString() };
+  const write = (target: string, flag?: string) => {
+    const fd = openSync(target, flag ?? "w");
+    try { writeFileSync(fd, `${JSON.stringify(mine)}\n`); } finally { closeSync(fd); }
+  };
+  for (let attempt = 0; ; attempt++) {
+    try {
+      write(path, "wx");
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST" || attempt > 0) {
+        if ((e as NodeJS.ErrnoException).code === "EEXIST") throw new RejectedJob(`another job took ${path} while this one was starting`);
+        throw e;
+      }
+    }
+    let raw: string;
+    let held: LockRecord;
+    try {
+      raw = readFileSync(path, "utf8");
+      held = JSON.parse(raw);
+      if (!Number.isInteger(held.runner) || (held.pi !== null && !Number.isInteger(held.pi))) throw new Error("not a lock record");
+    } catch (e) {
+      throw new RejectedJob(`${path} exists but can't be read as a job lock (${(e as Error).message}); refusing to run. Remove it only after checking that no job is running`);
+    }
+    if (alive(held.runner) || (held.pi !== null && alive(held.pi))) throw new RejectedJob(`one job at a time on this host: ${path} is held by runner ${held.runner}${held.pi === null ? "" : ` and Pi ${held.pi}`} since ${held.since}`);
+    // Stale: move it aside, then make sure what moved is the lock we judged stale, not one just taken.
+    const aside = `${path}.stale.${process.pid}.${mine.token}`;
+    renameSync(path, aside);
+    if (readFileSync(aside, "utf8") !== raw) {
+      // ponytail: a second runner replaced the stale lock between our read and rename; put its lock back and stand down.
+      try { linkSync(aside, path); } catch { /* it has already been replaced again */ }
+      unlinkSync(aside);
+      throw new RejectedJob(`another job took ${path} while this one was starting`);
+    }
+    unlinkSync(aside);
+  }
+  const ours = () => { try { return (JSON.parse(readFileSync(path, "utf8")) as LockRecord).token === mine.token; } catch { return false; } };
+  return {
+    recordPi(pid) {
+      if (pid === undefined || !ours()) return;
+      mine.pi = pid;
+      const tmp = `${path}.${mine.token}.tmp`;
+      write(tmp);
+      renameSync(tmp, path);
+    },
+    release() { if (ours()) unlinkSync(path); },
   };
 }

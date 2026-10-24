@@ -9,7 +9,7 @@ export type JobState = (typeof JOB_STATES)[number];
 export const DONE_OUTCOMES = ["succeeded", "rejected-by-checks"] as const;
 export type DoneOutcome = (typeof DONE_OUTCOMES)[number];
 
-export const FAILURE_REASONS = ["call-deadline", "timeout", "error"] as const;
+export const FAILURE_REASONS = ["call-deadline", "timeout", "error", "interrupted"] as const;
 export type FailureReason = (typeof FAILURE_REASONS)[number];
 
 export const CANCEL_REASONS = ["denied", "approval-expired", "front-door"] as const;

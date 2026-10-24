@@ -27,9 +27,27 @@ plantworks pw job run job.json --cwd ./workspace --pi /path/to/pi
 | 3 consecutive model calls cut at the class deadline (the governor) | `call-deadline` |
 | The job runs past `timeoutSeconds` (default: the class ceiling, 900 s for `quick` or 3600 s for `long`) | `timeout` |
 | Pi reports a model error, rejects the prompt or exits early; setup fails after the claim | `error` |
+| The runner gets Ctrl-C or SIGTERM. Pi is stopped first (below), and `failed` is reported only once its process has exited | `interrupted` |
 
 A setup failure, or a Pi that cannot start, moves `claimed -> failed` and never reports
 `running`.
+An interrupt before Pi runs does the same. A second Ctrl-C/SIGTERM gets the default action, so a
+stop that hangs can still be killed; a runner killed with SIGKILL reports nothing. No branch is
+created, so there is none to leave intact.
+
+**One job at a time.** The runner holds `$OPENRIG_HOME/plantworks/job.lock` while a job runs (the
+selected home: `PLANTWORKS_HOME` wins, as for every `plantworks` command), created exclusively and
+recording the runner's and Pi's PIDs. A second `pw job run` with that lock is rejected (exit 2)
+before any event. The lock is per home by default; set `PLANTWORKS_JOB_LOCK` to one path to
+cover every home on the host. Fail-closed:
+- the lock is released when the run ends, and only if it is still this run's;
+- it is stale, and replaced, only when the runner and the Pi it records are both gone, so a Pi left
+  running by a killed runner still holds it;
+- a lock file that can't be read as one is refused and never removed: check that no job is running,
+  then remove it by hand.
+
+A PID can be reused, so a stale lock whose PIDs now belong to other processes is refused until it
+is removed.
 
 **Pi's environment** is an allow-list: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`,
 `LC_*`, `TERM`, `TMPDIR`, `TZ`, Pi's own `PI_*`, and the seat's `PI_CODING_AGENT_DIR`, with

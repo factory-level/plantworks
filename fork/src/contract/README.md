@@ -48,7 +48,7 @@ A job starts in `queued`, or in `held` when its class needs approval. `done`, `c
 | Entering | Detail |
 |---|---|
 | `done` | `outcome`: `succeeded` or `rejected-by-checks`. Optional `closure: "handoff-sre"` when a person should take the job to an SRE agent |
-| `failed` | `reason`: `call-deadline`, `timeout` or `error`. Optional `message` |
+| `failed` | `reason`: `call-deadline`, `timeout`, `error` or `interrupted` (the local runner was stopped with Ctrl-C/SIGTERM, PW-13). Optional `message` |
 | `cancelled` | `reason`: `denied`, `approval-expired` or `front-door` (cancelled by the front door). Optional `message` |
 
 The broker never retries content. Task-level retries belong to the front door, and seat
