@@ -8,6 +8,7 @@ import { openStore } from "./store.ts";
 import { claimNextRoutes, daemonQueue } from "./claim.ts";
 import { parseSlotCaps } from "./slots.ts";
 import { createReconciler } from "./reconcile.ts";
+import { runtimeRoutes } from "./runtime.ts";
 
 /** The daemon's port is 7533 (PW-16); the broker sits next to it. */
 export const BROKER_DEFAULTS = { host: "127.0.0.1", port: 7534, daemonUrl: "http://127.0.0.1:7533", session: "plantworks-broker" } as const;
@@ -35,7 +36,7 @@ export function brokerVerb(pw: Command): void {
         const daemon = daemonQueue({ url: process.env.PLANTWORKS_DAEMON_URL?.trim() || BROKER_DEFAULTS.daemonUrl, token: process.env.OPENRIG_AUTH_BEARER_TOKEN?.trim() || undefined });
         // PW-19: PLANTWORKS_SLOT_CAP per slotBudgetKey, 1 in flight per key when unset. A bad value refuses to start.
         const slotCaps = parseSlotCaps(process.env.PLANTWORKS_SLOT_CAP);
-        const routes = [claimNextRoutes({ daemon, slotCaps, brokerSession: process.env.PLANTWORKS_BROKER_SESSION?.trim() || BROKER_DEFAULTS.session })];
+        const routes = [claimNextRoutes({ daemon, slotCaps, brokerSession: process.env.PLANTWORKS_BROKER_SESSION?.trim() || BROKER_DEFAULTS.session }), runtimeRoutes({ slotCaps })];
         const server = await startBroker({ store, teams, routes, token: process.env.PLANTWORKS_BROKER_TOKEN?.trim() || undefined, host: opts.host, port: Number(opts.port), publicUrl: opts.publicUrl ?? (process.env.PLANTWORKS_BROKER_PUBLIC_URL?.trim() || undefined), onListen: ({ store, emit }) => {
           let reconciling = false;
           const run = createReconciler(store, daemon, emit, (line) => console.error(line));

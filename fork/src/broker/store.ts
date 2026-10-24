@@ -63,6 +63,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   approval_decision TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_claimable ON jobs (team, class, state, seq);
+-- PW-22: seats told to take no new work (worker preStop). Kept across broker restarts.
+CREATE TABLE IF NOT EXISTS seat_drains (seat TEXT PRIMARY KEY, since TEXT NOT NULL);
 `;
 /** Columns added after PW-17, for a broker file created before them. */
 const ADDED_COLUMNS = ["approval_expires_at TEXT", "approval_decision TEXT"];
@@ -161,6 +163,27 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
         if (!row || row.state !== "queued" || row.reserved_by !== seat || row.reserved_qitem_id !== qitemId) return "lost";
         return apply(jobId, "claimed", {}, { claimed_by: seat, claimed_at: iso(), qitem_id: qitemId }, { seat, qitemId });
       });
+    },
+
+    /** PW-22: marks a seat draining (claim-next gives it no new work), or resumes it. */
+    setDraining(seat: string, draining: boolean): void {
+      if (draining) db.prepare("INSERT OR IGNORE INTO seat_drains (seat, since) VALUES (?, ?)").run(seat, iso());
+      else db.prepare("DELETE FROM seat_drains WHERE seat = ?").run(seat);
+    },
+    isDraining: (seat: string) => db.prepare("SELECT 1 FROM seat_drains WHERE seat = ?").get(seat) !== undefined,
+    drainingSeats: () => (db.prepare("SELECT seat FROM seat_drains ORDER BY seat").all() as { seat: string }[]).map((r) => r.seat),
+
+    /**
+     * Jobs a seat still holds: claimed or running for it, or queued under its reservation of any
+     * age (the qitem may already have been delivered). The same lifecycle rule as the PW-19 slot count.
+     */
+    seatInFlight(seat: string): JobRow[] {
+      return db.prepare("SELECT * FROM jobs WHERE (state IN ('claimed', 'running') AND claimed_by = @seat) OR (state = 'queued' AND reserved_by = @seat) ORDER BY seq").all({ seat }) as JobRow[];
+    },
+
+    /** Live jobs by team, class and state; `reserved` counts queued jobs under a reservation. */
+    liveCounts(): { team: string; class: string; state: JobState; reserved: number; n: number }[] {
+      return db.prepare("SELECT team, class, state, reserved_by IS NOT NULL AS reserved, COUNT(*) AS n FROM jobs WHERE state IN ('held', 'queued', 'claimed', 'running') GROUP BY team, class, state, reserved").all() as never;
     },
 
     /** Held jobs whose approval TTL has run out. */

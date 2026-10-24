@@ -195,6 +195,44 @@ logical completion; it does not prove the Pi process exited or bound physical ex
 concurrency. An unresolved job can therefore hold a slot indefinitely and requires an operator to
 verify that work stopped before any manual recovery.
 
+## Runtime contract (PW-22, `runtime.ts`)
+
+What a platform needs to run the broker and its workers. Nothing here stops, fails, releases or
+closes a job.
+
+| Request | Auth | Response |
+|---|---|---|
+| `GET /healthz` | none | `200 {status: "ok"}` when the broker's SQLite file answers, `503 {status: "unavailable"}` when it doesn't. It names no team, job or seat, so a probe needs no secret |
+| `GET /plantworks/v1/stats` | bearer | Live job counts, below. It stays behind the broker token: an autoscaler (KEDA `metrics-api`) authenticates like any other caller, for example with a TriggerAuthentication fed from a secret. There is no exemption |
+| `GET /plantworks/v1/seats/{seat}/drain` | bearer | `{seat, draining, inFlight: [jobId]}` |
+| `POST /plantworks/v1/seats/{seat}/drain` | bearer | Marks the seat draining, so claim-next gives it nothing new (`409 seat_draining`). Returns the same view |
+| `DELETE /plantworks/v1/seats/{seat}/drain` | bearer | Resumes the seat |
+
+**Stats.** `{active, teams: {<team>: {active, held, queued, reserved, claimed, running, classes: {<class>: {...}}}}, slots: {<slotBudgetKey>: {inFlight, cap}}, drainingSeats}`:
+- `active` = `queued + claimed + running`: the work a worker pool exists for. This is the chart's
+  KEDA target, for example `teams.<team>.active`.
+- `queued` includes `reserved`, which is a queued job mid-handoff to a seat.
+- `held` jobs wait for an approval decision. They are counted, but are not `active`, because no
+  worker can take them.
+- `slots` repeats the PW-19 count claim-next enforces: claimed, running, and reserved-queued of
+  any age, against `PLANTWORKS_SLOT_CAP`. A held job takes no slot.
+
+These are lifecycle counts, not observed execution. A job counts until the broker records its end.
+
+**Drain.** A seat's in-flight jobs are the ones claimed or running for it, plus any queued job
+under its reservation, of any age: once the daemon may have delivered the qitem, the seat may be
+working on it. Draining a seat changes none of those jobs. It only stops new claims. The flag is
+kept in the broker's SQLite file (`seat_drains`), so it survives a broker restart.
+
+- `plantworks pw worker drain --seat <session> [--timeout-s 300]` is the worker's preStop hook.
+  It sets the drain, then polls until the seat holds nothing:
+  - exit `0`: drained;
+  - exit `3` on timeout: the jobs are listed, the seat stays draining, and the broker still
+    tracks them. **A timeout does not prove execution stopped.** Pi may still be working, and
+    reconciliation settles the jobs later.
+- `plantworks pw worker run --seat <session>` resumes its own seat, and only that seat, when it
+  starts, so a pod that replaces a drained one takes work again.
+
 ## For other cards
 
 - **Routes.** `createBroker({store, teams, routes})` takes `BrokerRoutes` functions,
@@ -237,6 +275,9 @@ verify that work stopped before any manual recovery.
 
 ## Limitations
 
+- Drain is per seat. There is no broker-wide drain, and a seat that is never drained or resumed
+  explicitly keeps whatever state it last had. `/healthz` checks only the broker's own file, not
+  the daemon.
 - Event delivery is in memory (PW-10). A broker that stops while an event is still retrying
   loses that event. The job row is kept. The persistent outbox remains a follow-up.
 - Worker reconciliation does not capture the worker's output; until that reporting path exists, it
