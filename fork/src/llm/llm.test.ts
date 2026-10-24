@@ -216,6 +216,16 @@ test("`plantworks pw llm preflight` with team specs checks every model their cla
     assert.equal(bad.code, 2);
     assert.match(bad.err, /preflight: /);
 
+    // An explicit --class wins over an ambient PLANTWORKS_TEAMS_DIR (the image sets one); explicit conflicts refuse.
+    const explicit = await run(["--class", "long"], { PLANTWORKS_LLM_URL: partial.url, PLANTWORKS_TEAMS_DIR: teams });
+    assert.equal(explicit.code, 0, explicit.err);
+    assert.deepEqual([JSON.parse(explicit.out).source, JSON.parse(explicit.out).checked], ["class", ["qwen3.5:9b"]]);
+    for (const args of [["--class", "long", "--teams", teams], ["--platform", platformFile]]) {
+      const refused = await run(args, { PLANTWORKS_LLM_URL: full.url });
+      assert.equal(refused.code, 2, args.join(" "));
+      assert.match(refused.err, /preflight: /, args.join(" "));
+    }
+
     const classOnly = await run([], { PLANTWORKS_LLM_URL: partial.url });
     assert.equal(classOnly.code, 0, classOnly.err);
     assert.deepEqual([JSON.parse(classOnly.out).source, JSON.parse(classOnly.out).checked], ["class", ["qwen3.5:9b"]]);

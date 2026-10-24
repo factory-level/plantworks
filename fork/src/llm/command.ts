@@ -22,12 +22,16 @@ export function llmVerb(pw: Command): void {
     .description("Check the endpoint answers GET /models and serves every model the team specs name, or the class model without specs (no inference call)")
     .option("--teams <dir>", "emitted <team>/team.json specs: check every model their classes name (default: $PLANTWORKS_TEAMS_DIR)")
     .option("--platform <file>", "with --teams: the platform file the specs are validated against, as for `pw broker serve`")
-    .option("--class <name>", `without team specs: the built-in worker class (${Object.keys(CLASSES).join(", ")})`, DEFAULT_CLASS)
+    .option("--class <name>", `one built-in worker class instead of team specs; wins over $PLANTWORKS_TEAMS_DIR (${Object.keys(CLASSES).join(", ")})`, DEFAULT_CLASS)
     .option("--json", "JSON output")
-    .action(async (opts: { teams?: string; platform?: string; class: string; json?: boolean }) => {
-      const dir = opts.teams ?? (process.env.PLANTWORKS_TEAMS_DIR?.trim() || undefined);
+    .action(async (opts: { teams?: string; platform?: string; class: string; json?: boolean }, cmd: Command) => {
+      // An explicit --class means one class: it wins over $PLANTWORKS_TEAMS_DIR, and can't be combined with --teams.
+      const explicitClass = cmd.getOptionValueSource("class") === "cli";
+      const dir = opts.teams ?? (explicitClass ? undefined : process.env.PLANTWORKS_TEAMS_DIR?.trim() || undefined);
       let need: string[];
       try {
+        if (opts.teams && explicitClass) throw new Error("--class and --teams can't be combined: one checks a single class, the other every model the specs name");
+        if (opts.platform && !dir) throw new Error("--platform applies only to team specs: pass --teams or set PLANTWORKS_TEAMS_DIR");
         need = dir ? teamModels(dir, opts.platform) : [classByName(opts.class).model];
       } catch (e) {
         console.error(`preflight: ${(e as Error).message}`);
