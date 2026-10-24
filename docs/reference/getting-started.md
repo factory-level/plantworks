@@ -1175,6 +1175,20 @@ and connection, and equal UIDs do not distinguish separate instances belonging
 to one account. The check
 does not add authentication to the daemon or protect direct HTTP clients.
 
+## Optional database-conflict stop
+
+By default, daemon startup warns and continues when another live daemon is confirmed
+using the selected database. To stop before opening that database instead, set
+`rig config set daemon.db_conflict stop` (reset to `warn` for the default).
+The check requires an open-file holder, a matching `daemon.json`, and a listener
+reporting the same PID; missing or inconclusive evidence does not stop startup.
+An explicitly selected database outside `OPENRIG_HOME` remains warning-only.
+
+To proceed deliberately for one start, use
+`OPENRIG_ALLOW_DB_CONFLICT=1 rig daemon start` with the original start options.
+This does not change the setting. Separate instances should use separate databases;
+the check is a startup observation, not a lock against later concurrent starts.
+
 ## Custom settings and precedence
 
 - **OpenRig:** member `permission_policy` overrides rig `permission_policy`.

@@ -726,7 +726,8 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     const startupLog = deps.readFileFrom
       ? deps.readFileFrom(LOG_FILE, logOffset) ?? ""
       : Buffer.from(deps.readFile(LOG_FILE) ?? "").subarray(logOffset).toString();
-    const guidance = /\bEADDRINUSE\b/.test(startupLog)
+    const dbConflict = startupLog.match(/^(?:Error: )?(OPENRIG_DB_CONFLICT:[^\r\n]*)/m)?.[1];
+    const guidance = dbConflict ? ` ${dbConflict}` : /\bEADDRINUSE\b/.test(startupLog)
       ? ` ${occupiedPortGuidance(port)}`
       : ` See ${LOG_FILE} for details.`;
     childFailure = new Error(`Daemon child ${child.pid ?? "unknown"} exited before startup completed (code ${code}, signal ${signal ?? "none"}).${guidance}`);
