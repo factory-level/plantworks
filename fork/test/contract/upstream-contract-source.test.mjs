@@ -29,7 +29,7 @@ test("daemon queue create/claim/unclaim wire shapes stay pinned to packages/daem
   const server = source("packages/daemon/src/server.ts");
   const identity = source("packages/daemon/src/routes/require-sender-identity.ts");
   assert.match(server, /app\.route\("\/api\/queue", queueRoutes\(\)\)/,
-    "upstream packages/daemon/src/server.ts mounts queueRoutes at /api/queue");
+    "upstream packages/daemon/src/server.ts:795 mounts queueRoutes at /api/queue");
   assert.match(identity, /SENDER_IDENTITY_HEADER\s*=\s*"x-openrig-session"/,
     "upstream packages/daemon/src/routes/require-sender-identity.ts:34 defines the sender header");
   assert.match(routes, /app\.post\("\/create"/);

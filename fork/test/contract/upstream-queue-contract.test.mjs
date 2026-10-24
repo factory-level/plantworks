@@ -11,7 +11,7 @@ import { InboxHandler } from "../../../packages/daemon/dist/domain/inbox-handler
 import { OutboxHandler } from "../../../packages/daemon/dist/domain/outbox-handler.js";
 import { queueRoutes } from "../../../packages/daemon/dist/routes/queue.js";
 
-test("queue create/claim/unclaim wire contract and sender fallback", async (t) => {
+test("queue create/claim/unclaim wire contract (upstream packages/daemon/src/routes/queue.ts:533-643; require-sender-identity.ts:76-105)", async (t) => {
   const db = createDb();
   t.after(() => db.close());
   migrate(db, ALL_MIGRATIONS);
@@ -48,6 +48,13 @@ test("queue create/claim/unclaim wire contract and sender fallback", async (t) =
   assert.equal(created.state, "pending");
   assert.equal(queue.transitionLog.listForQitem(created.qitemId).at(-1).identityProvenance, "claimed:v1");
   assert.equal(typeof created.qitemId, "string");
+
+  const replay = await app.request("/api/queue/create", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(createBody),
+  });
+  assert.equal(replay.status, 201);
+  assert.equal((await replay.json()).qitemId, created.qitemId, "a retry with the same identity returns the existing item");
+  assert.equal(queue.transitionLog.listForQitem(created.qitemId).length, 1, "an absorbed retry creates no second queue item");
 
   const reusedId = await app.request("/api/queue/create", {
     method: "POST", headers: { "content-type": "application/json" },
