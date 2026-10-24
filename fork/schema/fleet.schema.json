@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/factory-level/plantworks/blob/main/fork/schema/fleet.schema.json",
+  "title": "Plantworks team spec (plantworks/v1)",
+  "description": "One team: its trains and worker seats, its queue classes and its Hermes profile (ADR 0204). Emitted by `plantworks pw team emit`. Platform-dependent rules (slot caps, served models, context maximum, Pi baseline) are checked by `plantworks pw team validate --platform`, not by this schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["specVersion", "team", "trains", "perTrain", "endpoint", "defaultClass", "classes", "events", "hermesProfile"],
+  "properties": {
+    "specVersion": { "const": "plantworks/v1" },
+    "team": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", "description": "Team name, equal to the Hermes profile name and the envelope team." },
+    "trains": { "type": "integer", "minimum": 1, "description": "A train is one Hermes orchestrator cycle plus its worker seats." },
+    "perTrain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["orchestrators", "workers"],
+      "properties": {
+        "orchestrators": { "const": 1 },
+        "workers": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 }, "description": "Worker seats per train, by class." }
+      }
+    },
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "slotBudgetKey"],
+      "properties": {
+        "url": { "type": "string", "minLength": 1, "description": "The OpenAI-compatible endpoint, usually the literal ${PLANTWORKS_LLM_URL}." },
+        "slotBudgetKey": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", "description": "Which platform slot cap the classes' slots count against." }
+      }
+    },
+    "defaultClass": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", "description": "The class a job without a class runs in. Must name one of the classes." },
+    "classes": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["slots", "model", "context", "perCall", "approval", "timeoutSeconds", "maxAttempts"],
+        "properties": {
+          "slots": { "type": "integer", "minimum": 0 },
+          "model": { "type": "string", "minLength": 1 },
+          "context": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["maxContextTokens", "thinkingTokens"],
+            "properties": {
+              "maxContextTokens": { "type": "integer", "minimum": 1, "maximum": 32768 },
+              "thinkingTokens": { "const": 0 }
+            }
+          },
+          "perCall": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["maxOutputTokens", "deadlineSeconds"],
+            "properties": {
+              "maxOutputTokens": { "type": "integer", "minimum": 1, "maximum": 1536, "description": "At most 1536 up to 16K context, 1024 above." },
+              "deadlineSeconds": { "type": "integer", "minimum": 1, "maximum": 60 }
+            }
+          },
+          "toolProfile": { "enum": ["default", "trimmed"] },
+          "approval": { "enum": ["never", "per-job", "always"] },
+          "approvalTtlSeconds": { "type": "integer", "minimum": 1, "description": "Required when approval is always." },
+          "timeoutSeconds": { "type": "integer", "minimum": 1 },
+          "maxAttempts": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "events": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["callbackDefault", "approvalConsumer"],
+      "properties": {
+        "callbackDefault": { "type": "string", "minLength": 1 },
+        "approvalConsumer": { "type": "string", "minLength": 1 }
+      }
+    },
+    "hermesProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kanban"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" },
+        "kanban": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_in_progress_per_profile"],
+          "properties": {
+            "max_in_progress_per_profile": { "type": "integer", "minimum": 1, "description": "trains × orchestrators. An integer, as Hermes 0.22.5 reads it; a map is not a Hermes value." }
+          }
+        }
+      }
+    }
+  }
+}

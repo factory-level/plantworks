@@ -7,7 +7,8 @@ import { runProgram } from "../../packages/cli/dist/index.js";
 import { createPlantworksProgram } from "../src/cli/program.ts";
 import { jobVerb } from "../src/job/command.ts";
 import { llmVerb } from "../src/llm/command.ts";
+import { teamVerb } from "../src/team/command.ts";
 
 // A command may set process.exitCode itself (for example a failed preflight); keep it.
-const code = await runProgram(createPlantworksProgram([llmVerb, jobVerb]), process.argv);
+const code = await runProgram(createPlantworksProgram([llmVerb, jobVerb, teamVerb]), process.argv);
 process.exitCode = process.exitCode || code;
