@@ -107,21 +107,6 @@ test("inspect and cancel: queued -> cancelled once, cancelled again is 200, a cl
   assert.equal((await t.call("POST", "/jobs/kb-social-media-t_00000000-a1/cancel")).status, 404);
 });
 
-test("submitting the next attempt retires a failed previous one as retried", async () => {
-  const t = setup();
-  const a1 = envelope();
-  await t.call("POST", "/jobs", a1);
-  t.store.reserve("social-media", "quick", "seat-1", "q-1");
-  t.store.confirmClaim(a1.jobId, "seat-1", "q-1");
-  t.store.transition(a1.jobId, "failed", { reason: "error" });
-  assert.equal((await t.call("POST", "/jobs", envelope({ jobId: "kb-social-media-t_3fa9c01e-a2" }))).status, 201);
-  assert.equal(t.store.get(a1.jobId)!.state, "retried");
-  assert.deepEqual(t.events.slice(-2), [["kb-social-media-t_3fa9c01e-a2", "queued", {}], [a1.jobId, "retried", {}]]);
-  // A previous attempt that has not failed is left alone.
-  await t.call("POST", "/jobs", envelope({ jobId: "kb-social-media-t_3fa9c01e-a3" }));
-  assert.equal(t.store.get("kb-social-media-t_3fa9c01e-a2")!.state, "queued");
-});
-
 test("with a token, every API route needs the bearer, including routes other cards add", async () => {
   const extra: BrokerRoutes = (app, ctx) => app.get(`${API}/teams`, (c) => c.json([...ctx.teams.keys()]));
   const t = setup({ token: "s3cret", routes: [extra] });

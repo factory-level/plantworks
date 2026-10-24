@@ -34,7 +34,7 @@ plantworks pw broker serve --teams <dir> [--platform platform.json] [--db file] 
 
 | Request | Response |
 |---|---|
-| `POST /plantworks/v1/jobs` with the PW-09 envelope (at most 512 KiB) | `201` and the record for a new job. If the previous attempt (`-a<N-1>`) of the same card has `failed`, it becomes `retried`. `200` and the existing record when the same envelope is posted again (key order doesn't matter). `409 job_conflict` when the jobId exists with a different envelope |
+| `POST /plantworks/v1/jobs` with the PW-09 envelope (at most 512 KiB) | `201` and the record for a new job. `200` and the existing record when the same envelope is posted again (key order doesn't matter). `409 job_conflict` when the jobId exists with a different envelope |
 | `GET /plantworks/v1/jobs/{jobId}` | `200` and the record, or `404 not_found` |
 | `POST /plantworks/v1/jobs/{jobId}/cancel` | `queued` or `held` becomes `cancelled` with reason `front-door`: `200` and the record. Already `cancelled`: `200` (idempotent). Any other state: `409 not_cancellable`. Unknown job: `404 not_found` |
 
@@ -91,8 +91,6 @@ cap belong to claim-next (PW-18, PW-19).
 - Port 7534, next to the daemon's 7533.
 - `${NAME}` placeholders in `callbackDefault` are expanded from the broker's environment, for
   names ending in `_CALLBACK` only. The spec format leaves this undefined.
-- Submitting attempt N retires a `failed` attempt N-1 as `retried`. The ADR names the
-  transition but not its trigger.
 - Approval classes (`approval` other than `never`) are refused with `approval_unsupported` until
   PW-23 adds `held` and decisions, so no job runs unapproved.
 
@@ -103,3 +101,11 @@ cap belong to claim-next (PW-18, PW-19).
 - Nothing writes `result` yet. The worker report path (PW-21) adds it, and the bound on the
   stored text goes there.
 - `held` and approvals are PW-23.
+- **Nothing moves a job from `failed` to `retried` yet.** The ADR names the transition, but the
+  broker has no trustworthy link from an attempt to its predecessor. Inferring one from the
+  jobId string alone is not safe, so a failed attempt stays `failed` when Hermes submits the next
+  one. The link is a recorded lifecycle gap.
+- **Team boundary.** The bearer token is one broker-wide trusted credential, not a per-team one.
+  The configured-team boundary (checking `record.team`, and not leaking another team's record
+  through a conflict, an error or a replay) is enforced by the caller, PW-24's MCP server, and
+  by running one broker per team.
