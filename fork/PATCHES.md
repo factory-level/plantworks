@@ -30,6 +30,10 @@ start with `fork-` so they never collide with an upstream file.
 | `.github/workflows/fork-ci.yml` | GitHub Actions reads workflows only from `.github/workflows/`. Runs the seam check, upstream build, fork tests and header check on every PR | PW-04 |
 | `.github/workflows/fork-upstream-sync.yml` | GitHub Actions reads workflows only from `.github/workflows/`. Nightly upstream test-merge into a `sync/<date>` branch, checked, then a PR | PW-05 |
 
+## Upstream sync checklist
+
+After syncing upstream, review `fork/test/contract/` for CLI and Pi model contracts, daemon options, queue routes and sender identity, Pi seat paths, and no-kernel boot. Re-check and update upstream file:line citations when those constructs move. Run these tests through the Fork CI test step after the upstream build.
+
 ## Never
 
 - The root `package.json` and `package-lock.json` stay byte-identical to upstream. They never get
