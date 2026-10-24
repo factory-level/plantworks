@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { piSeatPaths } from "../../../packages/daemon/dist/adapters/pi-runner-protocol.js";
+import { seatAgentDir } from "../../src/seat/pi-seat-files.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "../../..");
 const source = (path) => readFileSync(join(root, path), "utf8");
@@ -72,6 +73,17 @@ test("Pi seat directories stay pinned to packages/daemon/src/adapters/pi-runner-
     sessionsDir: "/state/worker@rig/sessions",
     runnerStatePath: "/state/worker@rig/runner-state.json",
   });
+});
+
+test("the fork's seat agent dir is upstream's: OPENRIG_HOME/state/pi (startup.ts:693) joined by piSeatPaths", () => {
+  // Upstream's daemon roots Pi seat state at OPENRIG_HOME/state/pi and hands that root to the Pi adapters.
+  assert.match(source("packages/daemon/src/startup.ts"), /const piStateRoot = nodePath\.join\(OPENRIG_HOME, "state", "pi"\);/,
+    "upstream packages/daemon/src/startup.ts:693 roots Pi seat state at OPENRIG_HOME/state/pi");
+  // fork/src/seat/pi-seat-files.ts builds the same directory itself; if upstream moves it, the fork's seat files go unread.
+  for (const session of ["worker@rig", "pw-kb-b-t_1-a1", "dev-worker.0@team"]) {
+    const home = "/srv/home";
+    assert.equal(seatAgentDir(home, session), piSeatPaths(join(home, "state", "pi"), session).agentDir, session);
+  }
 });
 
 test("daemon start --no-kernel reaches the OPENRIG_NO_KERNEL spawn env via daemon.ts:238-254 and daemon-lifecycle.ts:531-533", () => {

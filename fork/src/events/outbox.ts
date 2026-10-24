@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { JobRow, Store, TransitionRow } from "../broker/store.ts";
-import { jobStateEvent, type CloudEvent } from "./job-state.ts";
+import { DeliveryAborted, jobStateEvent, type CloudEvent } from "./job-state.ts";
 
 const BATCH_SIZE = 100;
 const MAX_RETRY_DELAY_MS = 5 * 60_000;
@@ -38,7 +38,7 @@ export function transitionColumns(store: Store, transition: TransitionRow): Reco
 /** Delivers each team's committed transitions independently; only permanent failures are parked. */
 export function createJobStateOutbox(
   store: Store,
-  deliver: (team: string, event: CloudEvent) => Promise<void>,
+  deliver: (team: string, event: CloudEvent, signal: AbortSignal) => Promise<void>,
   log: (line: string) => void = (line) => process.stderr.write(`${line}\n`),
 ) {
   store.db.exec(`
@@ -69,10 +69,14 @@ export function createJobStateOutbox(
   const park = store.db.prepare("UPDATE event_outbox_failures SET parked = 1 WHERE team = ? AND transition_id = ?");
   const clearFailure = store.db.prepare("DELETE FROM event_outbox_failures WHERE team = ? AND transition_id = ?");
   const running = new Map<string, Promise<void>>();
+  // stop() aborts in-flight deliveries; after it, nothing reads or writes the store.
+  const stopping = new AbortController();
 
   async function drainTeam(team: string) {
+    if (stopping.signal.aborted) return;
     addCursor.run(team);
     for (;;) {
+        if (stopping.signal.aborted) return;
         const cursor = (readCursor.get(team) as { delivered_through: number }).delivered_through;
         const rows = store.db.prepare(`SELECT t.* FROM job_transitions t JOIN jobs j ON j.job_id = t.job_id
           WHERE j.team = ? AND t.id > ? ORDER BY t.id LIMIT ?`).all(team, cursor, BATCH_SIZE) as TransitionRow[];
@@ -91,12 +95,15 @@ export function createJobStateOutbox(
           const job = store.get(transition.job_id);
           if (!job) throw new Error(`transition ${transition.id} has no job ${transition.job_id}`);
           const event = eventForTransition(job, transition, transitionColumns(store, transition));
+          if (stopping.signal.aborted) return;
           try {
-            await deliver(team, event);
+            await deliver(team, event, stopping.signal);
             clearFailure.run(team, transition.id);
             if (advance.run(transition.id, team, currentCursor).changes !== 1) { blocked = true; break; }
             currentCursor = transition.id;
           } catch (error) {
+            // An aborted delivery is not a failure: no row, no cursor move. The next start replays it with the same id.
+            if (error instanceof DeliveryAborted || stopping.signal.aborted) return;
             const permanent = error instanceof Error && "permanent" in error && error.permanent === true;
             const attempts = (prior?.attempts ?? 0) + 1;
             const shouldLog = permanent || !prior?.logged;
@@ -127,6 +134,7 @@ export function createJobStateOutbox(
   }
 
   function pump(): Promise<void> {
+    if (stopping.signal.aborted) return Promise.resolve();
     const teams = store.db.prepare("SELECT DISTINCT team FROM jobs ORDER BY team").all() as { team: string }[];
     for (const { team } of teams) {
       if (running.has(team)) continue;
@@ -143,6 +151,11 @@ export function createJobStateOutbox(
 
   return {
     pump,
+    /** Aborts in-flight deliveries and resolves once every team's drain has returned. */
+    stop: async () => {
+      stopping.abort();
+      await Promise.all(running.values());
+    },
     /** The transition was already committed; waking delivery cannot hold the job request open. */
     wake: (_row?: unknown, _state?: unknown, _detail?: unknown) => { void pump(); },
   };
