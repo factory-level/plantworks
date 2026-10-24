@@ -72,9 +72,8 @@ it has none. See "Approvals" in `../src/broker/README.md`.
 
 ## 5. What the contract is
 
-- **The job envelope and events:** `contract.md`. It is pending: it lands with the contract work,
-  and this link resolves once that merge is done. Until then, see `../src/contract/README.md` and
-  `../src/events/README.md`.
+- **Submitting jobs, the envelope and its examples:** [`contract.md`](contract.md). The state
+  events are in `../src/events/README.md`.
 - **What runs, where state lives, inputs, termination:**
   [`runtime-contract.md`](runtime-contract.md).
 - **What the platform must provide:** [`platform-requirements.md`](platform-requirements.md).
