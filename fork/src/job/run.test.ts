@@ -28,7 +28,7 @@ test("a job runs queued -> claimed -> running -> done through the governor", asy
   const result = await runJob(t.opts());
   assert.deepEqual(result, { jobId: envelope.jobId, state: "done", detail: { outcome: "succeeded" }, text: "hello from the stub", undelivered: [] });
   assert.deepEqual(t.consumer.states(), ["queued", "claimed", "running", "done"]);
-  assert.deepEqual(t.consumer.events.map((e) => e.id), ["queued", "claimed", "running", "done"].map((s) => `${envelope.jobId}:${s}`));
+  assert.deepEqual(t.consumer.events.map((e) => e.id), [1, 2, 3, 4].map((seq) => `${envelope.jobId}:${seq}`));
   // Pi's call went through the governor: output capped to the quick class, num_ctx stripped.
   assert.equal(t.model.requests.length, 1);
   assert.equal(t.model.requests[0].body.max_tokens, 1536);
@@ -101,7 +101,7 @@ test("events the consumer refuses are reported, and the job still completes", as
   const refusing = await stubConsumer(400);
   const result = await runJob(t.opts({ callbackUrl: refusing.url }));
   assert.equal(result.state, "done");
-  assert.deepEqual(result.undelivered, ["queued", "claimed", "running", "done"].map((s) => `${envelope.jobId}:${s}`));
+  assert.deepEqual(result.undelivered, [1, 2, 3, 4].map((s) => `${envelope.jobId}:${s}`));
   await Promise.all([t.close(), refusing.close()]);
 });
 

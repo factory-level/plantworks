@@ -35,6 +35,31 @@
       "type": "integer",
       "minimum": 1,
       "description": "Requested job timeout. The broker rejects values above the class ceiling."
+    },
+    "repo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owner", "name"],
+      "properties": {
+        "owner": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 }
+      },
+      "description": "Optional fork-defined repository scope; pending HarnessHG acknowledgement."
+    },
+    "contextBudget": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Optional token budget. When absent, the selected class context applies; pending HarnessHG acknowledgement."
+    },
+    "origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "ref"],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1 },
+        "ref": { "type": "string", "minLength": 1 }
+      },
+      "description": "Opaque origin reference; pending HarnessHG acknowledgement."
     }
   }
 }

@@ -28,18 +28,19 @@ async function stub(replies: Reply[] = []) {
   return { url, received, close: () => { server.closeAllConnections(); return new Promise((r) => server.close(r)); } };
 }
 
-test("builds a CloudEvents job.state event deduplicated on jobId + state", () => {
-  const e = jobStateEvent(job, "done", { outcome: "succeeded", closure: "handoff-sre" }, new Date("2026-10-24T00:00:00Z"));
+test("builds a CloudEvents job.state event with its persisted transition sequence", () => {
+  const e = jobStateEvent({ ...job, transitionSeq: 17, qitemId: "qitem-1", seat: "dev-a@team", summary: "work" }, "done", { outcome: "succeeded", closure: "handoff-sre" }, new Date("2026-10-24T00:00:00Z"));
   assert.deepEqual(e, {
     specversion: "1.0",
     type: "plantworks.job.state",
     source: "/plantworks/teams/social-media",
-    id: "kb-board1-card9-a2:done",
+    id: "kb-board1-card9-a2:17",
     subject: "kb-board1-card9-a2",
     time: "2026-10-24T00:00:00.000Z",
     datacontenttype: "application/json",
-    data: { jobId: "kb-board1-card9-a2", team: "social-media", attempt: 2, state: "done", outcome: "succeeded", closure: "handoff-sre" },
+    data: { jobId: "kb-board1-card9-a2", team: "social-media", attempt: 2, state: "done", qitemId: "qitem-1", seat: "dev-a@team", summary: "work", outcome: "succeeded", closure: "handoff-sre" },
   });
+  assert.notEqual(jobStateEvent({ ...job, transitionSeq: 17 }, "running").id, jobStateEvent({ ...job, transitionSeq: 21 }, "running").id);
   assert.throws(() => jobStateEvent({ jobId: "nope", team: "t" }, "queued"), /invalid jobId/);
 });
 

@@ -36,7 +36,7 @@ export interface TeamSpec {
   endpoint: { url: string; slotBudgetKey: string };
   defaultClass: string;
   classes: Record<string, QueueClass>;
-  events: { callbackDefault: string; approvalConsumer: string };
+  events: { callbackDefault: string; approvalConsumer: string; auth?: { secretRef: string } };
   hermesProfile: { name: string; kanban: { max_in_progress_per_profile: number } };
 }
 
@@ -110,8 +110,15 @@ export function validateSpec(spec: unknown, platform: Platform = PHASE_0_1): str
   const events = obj(spec.events) ? spec.events : null;
   if (!events) errors.push("events must be an object");
   else {
-    unknownFields(errors, "events.", events, ["callbackDefault", "approvalConsumer"]);
+    unknownFields(errors, "events.", events, ["callbackDefault", "approvalConsumer", "auth"]);
     for (const k of ["callbackDefault", "approvalConsumer"]) if (typeof events[k] !== "string" || events[k] === "") errors.push(`events.${k} must be a non-empty string`);
+    if (events.auth !== undefined) {
+      if (!obj(events.auth)) errors.push("events.auth must be an object");
+      else {
+        unknownFields(errors, "events.auth.", events.auth, ["secretRef"]);
+        if (typeof events.auth.secretRef !== "string" || !/^[A-Z][A-Z0-9_]*$/.test(events.auth.secretRef)) errors.push("events.auth.secretRef must name a configured credential");
+      }
+    }
   }
 
   let slotTotal = 0;

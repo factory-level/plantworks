@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // plantworks.job.state events: CloudEvents 1.0 (structured JSON) posted to the team's callback.
-// Delivery is at least once within a retry budget (see README.md); the event id is
-// `<jobId>:<state>`, so a consumer deduplicates on it.
+// Delivery is at least once within a retry budget (see README.md); broker event ids use
+// `<jobId>:<persisted-transition-id>` so repeated states remain distinct and replay stable.
 import { parseJobId, type JobState, type TransitionDetail } from "../contract/job.ts";
 
 export const JOB_STATE_EVENT = "plantworks.job.state";
@@ -14,14 +14,14 @@ export interface JobStateEvent {
   subject: string;
   time: string;
   datacontenttype: "application/json";
-  data: { jobId: string; team: string; attempt: number; state: JobState } & TransitionDetail;
+  data: { jobId: string; team: string; attempt: number; state: JobState; qitemId?: string; seat?: string; summary?: string; artifacts?: { name: string; uri: string }[]; evidence?: { kind: string; uri: string }[]; usage?: { promptTokens: number; completionTokens: number } } & TransitionDetail;
 }
 
 /** Any Plantworks CloudEvent the emitter can carry: plantworks.job.state, or plantworks.approval.* (PW-23). */
 export type CloudEvent = Omit<JobStateEvent, "type" | "data"> & { type: string; data: Record<string, unknown> };
 
 export function jobStateEvent(
-  job: { jobId: string; team: string },
+  job: { jobId: string; team: string; transitionSeq?: number; qitemId?: string | null; seat?: string | null; summary?: string; artifacts?: { name: string; uri: string }[]; evidence?: { kind: string; uri: string }[]; usage?: { promptTokens: number; completionTokens: number } },
   state: JobState,
   detail: TransitionDetail = {},
   now: Date = new Date(),
@@ -32,17 +32,28 @@ export function jobStateEvent(
     specversion: "1.0",
     type: JOB_STATE_EVENT,
     source: `/plantworks/teams/${job.team}`,
-    id: `${job.jobId}:${state}`,
+    id: `${job.jobId}:${job.transitionSeq ?? state}`,
     subject: job.jobId,
     time: now.toISOString(),
     datacontenttype: "application/json",
-    data: { jobId: job.jobId, team: job.team, attempt: parsed.attempt, state, ...detail },
+    data: {
+      jobId: job.jobId, team: job.team, attempt: parsed.attempt, state,
+      ...(job.qitemId ? { qitemId: job.qitemId } : {}),
+      ...(job.seat ? { seat: job.seat } : {}),
+      ...(job.summary ? { summary: job.summary } : {}),
+      ...(job.artifacts ? { artifacts: job.artifacts } : {}),
+      ...(job.evidence ? { evidence: job.evidence } : {}),
+      ...(job.usage ? { usage: job.usage } : {}),
+      ...detail,
+    },
   };
 }
 
 export interface EmitterOptions {
   /** The team spec's events.callbackDefault. Operator config, never taken from an envelope. */
   url: string;
+  /** Optional team-configured callback credential; never derived from a job envelope. */
+  bearerToken?: string;
   maxAttempts?: number;
   baseDelayMs?: number;
   maxDelayMs?: number;
@@ -103,7 +114,7 @@ export function createEmitter(opts: EmitterOptions) {
       try {
         const res = await doFetch(url, {
           method: "POST",
-          headers: { "content-type": "application/cloudevents+json" },
+          headers: { "content-type": "application/cloudevents+json", ...(opts.bearerToken ? { authorization: `Bearer ${opts.bearerToken}` } : {}) },
           body: JSON.stringify(event),
           signal: AbortSignal.timeout(requestTimeoutMs),
           redirect: "manual",

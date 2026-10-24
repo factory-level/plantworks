@@ -72,7 +72,16 @@
       "required": ["callbackDefault", "approvalConsumer"],
       "properties": {
         "callbackDefault": { "type": "string", "minLength": 1 },
-        "approvalConsumer": { "type": "string", "minLength": 1 }
+        "approvalConsumer": { "type": "string", "minLength": 1 },
+        "auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["secretRef"],
+          "properties": {
+            "secretRef": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" }
+          },
+          "description": "Optional configured bearer credential reference for callbackDefault; pending HarnessHG acknowledgement."
+        }
       }
     },
     "hermesProfile": {

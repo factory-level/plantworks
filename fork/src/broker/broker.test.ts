@@ -69,7 +69,7 @@ test("submit is idempotent on jobId: 201 new, 200 the same envelope, 409 job_con
   const clash = await t.call("POST", "/jobs", envelope({ task: { prompt: "Say bye" } }));
   assert.equal(clash.status, 409);
   assert.equal((await clash.json()).error, "job_conflict");
-  assert.deepEqual(t.events, [[envelope().jobId, "queued", {}]]);
+  assert.deepEqual(t.events, [[envelope().jobId, "queued", { summary: "Say hi" }]]);
   assert.equal(t.store.db.prepare("SELECT count(*) AS n FROM jobs").get().n, 1);
 });
 
@@ -102,7 +102,7 @@ test("inspect and cancel: queued -> cancelled once, cancelled again is 200, a cl
 
   const cancel = await t.call("POST", `/jobs/${envelope().jobId}/cancel`);
   assert.equal(cancel.status, 200);
-  assert.deepEqual([(await cancel.json()).state, t.events.at(-1)], ["cancelled", [envelope().jobId, "cancelled", { reason: "front-door" }]]);
+  assert.deepEqual([(await cancel.json()).state, t.events.at(-1)], ["cancelled", [envelope().jobId, "cancelled", { summary: "Say hi", reason: "front-door" }]]);
   const again = await t.call("POST", `/jobs/${envelope().jobId}/cancel`);
   assert.equal(again.status, 200);
   assert.equal(t.events.length, 2, "an idempotent cancel emits nothing");
@@ -189,6 +189,13 @@ test("team specs: an invalid spec, a misplaced one or an unset placeholder stops
   assert.throws(() => expand("${PLANTWORKS_FRONTDOOR_CALLBACK}", {}), /PLANTWORKS_FRONTDOOR_CALLBACK is not set/);
   const store = openStore(":memory:");
   assert.throws(() => createBroker({ store, teams: loadTeams(teamsDir(), platform), env: {} }), /not set/);
+  const unresolved = loadTeams(teamsDir(), platform);
+  const base = unresolved.get("social-media")!;
+  unresolved.set("social-media", { ...base, events: { ...base.events, auth: { secretRef: "MISSING_CALLBACK_TOKEN" } } });
+  assert.throws(
+    () => createBroker({ store, teams: unresolved, env: { PLANTWORKS_FRONTDOOR_CALLBACK: "http://127.0.0.1:1", PRIVATE_VALUE: "must-not-leak" } }),
+    (error: Error) => /configured callback credential is unavailable/.test(error.message) && !error.message.includes("must-not-leak"),
+  );
   assert.throws(() => startBroker({ store, teams: loadTeams(teamsDir(), platform), host: "0.0.0.0", port: 0, env: {} }), /refusing to bind the broker on 0.0.0.0/);
   for (const host of ["0.0.0.0", "::", "192.0.2.10"]) {
     assert.throws(() => startBroker({ store, teams: loadTeams(teamsDir(), platform), host, port: 0, token: "t", env: {} }), /without --public-url/, `${host}: a non-loopback listen address is no decision URL`);
@@ -219,7 +226,8 @@ test("plantworks pw broker serve: submit over HTTP, the event is delivered, and 
   assert.equal((await post(b.url, envelope())).status, 201);
   for (let i = 0; i < 50 && !consumer.events.length; i++) await new Promise((r) => setTimeout(r, 20));
   assert.deepEqual(consumer.states(), ["queued"]);
-  assert.equal(consumer.events[0].id, `${envelope().jobId}:queued`);
+  assert.equal(consumer.events[0].id, `${envelope().jobId}:1`);
+  assert.equal(consumer.authorization[0], undefined, "auth remains absent when the team spec has no auth reference");
   await b.stop();
   assert.ok(existsSync(join(home, "plantworks", "broker.sqlite")), "its own file under the home, not the daemon's db");
 
@@ -227,6 +235,28 @@ test("plantworks pw broker serve: submit over HTTP, the event is delivered, and 
   assert.equal((await post(b.url, envelope())).status, 200, "the restarted broker still knows the job");
   await b.stop();
   await consumer.close();
+});
+
+test("configured callback auth resolves only the named environment credential", async () => {
+  const consumer = await stubConsumer();
+  const store = openStore(":memory:");
+  const teams = loadTeams(teamsDir(), platform);
+  const spec = teams.get("social-media")!;
+  teams.set("social-media", { ...spec, events: { ...spec.events, auth: { secretRef: "FRONTDOOR_TOKEN" } } });
+  const broker = await startBroker({
+    store, teams, host: "127.0.0.1", port: 0,
+    env: { PLANTWORKS_FRONTDOOR_CALLBACK: consumer.url, FRONTDOOR_TOKEN: "callback-secret" },
+  });
+  try {
+    assert.equal((await fetch(`${broker.url}${API}/jobs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(envelope()) })).status, 201);
+    for (let i = 0; i < 50 && !consumer.events.length; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(consumer.authorization[0], "Bearer callback-secret");
+    assert.equal(consumer.events[0].id, `${envelope().jobId}:1`);
+  } finally {
+    await broker.close();
+    await consumer.close();
+    store.close();
+  }
 });
 
 // --- Approvals (PW-23) -----------------------------------------------------------------------
@@ -243,14 +273,14 @@ test("an approval class holds the job and asks for a decision; approve queues it
   const res = await t.call("POST", "/jobs", job);
   assert.equal(res.status, 201);
   assert.equal((await res.json()).state, "held");
-  assert.deepEqual(t.events, [[job.jobId, "held", {}]]);
+  assert.deepEqual(t.events, [[job.jobId, "held", { summary: "Weekly recap" }]]);
   assert.deepEqual(approvals(t), [["requested", { class: "long", decisionUrl: `http://broker.test${API}/jobs/${job.jobId}/decision`, expiresAt: null, title: "Weekly recap" }]]);
   assert.equal(t.store.reserve("social-media", "long", "seat-1", "q-1"), undefined, "a held job is not claimable");
 
   const ok = await decide(t, job.jobId, { decision: "approve", by: "a-person" });
   assert.equal(ok.status, 200);
   assert.equal((await ok.json()).state, "queued");
-  assert.deepEqual(t.events.at(-1), [job.jobId, "queued", {}]);
+  assert.deepEqual(t.events.at(-1), [job.jobId, "queued", { summary: "Weekly recap" }]);
   assert.deepEqual(approvals(t).at(-1), ["resolved", { decision: "approved", by: "a-person" }]);
   assert.ok(t.store.reserve("social-media", "long", "seat-1", "q-1"), "approved, it is claimable");
 
@@ -349,7 +379,7 @@ test("plantworks pw broker serve: a held job is approved through the decision UR
     const res = await fetch(requested.data.decisionUrl, { method: "POST", headers: auth, body: JSON.stringify({ decision: "approve", by: "a-person" }) });
     assert.equal(res.status, 200);
     await until(4);
-    assert.deepEqual(consumer.events.map((e) => e.id), ["held", "approval.requested", "queued", "approval.resolved"].map((s) => `${job.jobId}:${s}`));
+    assert.deepEqual(consumer.events.map((e) => e.id), [`${job.jobId}:1`, `${job.jobId}:approval.requested`, `${job.jobId}:2`, `${job.jobId}:approval.resolved`]);
   } finally {
     await new Promise<void>((r) => { child.once("exit", () => r()); child.kill("SIGTERM"); });
     await consumer.close();
