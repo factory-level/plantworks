@@ -105,7 +105,7 @@ test("drain stops new work for the seat only, keeps what it holds, and resumes o
   assert.equal((await w.call("POST", `${API}/seats/bad%20seat/drain`)).status, 400);
 });
 
-test("plantworks pw worker drain: exit 3 while work is in flight (and the seat stays draining), exit 0 once it settles", async () => {
+test("plantworks pw worker drain: exit 3 while work is in flight, 4 when another worker resumes the seat mid-drain, 0 once it settles", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pw-runtime-"));
   assert.ok("files" in emitTeam(definition, dir, platform));
   const store = openStore(":memory:");
@@ -115,14 +115,24 @@ test("plantworks pw worker drain: exit 3 while work is in flight (and the seat s
   const broker = await startBroker({ store, teams: loadTeams(dir, platform), send, token: "t0k", host: "127.0.0.1", port: 0, routes: [runtimeRoutes({ slotCaps })] });
   const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
   const env = { ...process.env, OPENRIG_HOME: mkdtempSync(join(tmpdir(), "pw-home-")), PLANTWORKS_BROKER_URL: broker.url, PLANTWORKS_BROKER_TOKEN: "t0k" };
-  const drain = () => promisify(execFile)(process.execPath, [bin, "pw", "worker", "drain", "--seat", "seat-c", "--timeout-s", "1", "--poll-ms", "100"], { env })
+  const drain = (timeoutS = 1) => promisify(execFile)(process.execPath, [bin, "pw", "worker", "drain", "--seat", "seat-c", "--timeout-s", String(timeoutS), "--poll-ms", "100"], { env })
     .then((r) => ({ code: 0, ...r }), (e) => ({ code: e.code as number, stdout: e.stdout as string, stderr: e.stderr as string }));
   try {
     const timedOut = await drain();
     assert.equal(timedOut.code, 3, timedOut.stderr);
-    assert.match(timedOut.stderr, /in-flight work unresolved after 1s \(kb-social-media-t_00000003-a1\).*does not prove execution stopped/);
+    assert.match(timedOut.stderr, /in-flight work unresolved after 1s \(kb-social-media-t_00000003-a1\); the broker still reports the seat draining.*does not prove execution stopped/);
     assert.equal(store.get(id(3))!.state, "claimed", "a drain timeout fails, cancels and releases nothing");
     assert.equal(store.isDraining("seat-c"), true);
+
+    // Another worker on the same seat name resumes it mid-drain: the drain must not claim success.
+    store.setDraining("seat-c", false);
+    const resumedMidway = drain(10);
+    // Once this drain has set the flag, a `worker run` start on the same seat clears it (its startup DELETE).
+    while (!store.isDraining("seat-c")) await new Promise((r) => setTimeout(r, 20));
+    store.setDraining("seat-c", false);
+    const voided = await resumedMidway;
+    assert.equal(voided.code, 4, voided.stderr);
+    assert.match(voided.stderr, /drain was ended by another worker resuming this seat .*in flight: kb-social-media-t_00000003-a1/);
 
     store.transition(id(3), "running");
     store.transition(id(3), "done", { outcome: "succeeded" });

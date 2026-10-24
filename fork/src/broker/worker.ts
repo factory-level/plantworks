@@ -45,7 +45,7 @@ export function workerVerb(pw: Command): void {
 
   // PW-22: the preStop hook. Stops new work for the seat, then waits for what it still holds.
   worker.command("drain")
-    .description("Stop new work for a seat and wait for its in-flight jobs. Exit 0 when drained, 3 on timeout")
+    .description("Stop new work for a seat and wait for its in-flight jobs. Exit 0 when drained, 3 on timeout, 4 if another worker resumed the seat")
     .requiredOption("--seat <session>")
     .option("--broker <url>", "broker URL", process.env.PLANTWORKS_BROKER_URL ?? "http://127.0.0.1:7534")
     .option("--timeout-s <s>", "how long to wait for in-flight jobs", "300")
@@ -60,19 +60,25 @@ export function workerVerb(pw: Command): void {
       const deadline = Date.now() + timeoutS * 1000;
       const res = await fetch(url, { method: "POST", headers, signal: AbortSignal.timeout(15_000) });
       if (!res.ok) throw new Error(`drain ${opts.seat}: broker returned ${res.status}: ${(await res.text()).slice(0, 300)}`);
-      let view = await res.json() as { inFlight: string[] };
-      while (view.inFlight.length && Date.now() < deadline) {
+      let view = await res.json() as { draining: boolean; inFlight: string[] };
+      while (view.draining && view.inFlight.length && Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, pollMs));
         // An unreachable or failing broker leaves the last answer standing: still in flight.
         const poll = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) }).catch(() => null);
-        if (poll?.ok) view = await poll.json() as { inFlight: string[] };
+        if (poll?.ok) view = await poll.json() as { draining: boolean; inFlight: string[] };
+      }
+      if (!view.draining) {
+        // A `worker run` on the same seat name resumed it: the seat takes work again, so this drain is void.
+        process.stderr.write(`${opts.seat}: the drain was ended by another worker resuming this seat (one worker process per seat name); in flight: ${view.inFlight.join(", ") || "none"}\n`);
+        process.exitCode = 4;
+        return;
       }
       if (!view.inFlight.length) {
         process.stdout.write(`${opts.seat} drained: no jobs in flight\n`);
         return;
       }
       // Nothing here stops, fails or releases the work: the broker still tracks it, and reconciliation settles it.
-      process.stderr.write(`${opts.seat}: in-flight work unresolved after ${timeoutS}s (${view.inFlight.join(", ")}); the seat stays draining, and the timeout does not prove execution stopped\n`);
+      process.stderr.write(`${opts.seat}: in-flight work unresolved after ${timeoutS}s (${view.inFlight.join(", ")}); the broker still reports the seat draining, and the timeout does not prove execution stopped\n`);
       process.exitCode = 3;
     });
 }

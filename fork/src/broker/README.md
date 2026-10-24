@@ -230,8 +230,15 @@ kept in the broker's SQLite file (`seat_drains`), so it survives a broker restar
   - exit `3` on timeout: the jobs are listed, the seat stays draining, and the broker still
     tracks them. **A timeout does not prove execution stopped.** Pi may still be working, and
     reconciliation settles the jobs later.
+  - exit `4`: another worker resumed the seat during the drain, so the seat takes work again and
+    the drain is void.
 - `plantworks pw worker run --seat <session>` resumes its own seat, and only that seat, when it
-  starts, so a pod that replaces a drained one takes work again.
+  starts, so a pod that replaces a drained one takes work again. **Run one worker process per
+  seat name.** A second `worker run` on the same name (a Deployment sharing a fixed `--seat`, a
+  surge pod, a supervisor restart) ends any drain on it. A StatefulSet with pod-name seats does
+  not overlap.
+- A drain row stays until something resumes the seat. An operator clears a stale one, for example
+  for a pod name that never comes back, with `DELETE /plantworks/v1/seats/{seat}/drain`.
 
 ## For other cards
 
