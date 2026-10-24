@@ -143,6 +143,25 @@ test("an endpoint error between deadline aborts also breaks the run", async () =
   }
 });
 
+test("cutOff refuses the seat's calls and aborts the one in flight; restore lets calls through again", async (t) => {
+  const s = await stub((req, res) => { if (req.url!.endsWith("/slow")) return; res.writeHead(200).end("{}"); });
+  const records: CallRecord[] = [];
+  const g = await startGovernor({ endpoint: { url: s.url }, workerClass: CLASSES.quick, log: (r) => records.push(r) });
+  t.after(async () => { await g.close(); await s.close(); });
+  const pending = fetch(`${g.url}/slow`, { method: "POST", body: "{}" });
+  while (!s.seen.length) await new Promise((r) => setTimeout(r, 10));
+  g.cutOff("job x passed its timeout");
+  const aborted = await pending;
+  assert.equal(aborted.status, 403, "the call in flight is aborted, not left to the 60 s deadline");
+  assert.match(await aborted.text(), /cut off: job x passed its timeout/);
+  const refused = await fetch(`${g.url}/chat/completions`, { method: "POST", body: "{}" });
+  assert.equal(refused.status, 403);
+  assert.equal(s.seen.length, 1, "a refused call never reaches the endpoint");
+  g.restore();
+  assert.equal((await fetch(`${g.url}/chat/completions`, { method: "POST", body: "{}" })).status, 200);
+  assert.deepEqual(records.map((r) => [r.status, r.deadline]), [[403, false], [403, false], [200, false]]);
+});
+
 test("`plantworks pw llm preflight` checks the class model against the endpoint", async () => {
   const s = await stub(models(["qwen3.5:9b"]));
   try {

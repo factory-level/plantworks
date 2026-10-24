@@ -30,6 +30,10 @@ plantworks pw team validate out/<team>/team.json [--platform platform.json]
   in a comment, so it is a field here.
 - **`approvalTtlSeconds`** is the TTL that rule 6 requires for `approval: always`. The ADR
   doesn't name the field.
+- **`priority`** (optional, -100..100, default 0) is a class's base job priority. The broker adds
+  the job's own `priority` offset (urgent -3, high -1, normal 0, low +2) and claim-next takes the
+  lowest first. claim-next serves one class per call, so today the class base is stored in the
+  effective priority but doesn't change claim order; only the job offsets do.
 - **`hermesProfile`** is derived, never written by hand: `name` = `team`, and
   `kanban.max_in_progress_per_profile` = `trains × orchestrators`.
 

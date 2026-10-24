@@ -8,7 +8,7 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { serve } from "@hono/node-server";
 import { isLoopbackBind } from "../../../packages/daemon/dist/middleware/auth-bearer-token.js";
-import { canTransition, validateEnvelope, type JobEnvelope, type JobState } from "../contract/job.ts";
+import { canTransition, JOB_PRIORITIES, validateEnvelope, type JobEnvelope, type JobState } from "../contract/job.ts";
 import { createEmitter, jobStateEvent, type CloudEvent } from "../events/job-state.ts";
 import { SWEEP_MS, decisionRoute, requestApproval, sweepApprovals } from "./approvals.ts";
 import { PHASE_0_1, validateSpec, type Platform, type TeamSpec } from "../team/spec.ts";
@@ -117,12 +117,15 @@ export function createBroker(opts: BrokerOptions): Hono & { sweepApprovals: () =
     const cls = job.class ?? spec.defaultClass;
     const qc = spec.classes[cls];
     if (!qc) return fail(400, "unknown_class", `team ${job.team} has no class ${cls}`);
+    // claim-next never has more than `slots` of a class in flight, so a 0-slot class could never run the job.
+    if (qc.slots === 0) return fail(400, "class_disabled", `class ${cls} of ${job.team} has 0 slots, so nothing in it can run; raise its slots in the team spec first`);
     if (job.timeoutSeconds !== undefined && job.timeoutSeconds > qc.timeoutSeconds) {
       return fail(400, "timeout_over_ceiling", `timeoutSeconds ${job.timeoutSeconds} exceeds the ${cls} ceiling of ${qc.timeoutSeconds}`);
     }
     // A class that needs approval (per-job or always) holds every job until it is decided.
     const held = qc.approval !== "never";
-    const { row, created } = store.insert(job, cls, held ? "held" : "queued", held ? qc.approvalTtlSeconds : undefined);
+    const priority = (qc.priority ?? 0) + JOB_PRIORITIES[job.priority ?? "normal"];
+    const { row, created } = store.insert(job, cls, held ? "held" : "queued", held ? qc.approvalTtlSeconds : undefined, priority);
     if (!created) return replay(row, job);
     emit(row, row.state);
     if (held) requestApproval(row, ctx);

@@ -19,13 +19,13 @@ const cls = (approval: string, extra = {}) => ({ slots: 1, model: "qwen3.5:9b", 
 const definition = {
   team: "social-media",
   trains: 1,
-  perTrain: { orchestrators: 1, workers: { quick: 1 } },
+  perTrain: { orchestrators: 1, workers: { quick: 5, review: 1 } },
   endpoint: { url: "${PLANTWORKS_LLM_URL}", slotBudgetKey: "social-media" },
   defaultClass: "quick",
-  classes: { quick: cls("never"), review: cls("always", { slots: 0, approvalTtlSeconds: 60 }) },
+  classes: { quick: cls("never", { slots: 5 }), review: cls("always", { slots: 1, approvalTtlSeconds: 60 }) },
   events: { callbackDefault: "${PLANTWORKS_FRONTDOOR_CALLBACK}", approvalConsumer: "frontdoor" },
 };
-const platform = { ...PHASE_0_1, slotCaps: { "social-media": 1 } };
+const platform = { ...PHASE_0_1, slotCaps: { "social-media": 6 } };
 const slotCaps = parseSlotCaps("5");
 const daemon: DaemonQueue = { async create() {}, async claim() {}, async inspect() { throw new Error("unused"); } };
 const id = (n: number) => `kb-social-media-t_0000000${n}-a1`;

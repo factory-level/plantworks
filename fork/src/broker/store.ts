@@ -35,6 +35,8 @@ export interface JobRow {
   approval_expires_at: string | null;
   /** approved, denied or expired, once a held job is decided (PW-23). */
   approval_decision: string | null;
+  /** Effective priority (class priority + job priority offset); claim-next takes the lowest first. */
+  priority: number;
 }
 
 /** Extra columns a transition may set alongside the state (PW-18 sets claimed_by, claimed_at and qitem_id). */
@@ -60,7 +62,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   reserved_qitem_id TEXT,
   result TEXT,
   approval_expires_at TEXT,
-  approval_decision TEXT
+  approval_decision TEXT,
+  priority INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS jobs_claimable ON jobs (team, class, state, seq);
 -- PW-22: seats told to take no new work (worker preStop). Kept across broker restarts.
@@ -78,7 +81,7 @@ CREATE TABLE IF NOT EXISTS job_transitions (
 CREATE INDEX IF NOT EXISTS job_transitions_job ON job_transitions (job_id, id);
 `;
 /** Columns added after PW-17, for a broker file created before them. */
-const ADDED_COLUMNS = ["approval_expires_at TEXT", "approval_decision TEXT"];
+const ADDED_COLUMNS = ["approval_expires_at TEXT", "approval_decision TEXT", "priority INTEGER NOT NULL DEFAULT 0"];
 
 export type Store = ReturnType<typeof openStore>;
 
@@ -105,6 +108,8 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
   db.exec(SCHEMA);
   const have = new Set((db.prepare("PRAGMA table_info(jobs)").all() as { name: string }[]).map((c) => c.name));
   for (const col of ADDED_COLUMNS) if (!have.has(col.split(" ")[0]!)) db.exec(`ALTER TABLE jobs ADD COLUMN ${col}`);
+  // reserve() orders by priority, then seq; created after the migration has added the column.
+  db.exec("CREATE INDEX IF NOT EXISTS jobs_claim_order ON jobs (team, class, state, priority, seq)");
   const iso = () => now().toISOString();
   // IMMEDIATE: the write lock is taken up front, so a read inside the transaction can't go stale
   // against another broker process on the same file. Nested calls run as savepoints.
@@ -146,13 +151,16 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
       return db.prepare("SELECT * FROM jobs WHERE seq > ? AND state IN ('queued','claimed','running') AND (qitem_id IS NOT NULL OR reserved_qitem_id IS NOT NULL) ORDER BY seq LIMIT ?").all(afterSeq, limit) as JobRow[];
     },
 
-    /** Inserts a new job, or returns the existing row for that jobId (`created` says which). A held job may carry its approval TTL. */
-    insert(envelope: JobEnvelope, cls: string, state: JobState, approvalTtlSeconds?: number): { row: JobRow; created: boolean } {
+    /**
+     * Inserts a new job, or returns the existing row for that jobId (`created` says which). A held
+     * job may carry its approval TTL. `priority` is the effective priority (see JobRow).
+     */
+    insert(envelope: JobEnvelope, cls: string, state: JobState, approvalTtlSeconds?: number, priority = 0): { row: JobRow; created: boolean } {
       return tx(() => {
         const at = iso();
         const expires = approvalTtlSeconds === undefined ? null : new Date(now().getTime() + approvalTtlSeconds * 1000).toISOString();
-        const r = db.prepare("INSERT OR IGNORE INTO jobs (job_id, team, class, state, envelope, created_at, updated_at, approval_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-          .run(envelope.jobId, envelope.team, cls, state, JSON.stringify(envelope), at, at, expires);
+        const r = db.prepare("INSERT OR IGNORE INTO jobs (job_id, team, class, state, envelope, created_at, updated_at, approval_expires_at, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+          .run(envelope.jobId, envelope.team, cls, state, JSON.stringify(envelope), at, at, expires, priority);
         if (r.changes === 1) record(envelope.jobId, null, state, {}, {}, at);
         return { row: get(envelope.jobId)!, created: r.changes === 1 };
       });
@@ -170,13 +178,13 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
     },
 
     /**
-     * PW-18's claim-next reservation: the oldest queued job for (team, class) that nobody has
-     * reserved. The state stays queued and nothing is emitted. A reserved job is never taken over,
+     * PW-18's claim-next reservation: the queued job for (team, class) that nobody has reserved,
+     * lowest effective priority first, then oldest. The state stays queued and nothing is emitted. A reserved job is never taken over,
      * however old the reservation: only `confirmClaim` or a verified `release` ends it.
      */
     reserve(team: string, cls: string, seat: string, qitemId: string): JobRow | undefined {
       return tx(() => {
-        const row = db.prepare("SELECT * FROM jobs WHERE team = ? AND class = ? AND state = 'queued' AND reserved_by IS NULL ORDER BY seq LIMIT 1")
+        const row = db.prepare("SELECT * FROM jobs WHERE team = ? AND class = ? AND state = 'queued' AND reserved_by IS NULL ORDER BY priority, seq LIMIT 1")
           .get(team, cls) as JobRow | undefined;
         if (!row) return undefined;
         db.prepare("UPDATE jobs SET reserved_by = ?, reserved_at = ?, reserved_qitem_id = ? WHERE job_id = ?").run(seat, iso(), qitemId, row.job_id);

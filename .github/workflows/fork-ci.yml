@@ -56,3 +56,21 @@ jobs:
       - name: Licence headers
         working-directory: fork
         run: npm run check:headers
+
+  # PW-25: the image builds from this commit and passes its smoke. The tag stays local: no
+  # registry login and no push (publication waits on approval).
+  image-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build fork-runtime (fork/container/build.sh, local tag only)
+        id: build
+        run: echo "tag=$(fork/container/build.sh HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Smoke every role (fork/container/smoke.sh)
+        run: fork/container/smoke.sh "${{ steps.build.outputs.tag }}"
