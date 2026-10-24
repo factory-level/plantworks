@@ -137,7 +137,11 @@ test("each call is cut at the deadline, and three in a row fail the job once wit
   const records: CallRecord[] = [];
   const workerClass = { ...CLASSES.quick, deadlineSeconds: 0.1 };
   const g = await startGovernor({ endpoint: { url: s.url }, workerClass, onFail: (r) => fails.push(r), log: (r) => records.push(r) });
-  const call = async () => (await fetch(`${g.url}/models`)).status;
+  // Bounded: if the deadline didn't cut a call, it would never answer, so fail here and say so.
+  const call = async () => {
+    const res = await fetch(`${g.url}/models`, { signal: AbortSignal.timeout(5000) }).catch((e: Error) => { throw new Error(`the call was not cut at the 100 ms deadline within 5 s (${e.name})`); });
+    return res.status;
+  };
   assert.deepEqual([await call(), await call()], [504, 504]);
   hang = false;
   assert.equal(await call(), 200, "a good call resets the run of deadlines");
