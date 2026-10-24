@@ -59,6 +59,8 @@ Do not use it for questions you can answer yourself in the conversation.
 - Artifacts come back as name, size and checksum only. Do not claim to have read their
   contents.
 - `not_found` means the job does not exist in this team, or the broker no longer keeps it.
+- `job_conflict` means this card and attempt were already submitted with a different prompt.
+  Do not resubmit; inspect the existing job, or ask before submitting the next attempt.
 - `broker_unavailable` is temporary. Repeat the same call later; submit and cancel are
   idempotent.
 

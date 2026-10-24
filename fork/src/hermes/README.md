@@ -33,7 +33,9 @@ There is one server per team, and **the team is fixed by the server, never chose
 caller**. The server reads `PLANTWORKS_BROKER_URL` (the team's broker) and `PLANTWORKS_TEAM`.
 A tool call has no `team` argument, so a profile cannot submit to another team's queue.
 
-Hermes profile entry (*proposed*: written into the Hermes profile file that PW-20 emits):
+Hermes profile entry. PW-24 adds it to the PW-20 emitter (`hermesProfileConfig()`) after PW-20
+merges, along with the skill at `hermes-profile/skills/plantworks-bridge/SKILL.md`. A Hermes
+0.22.5 profile home reads its skills from `skills/`:
 
 ```yaml
 mcp_servers:
@@ -57,9 +59,11 @@ Hermes shows the tools to the model as `mcp_plantworks_job_submit`,
   time. It refuses to start in HTTP mode without one. There is one token per team, not a
   grant file. Rotating it means a restart.
 - **stdio** is the local owner, like upstream's stdio server.
-- **Broker credentials stay server-side.** If the broker needs a credential (PW-17,
-  *open*), the MCP server reads it from its own environment. Hermes never sees it and no
-  tool returns it.
+- **Broker credentials stay server-side.** The broker requires `Authorization: Bearer` from
+  `PLANTWORKS_BROKER_TOKEN` on any bind other than loopback (PW-16/PW-17), so it does in a cluster. The
+  MCP server reads that token from its own environment and sends it only to
+  `PLANTWORKS_BROKER_URL`. Hermes never sees it and no tool returns it. The MCP token and the
+  broker token are different secrets.
 - Secrets reach both sides by name only (the profile `.env` or External Secrets). The kit
   carries no values.
 
@@ -107,7 +111,7 @@ Output:
   "state": "done",               // see ../contract/README.md
   "detail": { "outcome": "succeeded" },          // the state's detail fields
   "updatedAt": "2026-10-24T10:00:00Z",
-  "result": {                    // only when state is done or failed and the broker has one
+  "result": {                    // null until the job is terminal, and until a worker reports one (PW-21)
     "text": "...",               // at most 16,000 characters from resultOffset
     "offset": 0,
     "totalChars": 41230,
@@ -138,7 +142,8 @@ idempotent.
 |---|---|
 | `invalid_envelope` | the inputs fail `validateEnvelope()`. The message names the field |
 | `not_found` | no job with that `jobId` exists **in this team** |
-| `not_cancellable` | cancel on a job that is not `queued`, `held` or `cancelled` |
+| `not_cancellable` | cancel on a job that is not `queued`, `held` or `cancelled` (broker 409) |
+| `job_conflict` | submit reuses a `jobId` with a different envelope (broker 409). Nothing changes |
 | `broker_rejected` | the broker returned another 4xx (for example, timeout above the class ceiling, or an unknown class). It carries the broker's code and message |
 | `broker_unavailable` | network error, timeout or 5xx. The call may be repeated: submit and cancel are idempotent |
 
@@ -206,12 +211,15 @@ calls the server over stdio and over HTTP. The tests check:
 
 No real Hermes, broker or inference is involved.
 
-## Open, needs counterpart acknowledgement
+## Counterpart positions
 
-| Item | Owner | Proposed |
+Provisional acknowledgements from the owners, which hold until PW-17 publishes its schema and review
+verifies them:
+
+| Item | Owner | Position |
 |---|---|---|
-| Jobs API paths | build (PW-17) | `POST /plantworks/v1/jobs` (201 new, 200 existing), `GET /plantworks/v1/jobs/{jobId}`, `POST /plantworks/v1/jobs/{jobId}/cancel` |
-| Result shape on the job record | build (PW-17) | `result: { text, artifacts: [{ name, bytes, sha256 }] }` on `done`/`failed` |
-| Broker authentication | build (PW-17) | a bearer token the MCP server holds, or none inside the namespace (NetworkPolicy) |
-| `mcp_servers.plantworks` in the emitted profile | build2 (PW-20) | the block above, with `${PLANTWORKS_MCP_URL}` and `${PLANTWORKS_MCP_TOKEN}` left as references |
-| Event signing for Hermes webhooks | lead (no card) | optional HMAC V2 signing in the PW-10 emitter, or a signing relay |
+| Jobs API | build (PW-17) | `POST /plantworks/v1/jobs`: 201 for a new job, 200 when the same envelope is repeated, 409 when a `jobId` is reused with a different envelope, 400 for a bad envelope or an unknown team. `GET /plantworks/v1/jobs/{jobId}`: the record, or 404. `POST /plantworks/v1/jobs/{jobId}/cancel`: 200 for `queued`/`held` (and for an already `cancelled` job), 409 for other states, 404 when unknown |
+| Job record | build (PW-17) | `{ jobId, team, class, state, detail, createdAt, updatedAt, result }`. `result` is null until the job is terminal, then `{ text \| null, artifacts: [{ name, bytes, sha256 }] }`. It stays null until the worker report path (PW-21) exists, and `artifacts` stays `[]` until artifact storage is scheduled. **No result storage exists yet.** The broker caps the stored text, and the 16,000-character paging is client-side |
+| Broker auth | build (PW-17) | Bearer `PLANTWORKS_BROKER_TOKEN`. Loopback with no token configured is unauthenticated, for Phase 0–1 development only |
+| `mcp_servers.plantworks` and the skill in the emitted profile | build2 (PW-20) | PW-24 adds both to the emitter after PW-20 merges. The `${}` references stay literal |
+| Event push into Hermes | lead | Unsupported; a future integration gap. No signing or relay in this card |
