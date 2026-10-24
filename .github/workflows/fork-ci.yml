@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Fork CI
+
+# The fork's own checks, alongside upstream's tests.yml (which still runs unchanged): the seam
+# check against the upstream mirror, then the upstream build the fork imports, the fork tests and
+# the licence header check. See fork/CONTRIBUTING-fork.md.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  seams:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Every change outside fork/ is recorded in fork/PATCHES.md
+        run: node fork/scripts/check-seams.mjs origin/upstream-main
+
+  fork-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Build upstream (the fork imports its built CLI and daemon)
+        run: npm run build
+      - name: Fork tests
+        working-directory: fork
+        run: npm test
+      - name: Licence headers
+        working-directory: fork
+        run: npm run check:headers
