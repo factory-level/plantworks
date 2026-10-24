@@ -16,7 +16,7 @@ function run(args, env = {}) {
   const bin = mkdtempSync(join(tmpdir(), "pw-ep-"));
   const log = join(bin, "calls");
   // The fake records each call. `daemon status` prints $FAKE_STATUS (empty: a stopped daemon, so the daemon role exits).
-  writeFileSync(join(bin, "plantworks"), `#!/usr/bin/env bash\necho "$*" >> "${log}"\n[ "$*" = "daemon status" ] && printf '%s\\n' "\${FAKE_STATUS:-}"\nexit 0\n`);
+  writeFileSync(join(bin, "plantworks"), `#!/usr/bin/env bash\necho "$*" >> "${log}"\n[ "$*" = "daemon status" ] && printf '%s\\n' "\${FAKE_STATUS:-}"\ncase "$*" in "pw worker live "*) exit "\${FAKE_LIVE:-0}" ;; esac\nexit 0\n`);
   chmodSync(join(bin, "plantworks"), 0o755);
   writeFileSync(log, "");
   const r = spawnSync("bash", [entrypoint, ...args], { encoding: "utf8", env: { PATH: `${bin}:${process.env.PATH}`, FORK_ROLE_FILE: join(bin, "role"), ...env } });
@@ -109,9 +109,13 @@ test("health: daemon must be running and not UNHEALTHY; a dead worker or no role
   assert.equal(health("daemon", { FAKE_STATUS: "Daemon running on port 7533 (pid 42)" }).code, 0);
   assert.equal(health("daemon", { FAKE_STATUS: "Daemon running on port 7533 (pid 42) — process present but UNHEALTHY: healthz failed" }).code, 1);
   assert.equal(health("daemon", { FAKE_STATUS: "Daemon not running" }).code, 1);
-  assert.equal(health(`worker ${process.pid}`).code, 0, "the recorded worker process is alive");
+  const seat = { PLANTWORKS_SEAT: "s@t" };
+  const live = health(`worker ${process.pid}`, seat);
+  assert.equal(live.code, 0, "the recorded worker process is alive and its seat's Pi recorded no exit");
+  assert.deepEqual(live.calls, ["pw worker live --seat s@t"]);
+  assert.equal(health(`worker ${process.pid}`, { ...seat, FAKE_LIVE: "1" }).code, 1, "the seat's runner recorded a Pi exit");
   const gone = spawnSync("true").pid;
-  assert.equal(health(`worker ${gone}`).code, 1, "the recorded worker process is gone");
-  assert.equal(health("worker").code, 1, "no recorded worker process");
+  assert.equal(health(`worker ${gone}`, seat).code, 1, "the recorded worker process is gone");
+  assert.equal(health("worker", seat).code, 1, "no recorded worker process");
   assert.equal(health(null).code, 0, "a one-off command has no role to check");
 });
