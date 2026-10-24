@@ -24,7 +24,11 @@ async function stub(handler: (req: IncomingMessage, res: ServerResponse, seen: S
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`;
-  return { url, seen, close: () => new Promise<void>((r) => { server.closeAllConnections(); server.close(() => r()); }) };
+  return { url, seen, close: () => new Promise<void>((r) => {
+    if (!server.listening) return r();
+    server.closeAllConnections();
+    server.close(() => r());
+  }) };
 }
 
 const models = (ids: string[]) => (_req: IncomingMessage, res: ServerResponse) => {
@@ -141,10 +145,14 @@ test("an endpoint error between deadline aborts also breaks the run", async () =
 
 test("`plantworks pw llm preflight` checks the class model against the endpoint", async () => {
   const s = await stub(models(["qwen3.5:9b"]));
-  const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
-  const run = (env: object) => promisify(execFile)(process.execPath, [bin, "pw", "llm", "preflight", "--json"], { env: { ...process.env, ...env } });
-  const ok = await run({ PLANTWORKS_LLM_URL: s.url });
-  assert.equal(JSON.parse(ok.stdout).ok, true);
-  await s.close();
-  await assert.rejects(run({ PLANTWORKS_LLM_URL: s.url }), (e: { code: number; stdout: string }) => e.code === 1 && JSON.parse(e.stdout).ok === false);
+  try {
+    const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
+    const run = (env: object) => promisify(execFile)(process.execPath, [bin, "pw", "llm", "preflight", "--json"], { env: { ...process.env, ...env } });
+    const ok = await run({ PLANTWORKS_LLM_URL: s.url });
+    assert.equal(JSON.parse(ok.stdout).ok, true);
+    await s.close();
+    await assert.rejects(run({ PLANTWORKS_LLM_URL: s.url }), (e: { code: number; stdout: string }) => e.code === 1 && JSON.parse(e.stdout).ok === false);
+  } finally {
+    await s.close();
+  }
 });
