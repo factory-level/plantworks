@@ -22,8 +22,9 @@ ok() { echo "ok - $*"; }
 until_ok() { for _ in $(seq "$1"); do if eval "$2" >/dev/null 2>&1; then return 0; fi; sleep 1; done; return 1; }
 
 want="$(node -p "require('${root}/packages/cli/package.json').version")"
-[ "$(docker run --rm "${img}" --version)" = "${want}" ] || fail "--version is not ${want}"
-ok "plantworks --version is ${want}"
+# plantworks brands upstream's version (fork/src/cli/program.ts): <upstream>+plantworks.<n>
+case "$(docker run --rm "${img}" --version)" in "${want}+plantworks."[0-9]*) ;; *) fail "--version is not ${want}+plantworks.<n>" ;; esac
+ok "plantworks --version is ${want}+plantworks.<n>"
 [ "$(docker run --rm --entrypoint id "${img}" -u)" = "10001" ] || fail "the image does not run as uid 10001"
 ok "runs as non-root uid 10001"
 docker run --rm --entrypoint sh "${img}" -c 'npm ls -g --depth=0 2>/dev/null' | grep -q "@earendil-works/pi-coding-agent@1.4.0" || fail "Pi 1.4.0 is not the installed Pi"

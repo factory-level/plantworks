@@ -4,7 +4,7 @@
 // OpenRig install, and never on a non-loopback address without a bearer token.
 // Everything here is environment the upstream CLI and daemon already read; nothing upstream changes.
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { isLoopbackBind } from "../../../packages/daemon/dist/middleware/auth-bearer-token.js";
 
 /** Upstream's defaults are ~/.openrig, 7433 and a database-conflict warning. */
@@ -18,11 +18,35 @@ type Env = Record<string, string | undefined>;
  * seat's own (live) home, so a Plantworks-specific choice must not be silently ignored there.
  * The kernel is always off: Plantworks seats are Pi workers, started by the broker.
  */
-export function applyHomeDefaults(env: Env): void {
+export function applyHomeDefaults(env: Env): string[] {
   const home = env.PLANTWORKS_HOME?.trim();
+  const dropped = home ? dropInheritedDaemon(env, home) : [];
   if (home) env.OPENRIG_HOME = home;
   else if (!env.OPENRIG_HOME?.trim()) env.OPENRIG_HOME = DAEMON_DEFAULTS.home;
   env.OPENRIG_NO_KERNEL = "1";
+  return dropped;
+}
+
+/**
+ * With PLANTWORKS_HOME set, the variables that point at some other daemon are dropped: an OpenRig session
+ * carries its own daemon's URL, host, port and database, and moving the home alone would still reach them.
+ * A database inside the selected home is kept; the port and database then come from that home's config or
+ * the Plantworks defaults. Returns the names dropped.
+ */
+function dropInheritedDaemon(env: Env, home: string): string[] {
+  const dropped: string[] = [];
+  for (const name of ["OPENRIG_URL", "RIGGED_URL", "OPENRIG_HOST", "RIGGED_HOST", "OPENRIG_PORT", "RIGGED_PORT"]) {
+    if (env[name] !== undefined) { delete env[name]; dropped.push(name); }
+  }
+  for (const name of ["OPENRIG_DB", "RIGGED_DB"]) {
+    const db = env[name]?.trim();
+    if (db === undefined) continue;
+    const rel = relative(resolve(home), resolve(db));
+    if (db && !rel.startsWith("..") && !isAbsolute(rel)) continue; // inside the selected home
+    delete env[name];
+    dropped.push(name);
+  }
+  return dropped;
 }
 
 /** Values the home's config file sets (`plantworks config set daemon.port ...`); they win over our defaults. */
