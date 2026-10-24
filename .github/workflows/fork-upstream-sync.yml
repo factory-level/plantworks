@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Fork upstream sync
+
+# Nightly: fast-forward the upstream-main mirror, test-merge it into main on a sync/<date> branch,
+# run upstream's tests.yml and the fork's fork-ci.yml (fork tests, seam and contract checks) on
+# that branch, and open a pull request into main only when both pass. A conflict or a failing run
+# leaves a red run here and no pull request, for a person to pick up. See fork/UPSTREAM.md.
+#
+# Pushes and pull requests made with GITHUB_TOKEN don't trigger other workflows, so the checks
+# are started explicitly with workflow_dispatch (which GITHUB_TOKEN may do) and awaited.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+  pull-requests: write
+
+concurrency:
+  group: fork-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Remotes and identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/mvschwarz/openrig.git
+          git remote set-url --push upstream DISABLED
+      - name: Fast-forward the upstream-main mirror
+        run: bash fork/scripts/sync-upstream-main.sh
+      - name: Test-merge upstream-main into main
+        id: merge
+        # The script prints only the branch name to stdout; a conflict fails this step.
+        run: |
+          branch=$(bash fork/scripts/upstream-test-merge.sh)
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+      - name: Seam check on the merge
+        if: steps.merge.outputs.branch != ''
+        run: node fork/scripts/check-seams.mjs origin/upstream-main
+      - name: Run tests.yml and fork-ci.yml on the sync branch and wait for both
+        if: steps.merge.outputs.branch != ''
+        env:
+          BRANCH: ${{ steps.merge.outputs.branch }}
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          ids=()
+          for wf in tests.yml fork-ci.yml; do
+            gh workflow run "$wf" --ref "$BRANCH"
+            id=""
+            for _ in $(seq 30); do
+              id=$(gh run list --workflow "$wf" --branch "$BRANCH" --event workflow_dispatch --commit "$sha" --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+              [ -n "$id" ] && break
+              sleep 5
+            done
+            [ -n "$id" ] || { echo "$wf run for $sha did not appear" >&2; exit 1; }
+            echo "$wf: run $id"
+            ids+=("$id")
+          done
+          status=0
+          for id in "${ids[@]}"; do gh run watch "$id" --exit-status --interval 60 > /dev/null || status=1; done
+          for id in "${ids[@]}"; do gh run view "$id" --json name,conclusion,url --jq '"\(.name): \(.conclusion) \(.url)"'; done
+          exit $status
+      - name: Open the pull request into main
+        if: steps.merge.outputs.branch != ''
+        env:
+          BRANCH: ${{ steps.merge.outputs.branch }}
+        run: |
+          if [ -n "$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number // empty')" ]; then
+            echo "pull request for $BRANCH already open"
+            exit 0
+          fi
+          gh pr create --base main --head "$BRANCH" \
+            --title "sync: merge upstream-main into main (${BRANCH#sync/})" \
+            --body "Nightly upstream test-merge of \`upstream-main\` $(git rev-parse --short HEAD^2) into \`main\`. tests.yml and fork-ci.yml passed on this branch: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}. Merge with a merge commit, never squash or rebase (fork/UPSTREAM.md)."
