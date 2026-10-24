@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { DaemonQueue } from "./claim.ts";
+import type { DaemonQueue, QueueObservation } from "./claim.ts";
+import type { DoneOutcome } from "../contract/job.ts";
 import type { Emit } from "./server.ts";
 import type { Store } from "./store.ts";
 
@@ -32,19 +33,15 @@ export function createReconciler(store: Store, daemon: DaemonQueue, emit: Emit, 
         emit(running.row, "running", running.detail);
         continue;
       }
-      let closingIndex = item.transitions.length - 1;
-      while (closingIndex >= 0 && item.transitions[closingIndex]!.state === "done") closingIndex--;
-      const closing = item.transitions[closingIndex + 1];
-      // transitions are ordered oldest-first; a later reopen invalidates an older done snapshot.
-      if (item.transitions.at(-1)?.state !== "done") continue;
-      if (item.state !== "done" || item.closureReason !== "no-follow-on" || item.closureTarget != null || !closing || closing.closureReason !== "no-follow-on" || closing.closureTarget != null || closing.transitionId !== item.closingTransition?.transitionId || closing.actorSession !== item.destinationSession || closing.identityProvenance !== "transport:v1") continue;
+      const outcome = seatOutcome(item);
+      if (!outcome) continue;
       if (current.state === "claimed") {
         const running = store.transition(current.job_id, "running");
         emit(running.row, "running", running.detail);
         current = running.row;
       }
       if (current.state !== "running") continue;
-      const { row: done, detail } = store.transition(current.job_id, "done", { outcome: "succeeded" }, { result: JSON.stringify({ text: null, artifacts: [] }) });
+      const { row: done, detail } = store.transition(current.job_id, "done", { outcome }, { result: JSON.stringify({ text: null, artifacts: [] }) });
       emit(done, done.state, detail);
     } catch (error) {
       const now = Date.now();
@@ -57,4 +54,30 @@ export function createReconciler(store: Store, daemon: DaemonQueue, emit: Emit, 
     }
   }
   };
+}
+
+/**
+ * The done outcome a qitem's closure proves, or null when it proves nothing and the job stays in
+ * flight. Only the seat's own terminal closure counts: the exact qitem, `done`, closed by its
+ * destination with `transport:v1` identity, where that closing transition is the latest one (no
+ * reopen, handoff or later state since). Then:
+ * - `no-follow-on` with no target: `succeeded`;
+ * - `denied` with the target `rejected-by-checks`: `rejected-by-checks`. Upstream records `denied`
+ *   as "receiver rejected the work" with the reason as its target (hot-potato-enforcer.ts); the
+ *   target text is this fork's convention for the seat's checks rejecting the result.
+ * Anything else, including the non-terminal qitem state `failed` and administrative closures,
+ * proves nothing. This is logical completion reported by the seat, not proof that Pi stopped.
+ */
+export function seatOutcome(item: QueueObservation): DoneOutcome | null {
+  if (item.state !== "done" || item.transitions.at(-1)?.state !== "done") return null;
+  let first = item.transitions.length - 1;
+  while (first > 0 && item.transitions[first - 1]!.state === "done") first--;
+  const closing = item.transitions[first]!;
+  if (closing.transitionId !== item.closingTransition?.transitionId || closing.actorSession !== item.destinationSession || closing.identityProvenance !== "transport:v1") return null;
+  const reason = item.closureReason ?? null;
+  const target = item.closureTarget ?? null;
+  if (closing.closureReason !== reason || closing.closureTarget !== target) return null;
+  if (reason === "no-follow-on" && target === null) return "succeeded";
+  if (reason === "denied" && target === "rejected-by-checks") return "rejected-by-checks";
+  return null;
 }

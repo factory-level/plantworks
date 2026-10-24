@@ -211,7 +211,20 @@ no attempt is used. After three consecutive calls cut at the deadline the worker
 `call-deadline`; it doesn't fail or release the broker job (see fail-closed above).
 
 `plantworks pw worker run --team <team> --seat <session>` claims one job at a time and polls its
-broker record. It asks for another job only after the broker reports `done`. A worker process
+broker record. It asks for another job only after the broker reports `done`. A broker `failed`,
+`cancelled` or `retried` isn't the seat's completion, so the worker logs it and keeps waiting.
+**On start**, before any claim, the worker asks the broker what its seat still holds
+(`GET /seats/{seat}/drain`: claimed, running, or queued under its reservation, of any age) and waits
+on each of those jobs first. While it can't read that answer it claims nothing. So a restart can't
+skip past held work.
+
+**Timeout.** Each job's `timeoutSeconds` (the envelope's, else the class's) runs from when the
+worker learns of the job, so after a restart it comes late, never early. At the timeout the worker
+cuts the seat's model calls off at the governor: calls in flight are aborted and new ones get 403.
+That stops no Pi process or tool, so the job stays as the broker has it, its slot stays held, and
+no next job is claimed. When the broker later records `done`, calls are let through again. The
+broker job is not failed on a timeout: no runner-authored evidence that execution stopped exists
+(`runner-state.json` records only a Pi process exit). A worker process
 exit, timeout, unreadable qitem, daemon outage, generic failure/cancellation, administrative
 closure, or `handed-off` state does not release the slot. The broker reconciler polls persisted
 qitem IDs in rotating batches of 16 every two seconds and can continue after a worker or broker
@@ -219,10 +232,19 @@ restart. It reports an unreadable qitem at most once per minute and keeps only 1
 timestamps in memory.
 
 The reconciler treats a qitem as logically complete only when the exact stored qitem ID is
-returned as `done` with `no-follow-on`, has no closure target, and its closing transition matches
-the latest terminal transition with actor equal to the qitem destination and
-`identityProvenance: transport:v1`. It first confirms any matching queued reservation, then
-records broker `running` and `done`. Ambiguous evidence stays in flight. This is authenticated
+returned as `done`, its closing transition matches the latest terminal transition with actor equal
+to the qitem destination and `identityProvenance: transport:v1`, and the closure is one of:
+- `no-follow-on` with no closure target: broker `done {outcome: succeeded}`;
+- `denied` with the closure target `rejected-by-checks`: broker `done {outcome: rejected-by-checks}`.
+  Upstream records `denied` as "receiver rejected the work" with the reason text as the target. The
+  exact target `rejected-by-checks` is this fork's convention for a seat whose checks rejected the
+  result; `denied` with any other text proves nothing.
+
+It first confirms any matching queued reservation, then records broker `running` and `done`.
+Nothing maps to broker `failed`: the qitem state `failed` isn't a terminal closure upstream (only
+`done` and `handed-off` are), so even a seat-authored `failed` leaves the job in flight, holding its
+slot. A failure the seat reports that way is a known gap: it needs a terminal failure closure from
+the seat that is as strong as `done`. Ambiguous evidence stays in flight. This is authenticated
 logical completion; it does not prove the Pi process exited or bound physical execution
 concurrency. An unresolved job can therefore hold a slot indefinitely and requires an operator to
 verify that work stopped before any manual recovery.
