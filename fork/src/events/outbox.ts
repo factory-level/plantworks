@@ -3,7 +3,7 @@ import type { JobRow, Store, TransitionRow } from "../broker/store.ts";
 import { jobStateEvent, type CloudEvent } from "./job-state.ts";
 
 const BATCH_SIZE = 100;
-const MAX_DELIVERY_CYCLES = 3;
+const MAX_RETRY_DELAY_MS = 5 * 60_000;
 
 function summaryOf(task: { prompt: string; title?: string }): string {
   if (task.title) return task.title;
@@ -35,7 +35,7 @@ export function transitionColumns(store: Store, transition: TransitionRow): Reco
   return Object.assign({}, ...rows.map((row) => JSON.parse(row.columns)));
 }
 
-/** Delivers each team's committed transitions independently; a poison event is parked after a bounded retry budget. */
+/** Delivers each team's committed transitions independently; only permanent failures are parked. */
 export function createJobStateOutbox(
   store: Store,
   deliver: (team: string, event: CloudEvent) => Promise<void>,
@@ -51,23 +51,28 @@ export function createJobStateOutbox(
       transition_id INTEGER NOT NULL,
       attempts INTEGER NOT NULL,
       last_error TEXT NOT NULL,
+      next_attempt_at INTEGER NOT NULL DEFAULT 0,
+      logged INTEGER NOT NULL DEFAULT 0,
       parked INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (team, transition_id)
     );
   `);
+  const failureColumns = new Set((store.db.prepare("PRAGMA table_info(event_outbox_failures)").all() as { name: string }[]).map((column) => column.name));
+  if (!failureColumns.has("next_attempt_at")) store.db.exec("ALTER TABLE event_outbox_failures ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0");
+  if (!failureColumns.has("logged")) store.db.exec("ALTER TABLE event_outbox_failures ADD COLUMN logged INTEGER NOT NULL DEFAULT 0");
   const readCursor = store.db.prepare("SELECT delivered_through FROM event_outbox_team_cursor WHERE team = ?");
   const addCursor = store.db.prepare("INSERT OR IGNORE INTO event_outbox_team_cursor (team, delivered_through) VALUES (?, 0)");
   const advance = store.db.prepare("UPDATE event_outbox_team_cursor SET delivered_through = ? WHERE team = ? AND delivered_through = ?");
-  const failed = store.db.prepare("SELECT attempts, parked FROM event_outbox_failures WHERE team = ? AND transition_id = ?");
-  const recordFailure = store.db.prepare(`INSERT INTO event_outbox_failures (team, transition_id, attempts, last_error, parked)
-    VALUES (?, ?, 1, ?, 0) ON CONFLICT(team, transition_id) DO UPDATE SET attempts = attempts + 1, last_error = excluded.last_error`);
+  const failed = store.db.prepare("SELECT attempts, parked, next_attempt_at, logged FROM event_outbox_failures WHERE team = ? AND transition_id = ?");
+  const recordFailure = store.db.prepare(`INSERT INTO event_outbox_failures (team, transition_id, attempts, last_error, next_attempt_at, logged, parked)
+    VALUES (?, ?, 1, ?, ?, ?, ?) ON CONFLICT(team, transition_id) DO UPDATE SET attempts = attempts + 1, last_error = excluded.last_error, next_attempt_at = excluded.next_attempt_at, logged = MAX(event_outbox_failures.logged, excluded.logged), parked = excluded.parked`);
   const park = store.db.prepare("UPDATE event_outbox_failures SET parked = 1 WHERE team = ? AND transition_id = ?");
   const clearFailure = store.db.prepare("DELETE FROM event_outbox_failures WHERE team = ? AND transition_id = ?");
   let running: Promise<void> | undefined;
 
   async function drain() {
     const teams = store.db.prepare("SELECT DISTINCT team FROM jobs ORDER BY team").all() as { team: string }[];
-    for (const { team } of teams) {
+    await Promise.all(teams.map(async ({ team }) => {
       addCursor.run(team);
       for (;;) {
         const cursor = (readCursor.get(team) as { delivered_through: number }).delivered_through;
@@ -84,6 +89,7 @@ export function createJobStateOutbox(
             blocked = true;
             break;
           }
+          if (prior && prior.next_attempt_at > Date.now()) { blocked = true; break; }
           const job = store.get(transition.job_id);
           if (!job) throw new Error(`transition ${transition.id} has no job ${transition.job_id}`);
           const event = eventForTransition(job, transition, transitionColumns(store, transition));
@@ -93,15 +99,20 @@ export function createJobStateOutbox(
             if (advance.run(transition.id, team, currentCursor).changes !== 1) { blocked = true; break; }
             currentCursor = transition.id;
           } catch (error) {
-            recordFailure.run(team, transition.id, (error as Error).message);
-            const state = failed.get(team, transition.id) as { attempts: number; parked: number };
-            if (state.attempts >= MAX_DELIVERY_CYCLES) {
+            const permanent = error instanceof Error && "permanent" in error && error.permanent === true;
+            const attempts = (prior?.attempts ?? 0) + 1;
+            const shouldLog = permanent || !prior?.logged;
+            const nextAttemptAt = permanent ? 0 : Date.now() + Math.min(MAX_RETRY_DELAY_MS, 1000 * 2 ** Math.min(attempts - 1, 9));
+            recordFailure.run(team, transition.id, (error as Error).message, nextAttemptAt, shouldLog ? 1 : 0, permanent ? 1 : 0);
+            if (shouldLog) log(permanent
+              ? `plantworks event parked after permanent delivery failure: ${event.id}`
+              : `plantworks event delivery deferred: ${event.id}: ${(error as Error).message}`);
+            if (permanent) {
               const commitPark = store.db.transaction(() => {
                 park.run(team, transition.id);
                 advance.run(transition.id, team, currentCursor);
               });
               commitPark();
-              log(`plantworks event parked after ${state.attempts} delivery cycles: ${event.id}`);
               blocked = true;
               break;
             }
@@ -109,13 +120,13 @@ export function createJobStateOutbox(
             break;
           }
           // Cursor advances are monotonic; read the value for the next row in this batch.
-          // Each team is drained serially, while other teams continue after this one pauses.
+          // One delivery per team is in flight, while teams drain independently.
           const next = readCursor.get(team) as { delivered_through: number };
           if (next.delivered_through !== transition.id) { blocked = true; break; }
         }
         if (blocked) break;
       }
-    }
+    }));
   }
 
   function pump(): Promise<void> {

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { openStore } from "../broker/store.ts";
+import { DeliveryError } from "./job-state.ts";
 import { createJobStateOutbox } from "./outbox.ts";
 
 test("replays the first unacknowledged transition after broker restart with a stable event id", async () => {
@@ -39,6 +40,7 @@ test("replays the first unacknowledged transition after broker restart with a st
 
   const restarted = openStore(path);
   try {
+    await new Promise((resolve) => setTimeout(resolve, 1100));
     const replayed: { state: unknown; id: string }[] = [];
     const outbox = createJobStateOutbox(restarted, async (_team, event) => {
       replayed.push({ state: event.data.state, id: event.id });
@@ -52,7 +54,7 @@ test("replays the first unacknowledged transition after broker restart with a st
   }
 });
 
-test("a failing team's poison event is bounded and cannot block another team's cursor", async () => {
+test("a permanent failure is parked and cannot block another team's cursor", async () => {
   const store = openStore(":memory:");
   try {
     store.insert({ jobId: "kb-a-card1-a1", team: "a", task: { prompt: "a" } }, "quick", "queued");
@@ -62,20 +64,77 @@ test("a failing team's poison event is bounded and cannot block another team's c
     const logs: string[] = [];
     const outbox = createJobStateOutbox(store, async (team, event) => {
       attempts.set(team, (attempts.get(team) ?? 0) + 1);
-      if (team === "a") throw new Error("HTTP 400");
+      if (team === "a") throw new DeliveryError("HTTP 400, not retried", event, 1, true);
       delivered.push(event.id);
     }, (line) => logs.push(line));
 
     await outbox.pump();
     assert.deepEqual(delivered, ["kb-b-card1-a1:2"]);
-    await outbox.pump();
-    await outbox.pump();
     assert.deepEqual(delivered, ["kb-b-card1-a1:2"]);
-    assert.equal(attempts.get("a"), 3);
+    assert.equal(attempts.get("a"), 1);
     assert.equal(logs.length, 1);
-    assert.match(logs[0]!, /event parked after 3 delivery cycles: kb-a-card1-a1:1/);
+    assert.match(logs[0]!, /event parked after permanent delivery failure: kb-a-card1-a1:1/);
     const parked = store.db.prepare("SELECT attempts, parked FROM event_outbox_failures WHERE team = 'a'").get() as { attempts: number; parked: number };
-    assert.deepEqual(parked, { attempts: 3, parked: 1 });
+    assert.deepEqual(parked, { attempts: 1, parked: 1 });
+  } finally {
+    store.close();
+  }
+});
+
+test("transient failures stay replayable, back off, and log once until recovery", async () => {
+  const store = openStore(":memory:");
+  try {
+    store.insert({ jobId: "kb-a-card1-a1", team: "a", task: { prompt: "a" } }, "quick", "queued");
+    let recovered = false;
+    let calls = 0;
+    const logs: string[] = [];
+    const outbox = createJobStateOutbox(store, async (_team, event) => {
+      calls++;
+      if (!recovered) throw new DeliveryError("HTTP 503 after 8 attempts", event, 8);
+    }, (line) => logs.push(line));
+
+    await outbox.pump();
+    const failure = store.db.prepare("SELECT attempts, parked, next_attempt_at, logged FROM event_outbox_failures WHERE team = 'a'").get() as { attempts: number; parked: number; next_attempt_at: number; logged: number };
+    assert.equal(failure.attempts, 1);
+    assert.equal(failure.parked, 0);
+    assert.ok(failure.next_attempt_at > Date.now());
+    assert.equal(failure.logged, 1);
+    await outbox.pump();
+    assert.equal(calls, 1, "the scheduled backoff suppresses an early retry");
+    assert.equal(logs.length, 1);
+
+    recovered = true;
+    store.db.prepare("UPDATE event_outbox_failures SET next_attempt_at = 0 WHERE team = 'a'").run();
+    await outbox.pump();
+    assert.equal(calls, 2);
+    assert.equal(store.db.prepare("SELECT 1 FROM event_outbox_failures WHERE team = 'a'").get(), undefined);
+    assert.equal((store.db.prepare("SELECT delivered_through FROM event_outbox_team_cursor WHERE team = 'a'").get() as { delivered_through: number }).delivered_through, 1);
+  } finally {
+    store.close();
+  }
+});
+
+test("a slow team does not delay another team's delivery", async () => {
+  const store = openStore(":memory:");
+  try {
+    store.insert({ jobId: "kb-a-card1-a1", team: "a", task: { prompt: "a" } }, "quick", "queued");
+    store.insert({ jobId: "kb-b-card1-a1", team: "b", task: { prompt: "b" } }, "quick", "queued");
+    let releaseA!: () => void;
+    let markB!: () => void;
+    const bStarted = new Promise<void>((resolve) => { markB = resolve; });
+    const outbox = createJobStateOutbox(store, async (team, event) => {
+      if (team === "a") {
+        await new Promise<void>((resolve) => { releaseA = resolve; });
+        throw new DeliveryError("HTTP 503 after 8 attempts", event, 8);
+      }
+      markB();
+    }, () => {});
+
+    const pumping = outbox.pump();
+    await bStarted;
+    assert.equal((store.db.prepare("SELECT delivered_through FROM event_outbox_team_cursor WHERE team = 'b'").get() as { delivered_through: number }).delivered_through, 2);
+    releaseA();
+    await pumping;
   } finally {
     store.close();
   }

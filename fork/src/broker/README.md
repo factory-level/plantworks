@@ -326,8 +326,8 @@ kept in the broker's SQLite file (`seat_drains`), so it survives a broker restar
 - Drain is per seat. There is no broker-wide drain, and a seat that is never drained or resumed
   explicitly keeps whatever state it last had. `/healthz` checks only the broker's own file, not
   the daemon.
-- Event delivery is in memory (PW-10). A broker that stops while an event is still retrying
-  loses that event. The job row is kept. The persistent outbox remains a follow-up.
+- Job-state event delivery uses a durable per-team outbox and resumes after broker restart.
+  Approval events remain in memory and can be lost if the broker stops while they are retrying.
 - Worker reconciliation does not capture the worker's output; until that reporting path exists, it
   stores `{text: null, artifacts: []}` after authenticated logical completion. It does not infer
   process exit.

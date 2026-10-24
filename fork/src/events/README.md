@@ -22,30 +22,31 @@
   `PLANTWORKS_CALLBACK_TOKEN_NAME` variable. It cannot address arbitrary broker or daemon
   environment variables. An unresolved reference stops broker startup; its value is never put in
   the event or error message. Without `events.auth`, callbacks remain unauthenticated as before.
-- **Order:** events go out one at a time per team, in transition order. Each team has an independent
-  durable cursor, so a failing callback does not hold up another team. Standalone emits are not
-  persisted.
+- **Order:** events go out one at a time per team, in transition order. Teams drain concurrently and
+  each has an independent durable cursor, so a slow or failing callback does not hold up another
+  team. Standalone emits are not persisted.
 - **Retries:** network errors, request timeouts (10 s), `408`, `429` and `5xx` are retried with
   exponential backoff (0.5 s doubling, capped at 30 s) or the consumer's `Retry-After`, capped
   the same way. Any other `3xx` or `4xx` is permanent and is not retried.
-- **Budget:** 8 HTTP attempts per emitter cycle; the durable outbox parks an event after 3 exhausted
-  cycles (at most 24 attempts), records the final error, and logs once. With default delays that is
-  at most about 3 minutes of backoff plus up to 4 minutes of request timeouts. Later events for that
-  team continue after the park. Other teams continue independently.
+- **Budget:** each emitter cycle makes up to 8 HTTP attempts. Permanent `3xx`/`4xx` failures are
+  parked immediately. Exhausted transient cycles remain pending and retry with a persisted,
+  exponentially growing delay capped at 5 minutes; the first failure per event is logged once.
+  Later events for that team wait behind the transient failure, while other teams continue.
 
 ### Restart behavior
 
 The broker stores every committed transition in `job_transitions`. After a restart it replays from
 each team's first unacknowledged row with the same event id. A successful delivery advances that
-team's cursor. A permanently failing event is recorded in `event_outbox_failures` and parked after
-the retry budget, allowing that team's later transitions to proceed. There is not yet an HTTP
-endpoint to replay a parked event. Delivery is at least once before a park, so consumers deduplicate
+team's cursor. A permanent failure is recorded in `event_outbox_failures` and parked, allowing that
+team's later transitions to proceed. There is not yet an HTTP endpoint to replay a parked event.
+Transient failures remain pending and retry after a growing delay until the consumer recovers.
+Delivery is at least once before a park, so consumers deduplicate
 by event id. When enabling the outbox on a broker file that already has transition history, those
 existing rows are replayed on first start. Approval events remain in-memory and are not replayed.
 Standalone `pw job run` has no broker transition history and only tracks its local transitions.
 
-When a callback returns a permanent `3xx`/`4xx`, or the retry budget runs out, the outbox retries
-the next pump cycle until the three-cycle budget is exhausted, then records and logs the park once.
+When a callback returns a permanent `3xx`/`4xx`, the outbox records and logs the park once. A
+transient exhausted cycle is recorded and logged once, then retried after its persisted delay.
 
 Consumers must tolerate duplicates and should process events in transition order. The standalone
 runner's local event counter is not a durable broker sequence; reusing the same `jobId` across

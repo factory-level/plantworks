@@ -71,10 +71,12 @@ export interface EmitterOptions {
 export class DeliveryError extends Error {
   readonly event: CloudEvent;
   readonly attempts: number;
-  constructor(message: string, event: CloudEvent, attempts: number) {
+  readonly permanent: boolean;
+  constructor(message: string, event: CloudEvent, attempts: number, permanent = false) {
     super(message);
     this.event = event;
     this.attempts = attempts;
+    this.permanent = permanent;
   }
 }
 
@@ -122,7 +124,7 @@ export function createEmitter(opts: EmitterOptions) {
         await res.body?.cancel();
         if (res.ok) return;
         why = `HTTP ${res.status}`;
-        if (!retryable(res.status)) throw new DeliveryError(`${event.id}: ${why}, not retried`, event, attempt);
+        if (!retryable(res.status)) throw new DeliveryError(`${event.id}: ${why}, not retried`, event, attempt, true);
         wait = retryAfterMs(res.headers.get("retry-after"));
       } catch (err) {
         if (err instanceof DeliveryError) throw err;
