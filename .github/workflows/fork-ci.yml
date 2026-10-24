@@ -71,6 +71,11 @@ jobs:
             exit 1
           fi
           wait "$pid"
+      # A per-test timeout (5 min) can end the suite before the watchdog, so the linger reports are
+      # printed whenever the tests fail, not only when the watchdog fires.
+      - name: Linger reports (on failure)
+        if: failure()
+        run: for f in "$RUNNER_TEMP"/linger/*.json; do [ -f "$f" ] && { echo "--- live handles, $f"; cat "$f"; }; done; true
       - name: Licence headers
         working-directory: fork
         run: npm run check:headers
