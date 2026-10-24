@@ -29,6 +29,9 @@ jobs:
     timeout-minutes: 150
     env:
       GH_TOKEN: ${{ github.token }}
+      # The job adds an `upstream` remote, and gh treats that remote as the default repository.
+      # Pin every gh call to this fork, so nothing ever dispatches or opens a PR upstream.
+      GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
         with:
