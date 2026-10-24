@@ -4,11 +4,11 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TmuxAdapter } from "../../../packages/daemon/dist/adapters/tmux.js";
@@ -29,7 +29,7 @@ process.env.TMUX_TMPDIR = mkdtempSync("/tmp/pw32-"); // tmux socket paths are le
 /** The fixture daemon's whole environment: built from scratch, never copied from this process. */
 function fixtureEnv(home: string, port: number): Record<string, string> {
   return {
-    PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, TMUX_TMPDIR: process.env.TMUX_TMPDIR!,
+    PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, TMPDIR: tmpdir(), TMUX_TMPDIR: process.env.TMUX_TMPDIR!,
     OPENRIG_HOME: home, OPENRIG_DB: join(home, "openrig.sqlite"), OPENRIG_PORT: String(port),
     OPENRIG_NO_KERNEL: "1", OPENRIG_BIND_HOST: "127.0.0.1",
   };
@@ -155,41 +155,57 @@ test("end to end: startServer with the router; the daemon lists the remote seat,
   }
 });
 
-test("the fixture daemon refuses an inherited OpenRig identity: a leaked DB path or daemon URL is never opened or contacted", { skip, timeout: 60_000 }, async () => {
-  const home = mkdtempSync(join(tmpdir(), "pw32-home-"));
-  const elsewhere = mkdtempSync(join(tmpdir(), "pw32-sentinel-")); // stands in for a live seat's home
+test("the fixture daemon refuses an inherited identity or a database outside its own temp home: nothing outside is opened or contacted", { skip, timeout: 120_000 }, async () => {
+  const elsewhere = mkdtempSync(join(tmpdir(), "pw32-sentinel-")); // stands in for a live seat's home: must stay empty
+  const homes: string[] = [];
+  const freshHome = () => { const h = mkdtempSync(join(tmpdir(), "pw32-home-")); homes.push(h); return h; };
   const hits: string[] = [];
   const sentinel = http.createServer((q, r) => { hits.push(`${q.method} ${q.url}`); r.writeHead(503).end(); });
   await new Promise<void>((r) => sentinel.listen(0, "127.0.0.1", () => r()));
   const sentinelUrl = `http://127.0.0.1:${(sentinel.address() as { port: number }).port}`;
   const fixture = fileURLToPath(new URL("./fixtures/daemon-with-router.mjs", import.meta.url));
-  const leaks: Array<Record<string, string>> = [
-    { OPENRIG_DB: join(elsewhere, "openrig.sqlite") },
-    { OPENRIG_URL: sentinelUrl }, { OPENRIG_SESSION_NAME: "sentinel@seat" }, { OPENRIG_NODE_ID: "SENTINEL" },
-    { OPENRIG_ACTIVITY_HOOK_TOKEN: "sentinel-token" }, { TMUX: "/nonexistent/sentinel,1,0" },
-  ];
+  const target = join(elsewhere, "openrig.sqlite");
+  // Each case: the environment overrides on top of a clean fixtureEnv for a fresh home.
+  const cases: Record<string, (home: string) => Record<string, string>> = {
+    "leaked DB path": () => ({ OPENRIG_DB: target }),
+    "leaked daemon URL": () => ({ OPENRIG_URL: sentinelUrl }),
+    "leaked session name": () => ({ OPENRIG_SESSION_NAME: "sentinel@seat" }),
+    "leaked node id": () => ({ OPENRIG_NODE_ID: "SENTINEL" }),
+    "leaked hook token": () => ({ OPENRIG_ACTIVITY_HOOK_TOKEN: "sentinel-token" }),
+    "leaked TMUX": () => ({ TMUX: "/nonexistent/sentinel,1,0" }),
+    "traversal out of the home": (home) => ({ OPENRIG_DB: join(home, "..", basename(elsewhere), "openrig.sqlite") }),
+    "symlinked directory in the home": (home) => { symlinkSync(elsewhere, join(home, "sub")); return { OPENRIG_DB: join(home, "sub", "openrig.sqlite") }; },
+    "symlinked database file": (home) => { symlinkSync(target, join(home, "openrig.sqlite")); return {}; },
+    "symlinked WAL file": (home) => { symlinkSync(join(elsewhere, "wal"), join(home, "openrig.sqlite-wal")); return {}; },
+    "symlinked home": (home) => { const link = join(home, "home-link"); symlinkSync(elsewhere, link); return { OPENRIG_HOME: link, OPENRIG_DB: join(link, "openrig.sqlite"), HOME: link }; },
+  };
   try {
-    for (const leak of leaks) {
+    for (const [name, make] of Object.entries(cases)) {
+      const home = freshHome();
+      const before = new Set(readdirSync(home));
+      const env = { ...fixtureEnv(home, 1), ...make(home) };
+      const created = readdirSync(home).filter((f) => !before.has(f));
       const run = await new Promise<{ code: number | null; stderr: string }>((resolve) => {
-        const child = spawn(process.execPath, [fixture, "1", "l", "r", "rs-x"], { env: { ...fixtureEnv(home, 1), ...leak }, stdio: ["ignore", "ignore", "pipe"] });
+        const child = spawn(process.execPath, [fixture, "1", "l", "r", "rs-x"], { env, stdio: ["ignore", "ignore", "pipe"] });
         let stderr = "";
         child.stderr.on("data", (d) => (stderr += d));
         child.once("exit", (code) => resolve({ code, stderr }));
       });
-      assert.equal(run.code, 2, `${Object.keys(leak)[0]}: ${run.stderr}`);
-      assert.match(run.stderr, /refusing to start/);
+      assert.equal(run.code, 2, `${name}: ${run.stderr}`);
+      assert.match(run.stderr, /refusing to start/, name);
+      assert.deepEqual(readdirSync(home).sort(), created.sort(), `${name}: the refused fixture wrote nothing to its home`);
+      assert.deepEqual(readdirSync(elsewhere), [], `${name}: nothing was written outside the home`);
     }
-    assert.deepEqual(readdirSync(elsewhere), [], "the leaked DB path was never created");
-    assert.deepEqual(readdirSync(home), [], "the fixture refused before the daemon touched its own home");
     assert.deepEqual(hits, [], "the leaked daemon URL was never contacted");
-    // and the environment the end-to-end test uses carries none of the parent's identity, whatever the parent holds
+    // the environment the end-to-end test uses carries none of the parent's identity, whatever the parent holds
+    const home = freshHome();
     const env = fixtureEnv(home, 1);
     assert.deepEqual(Object.keys(env).filter((k) => /^(OPENRIG_|TMUX)/.test(k)).sort(),
       ["OPENRIG_BIND_HOST", "OPENRIG_DB", "OPENRIG_HOME", "OPENRIG_NO_KERNEL", "OPENRIG_PORT", "TMUX_TMPDIR"]);
-    assert.ok(env.OPENRIG_DB.startsWith(`${home}/`));
+    assert.equal(env.OPENRIG_DB, join(home, "openrig.sqlite"));
   } finally {
     sentinel.close();
-    rmSync(home, { recursive: true, force: true });
+    for (const h of homes) rmSync(h, { recursive: true, force: true });
     rmSync(elsewhere, { recursive: true, force: true });
   }
 });
