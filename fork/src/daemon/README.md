@@ -8,9 +8,10 @@ already reads, before any upstream module loads. Nothing outside `fork/` changes
 
 | Setting | Plantworks | Upstream `rig` | Overridden by |
 |---|---|---|---|
-| Home | `~/.plantworks` | `~/.openrig` | `OPENRIG_HOME` |
+| Home | `~/.plantworks` | `~/.openrig` | `PLANTWORKS_HOME`, then `OPENRIG_HOME`. `PLANTWORKS_HOME` wins when both are set: inside an OpenRig seat `OPENRIG_HOME` is that seat's own home. With `PLANTWORKS_HOME` set, the inherited `OPENRIG_URL`, `OPENRIG_HOST` and `OPENRIG_PORT` (and their `RIGGED_` names) are ignored with a notice, even an intentional port: it comes from the selected home's `daemon.port`, else 7533. So are the database, transcripts, shared-docs, slices and dogfood-evidence paths that resolve outside that home, through any symlink |
 | Port | 7533 | 7433 | `OPENRIG_PORT`, `daemon.port` in the home's config file, `--port` |
 | Bind | `127.0.0.1` only | loopback, plus the Tailscale interface when one is detected | in precedence order: `daemon start --host` (the last one wins), `OPENRIG_BIND_HOST`, `daemon.host` in the config file |
+| A second daemon on a database another daemon holds (`daemon.db_conflict`) | `stop`: it exits before opening the database | `warn` | `OPENRIG_DAEMON_DB_CONFLICT`, or `daemon.dbConflict` in the home's config file. `daemon start --allow-db-conflict` lets one start through |
 | Kernel (Claude/Codex operator and advisor) | always off (`OPENRIG_NO_KERNEL=1`) | on | not overridable |
 | Start-time bearer check (not request auth; see Limitations) | a token must be set before any non-loopback bind, Tailscale addresses included | required for public binds; Tailscale is exempt | `OPENRIG_AUTH_BEARER_TOKEN` |
 
@@ -25,6 +26,11 @@ neither of them on `PATH`. Pi seats are started later by the broker and the work
 PW-21).
 
 ## Defaults open for review
+
+- A database conflict stops a start by default. Upstream confirms a conflict only when `lsof`
+  shows another process holding the file and that daemon's `daemon.json` and `/healthz` agree.
+  Without `lsof` the holder is unknown and nothing stops. The runtime image doesn't install
+  `lsof` (`fork/container/Dockerfile`), so there the default can't detect a holder.
 
 - The port is 7533, so the daemon can run next to an OpenRig daemon on 7433.
 - The kernel is always off. Plantworks never wants the operator or advisor seats.

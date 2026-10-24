@@ -2,7 +2,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import http from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,7 +17,70 @@ test("defaults: fork home and port, loopback-only bind, kernel always off", () =
   const env: Record<string, string | undefined> = { OPENRIG_NO_KERNEL: "0" };
   applyHomeDefaults(env);
   applyDaemonDefaults(env, argv("daemon", "start"));
-  assert.deepEqual(env, { OPENRIG_HOME: DAEMON_DEFAULTS.home, OPENRIG_NO_KERNEL: "1", OPENRIG_PORT: "7533", OPENRIG_BIND_HOST: "127.0.0.1" });
+  assert.deepEqual(env, { OPENRIG_HOME: DAEMON_DEFAULTS.home, OPENRIG_NO_KERNEL: "1", OPENRIG_PORT: "7533", OPENRIG_DAEMON_DB_CONFLICT: "stop", OPENRIG_BIND_HOST: "127.0.0.1" });
+});
+
+test("home: PLANTWORKS_HOME wins over OPENRIG_HOME; OPENRIG_HOME is the fallback; the fork home is the default", () => {
+  const home = (env: Record<string, string | undefined>) => { applyHomeDefaults(env); return env.OPENRIG_HOME; };
+  // Inside an OpenRig seat OPENRIG_HOME is always the seat's live home: an explicit Plantworks home must win over it.
+  assert.equal(home({ PLANTWORKS_HOME: "/srv/pw", OPENRIG_HOME: "/seat/.openrig" }), "/srv/pw");
+  assert.equal(home({ PLANTWORKS_HOME: "/srv/pw" }), "/srv/pw");
+  assert.equal(home({ OPENRIG_HOME: "/srv/or" }), "/srv/or");
+  assert.equal(home({}), DAEMON_DEFAULTS.home);
+  assert.equal(home({ PLANTWORKS_HOME: "  ", OPENRIG_HOME: "/srv/or" }), "/srv/or", "a blank PLANTWORKS_HOME is unset");
+});
+
+test("with PLANTWORKS_HOME set, a seat's daemon URL, host, port and outside database are dropped; without it nothing is", () => {
+  const seat = { OPENRIG_HOME: "/seat/.openrig", OPENRIG_DB: "/seat/.openrig/openrig.sqlite", OPENRIG_PORT: "7433", OPENRIG_URL: "http://127.0.0.1:7433",
+    RIGGED_URL: "http://127.0.0.1:7433", OPENRIG_HOST: "127.0.0.1", RIGGED_DB: "/seat/old.sqlite", OPENRIG_SESSION_NAME: "dev-x@rig",
+    OPENRIG_TRANSCRIPTS_PATH: "/seat/.openrig/transcripts", OPENRIG_WORK_ROOT: "/work/project" };
+  const env: Record<string, string | undefined> = { ...seat, PLANTWORKS_HOME: "/srv/pw" };
+  const dropped = applyHomeDefaults(env);
+  assert.deepEqual(dropped.sort(), ["OPENRIG_DB", "OPENRIG_HOST", "OPENRIG_PORT", "OPENRIG_TRANSCRIPTS_PATH", "OPENRIG_URL", "RIGGED_DB", "RIGGED_URL"]);
+  assert.equal(env.OPENRIG_WORK_ROOT, "/work/project", "a read-only project lookup is left alone");
+  for (const k of dropped) assert.equal(env[k], undefined, k);
+  assert.equal(env.OPENRIG_HOME, "/srv/pw");
+  assert.equal(env.OPENRIG_SESSION_NAME, "dev-x@rig", "identity is not a daemon locator and is left alone");
+  applyDaemonDefaults(env, argv("daemon", "start"));
+  assert.equal(env.OPENRIG_PORT, "7533", "the port falls back to the Plantworks default, not the seat's");
+
+  const inside: Record<string, string | undefined> = { PLANTWORKS_HOME: "/srv/pw", OPENRIG_DB: "/srv/pw/data/pw.sqlite", OPENRIG_TRANSCRIPTS_PATH: "/srv/pw/t" };
+  assert.deepEqual(applyHomeDefaults(inside), []);
+  assert.equal(inside.OPENRIG_DB, "/srv/pw/data/pw.sqlite", "a database inside the selected home is kept");
+
+  // A symlink inside the home that leads out of it is outside, for the database and its directory alike.
+  const home = mkdtempSync(join(tmpdir(), "pw-home-"));
+  const live = mkdtempSync(join(tmpdir(), "pw-live-"));
+  try {
+    writeFileSync(join(live, "openrig.sqlite"), "");
+    symlinkSync(join(live, "openrig.sqlite"), join(home, "linked.sqlite"));
+    symlinkSync(live, join(home, "linked-dir"));
+    for (const db of [join(home, "linked.sqlite"), join(home, "linked-dir", "openrig.sqlite"), join(home, "linked-dir", "new.sqlite")]) {
+      assert.deepEqual(applyHomeDefaults({ PLANTWORKS_HOME: home, OPENRIG_DB: db }), ["OPENRIG_DB"], db);
+    }
+    assert.deepEqual(applyHomeDefaults({ PLANTWORKS_HOME: home, OPENRIG_DB: join(home, "real", "pw.sqlite") }), [], "a not-yet-created path inside is kept");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(live, { recursive: true, force: true });
+  }
+  assert.deepEqual(applyHomeDefaults({ PLANTWORKS_HOME: "/srv/pw", OPENRIG_DB: "/srv/pw/../or/x.sqlite" }), ["OPENRIG_DB"], "a traversal out of the home is outside it");
+
+  const plain: Record<string, string | undefined> = { ...seat };
+  assert.deepEqual(applyHomeDefaults(plain), [], "without PLANTWORKS_HOME the OpenRig variables are the user's choice");
+  assert.equal(plain.OPENRIG_DB, seat.OPENRIG_DB);
+});
+
+test("db conflict: stop by default; an explicit env or home-config choice is kept", () => {
+  const policy = (env: Record<string, string | undefined>, file = {}) => { applyDaemonDefaults(env, argv("daemon", "start"), file); return env.OPENRIG_DAEMON_DB_CONFLICT; };
+  assert.equal(policy({}), "stop");
+  assert.equal(policy({ OPENRIG_DAEMON_DB_CONFLICT: "warn" }), "warn");
+  assert.equal(policy({}, { dbConflict: "warn" }), undefined, "a config-file value is left to upstream");
+  assert.equal(policy({}, { dbConflict: "stop" }), undefined);
+  assert.equal(policy({ OPENRIG_DAEMON_DB_CONFLICT: " " }), "stop", "a blank value is unset");
+  // The one-boot escape is upstream's own and passes through untouched.
+  const escape: Record<string, string | undefined> = { OPENRIG_ALLOW_DB_CONFLICT: "1" };
+  applyDaemonDefaults(escape, argv("daemon", "start"));
+  assert.equal(escape.OPENRIG_ALLOW_DB_CONFLICT, "1");
 });
 
 test("explicit home, port and config-file values win over the defaults", () => {
@@ -101,6 +165,85 @@ test("plantworks daemon start boots a no-kernel loopback daemon in the fork home
     assert.equal(stopped.code, 0, stopped.stderr);
     try { execFileSync("tmux", ["kill-server"], { env, stdio: "ignore" }); } catch { /* no server */ }
     rmSync(sock, { recursive: true, force: true });
+  }
+});
+
+test("PLANTWORKS_HOME with a seat's daemon variables never reaches that daemon or its database", { skip: !hasTmux && "tmux not installed", timeout: 120_000 }, async () => {
+  const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
+  const root = mkdtempSync(join(tmpdir(), "pw-home-"));
+  const seat = mkdtempSync(join(tmpdir(), "pw-seat-")); // a seat's live home: must stay empty
+  const sock = mkdtempSync("/tmp/pwt-");
+  const hits: string[] = [];
+  const liveDaemon = http.createServer((q, res) => { hits.push(`${q.method} ${q.url}`); res.writeHead(503).end(); });
+  await new Promise<void>((r) => liveDaemon.listen(0, "127.0.0.1", () => r()));
+  const livePort = (liveDaemon.address() as { port: number }).port;
+  const home = join(root, "pw");
+  const port = await freePort();
+  mkdirSync(home);
+  writeFileSync(join(home, "config.json"), JSON.stringify({ daemon: { port } }));
+  const env = { PATH: `/usr/bin:/bin:${join(process.execPath, "..")}`, HOME: root, TMUX_TMPDIR: sock, PLANTWORKS_HOME: home,
+    OPENRIG_HOME: seat, OPENRIG_DB: join(seat, "openrig.sqlite"), OPENRIG_PORT: String(livePort), OPENRIG_URL: `http://127.0.0.1:${livePort}` };
+  const pw = (...args: string[]) => promisify(execFile)(process.execPath, [bin, ...args], { env })
+    .then((r) => ({ code: 0, ...r }), (e) => ({ code: e.code as number, stdout: e.stdout as string, stderr: e.stderr as string }));
+  const started = await pw("daemon", "start");
+  try {
+    assert.equal(started.code, 0, started.stderr);
+    assert.match(started.stderr, /PLANTWORKS_HOME is set, so the inherited .*OPENRIG_DB.* are ignored/);
+    assert.equal((await (await fetch(`http://127.0.0.1:${port}/healthz`)).json()).status, "ok", "the daemon listens on the home's configured port");
+    assert.ok(readdirSync(home).some((f) => f.endsWith(".sqlite")), "its database is in the selected home");
+    assert.equal((await pw("config", "get", "daemon.port")).stdout.trim(), String(port));
+  } finally {
+    await pw("daemon", "stop");
+    try { execFileSync("tmux", ["kill-server"], { env, stdio: "ignore" }); } catch { /* no server */ }
+    liveDaemon.close();
+    assert.deepEqual(hits, [], "the seat's daemon URL and port were never contacted");
+    assert.deepEqual(readdirSync(seat), [], "the seat's database and home were never written");
+    rmSync(sock, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+    rmSync(seat, { recursive: true, force: true });
+  }
+});
+
+test("home config resolves under PLANTWORKS_HOME, never the ambient OPENRIG_HOME, and a second daemon on the same database is refused", { skip: !hasTmux && "tmux not installed", timeout: 120_000 }, async () => {
+  const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
+  const root = mkdtempSync(join(tmpdir(), "pw-home-"));
+  const seat = mkdtempSync(join(tmpdir(), "pw-seat-")); // stands in for a seat's ambient (live) home: must stay empty
+  const sock = mkdtempSync("/tmp/pwt-");
+  const base = { PATH: `/usr/bin:/bin:${join(process.execPath, "..")}`, HOME: root, TMUX_TMPDIR: sock };
+  const pw = (env: Record<string, string>, ...args: string[]) => promisify(execFile)(process.execPath, [bin, ...args], { env: { ...base, ...env } })
+    .then((r) => ({ code: 0, ...r }), (e) => ({ code: e.code as number, stdout: e.stdout as string, stderr: e.stderr as string }));
+
+  const a = join(root, "a");
+  const b = join(root, "b");
+  mkdirSync(b);
+  writeFileSync(join(b, "config.json"), JSON.stringify({ daemon: { dbConflict: "warn" } }));
+  assert.equal((await pw({ PLANTWORKS_HOME: a, OPENRIG_HOME: seat }, "config", "get", "daemon.db_conflict")).stdout.trim(), "stop");
+  assert.equal((await pw({ PLANTWORKS_HOME: b, OPENRIG_HOME: seat }, "config", "get", "daemon.db_conflict")).stdout.trim(), "warn", "the selected home's config wins over the default");
+  assert.equal((await pw({ PLANTWORKS_HOME: a, OPENRIG_DAEMON_DB_CONFLICT: "warn" }, "config", "get", "daemon.db_conflict")).stdout.trim(), "warn");
+
+  // Two homes, one explicit database: the second daemon stops before opening it, unless told once to proceed.
+  // Plain OPENRIG_HOME homes: there an explicit OPENRIG_DB is the user's own choice and is kept.
+  const db = join(a, "shared.sqlite");
+  const [portA, portB, portC] = [await freePort(), await freePort(), await freePort()];
+  const first = { OPENRIG_HOME: a, OPENRIG_DB: db, OPENRIG_PORT: String(portA) };
+  const second = { OPENRIG_HOME: join(root, "c"), OPENRIG_DB: db, OPENRIG_PORT: String(portB) };
+  const started = await pw(first, "daemon", "start");
+  try {
+    assert.equal(started.code, 0, started.stderr);
+    const refused = await pw(second, "daemon", "start");
+    assert.notEqual(refused.code, 0, "the second daemon must not start");
+    assert.match(readFileSync(join(root, "c", "daemon.log"), "utf8"), /OPENRIG_DB_CONFLICT: .*daemon\.db_conflict=stop/);
+    const third = { ...second, OPENRIG_HOME: join(root, "d"), OPENRIG_PORT: String(portC) };
+    const escaped = await pw(third, "daemon", "start", "--allow-db-conflict");
+    assert.equal(escaped.code, 0, `upstream's one-boot escape still works: ${escaped.stderr}`);
+    await pw(third, "daemon", "stop");
+  } finally {
+    await pw(first, "daemon", "stop");
+    try { execFileSync("tmux", ["kill-server"], { env: base, stdio: "ignore" }); } catch { /* no server */ }
+    assert.deepEqual(readdirSync(seat), [], "the ambient OPENRIG_HOME was never written");
+    rmSync(sock, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+    rmSync(seat, { recursive: true, force: true });
   }
 });
 

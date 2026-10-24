@@ -6,7 +6,8 @@
 import { applyDaemonDefaults, applyHomeDefaults } from "../src/daemon/boot.ts";
 
 // Upstream modules read OPENRIG_HOME when they load, so they are imported only after this.
-applyHomeDefaults(process.env);
+const dropped = applyHomeDefaults(process.env);
+if (dropped.length) console.error(`plantworks: PLANTWORKS_HOME is set, so the inherited ${dropped.join(", ")} (another daemon's) are ignored`);
 const { ConfigStore } = await import("../../packages/cli/dist/config-store.js");
 const store = new ConfigStore();
 const fromFile = (key) => {
@@ -16,7 +17,7 @@ const fromFile = (key) => {
 
 let refused;
 try {
-  applyDaemonDefaults(process.env, process.argv, { port: fromFile("daemon.port"), host: fromFile("daemon.host") });
+  applyDaemonDefaults(process.env, process.argv, { port: fromFile("daemon.port"), host: fromFile("daemon.host"), dbConflict: fromFile("daemon.db_conflict") });
 } catch (e) {
   refused = e;
 }
