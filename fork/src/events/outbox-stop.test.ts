@@ -11,6 +11,7 @@ import { emitTeam } from "../team/command.ts";
 import { PHASE_0_1 } from "../team/spec.ts";
 import { API, loadTeams, startBroker } from "../broker/server.ts";
 import { openStore } from "../broker/store.ts";
+import { createEmitter, DeliveryAborted, jobStateEvent } from "./job-state.ts";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 
@@ -35,11 +36,12 @@ async function consumer(down: () => boolean) {
 
 const cls = { slots: 1, model: "qwen3.5:9b", context: { maxContextTokens: 16384, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1536, deadlineSeconds: 60 }, approval: "never", timeoutSeconds: 900, maxAttempts: 1 };
 const definition = {
-  team: "social-media", trains: 1, perTrain: { orchestrators: 1, workers: { quick: 1 } },
-  endpoint: { url: "${PLANTWORKS_LLM_URL}", slotBudgetKey: "social-media" }, defaultClass: "quick", classes: { quick: cls },
+  team: "social-media", trains: 1, perTrain: { orchestrators: 1, workers: { quick: 1, review: 1 } },
+  endpoint: { url: "${PLANTWORKS_LLM_URL}", slotBudgetKey: "social-media" }, defaultClass: "quick",
+  classes: { quick: cls, review: { ...cls, approval: "always", approvalTtlSeconds: 600 } },
   events: { callbackDefault: "${SOCIAL_MEDIA_CALLBACK}", approvalConsumer: "frontdoor" },
 };
-const platform = { ...PHASE_0_1, slotCaps: { "social-media": 1 } };
+const platform = { ...PHASE_0_1, slotCaps: { "social-media": 2 } };
 const JOB = "kb-social-media-t_stop0001-a1";
 
 async function until(what: string, ok: () => boolean, ms = 10_000) {
@@ -89,6 +91,64 @@ test("close() during a delivery's backoff resolves promptly, records nothing, an
     await broker.close();
     store.close();
   } finally {
+    await fd.close();
+  }
+});
+
+test("an aborted emit does not wait behind an unsignalled delivery still retrying on the same emitter", async () => {
+  // The unsignalled delivery ahead retries for about 1.8 s in all (100 ms doubling, capped at 300 ms),
+  // longer than the 1 s this test allows, and short enough to leave nothing behind.
+  const emitter = createEmitter({ url: "http://127.0.0.1:9/cb", baseDelayMs: 100, maxDelayMs: 300, fetch: (async () => new Response(null, { status: 503 })) as typeof fetch, onDeliveryError: () => {} });
+  const ahead = emitter.emit({ ...jobStateEvent({ jobId: JOB, team: "social-media" }, "held"), type: "plantworks.approval.requested" });
+  const controller = new AbortController();
+  const started = Date.now();
+  const mine = emitter.emit(jobStateEvent({ jobId: JOB, team: "social-media", transitionSeq: 1 }, "queued"), { signal: controller.signal });
+  setTimeout(() => controller.abort(), 200);
+  await assert.rejects(mine, DeliveryAborted);
+  assert.ok(Date.now() - started < 1000, `settled after ${Date.now() - started} ms`);
+  await ahead.catch(() => {});
+});
+
+test("close() also stops an approval event that is mid-retry, so it never holds the broker up", async () => {
+  const fd = await consumer(() => true);
+  const dir = mkdtempSync(join(tmpdir(), "pw-stop-teams-"));
+  assert.ok("files" in emitTeam(definition, dir, platform));
+  const store = openStore(join(mkdtempSync(join(tmpdir(), "pw-stop-db-")), "broker.sqlite"));
+  const logs: string[] = [];
+  try {
+    const broker = await startBroker({ store, teams: loadTeams(dir, platform), env: { SOCIAL_MEDIA_CALLBACK: fd.url }, host: "127.0.0.1", port: 0, log: (l) => logs.push(l) });
+    const res = await fetch(`${broker.url}${API}/jobs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jobId: JOB, team: "social-media", class: "review", task: { prompt: "p" } }) });
+    assert.equal(res.status, 201);
+    // A held job sends plantworks.approval.requested (in memory) besides its job-state event; both are refused.
+    await until("the approval event and the job-state event refused", () => fd.refused() >= 2);
+    const started = Date.now();
+    await broker.close();
+    assert.ok(Date.now() - started < 2000, `close() took ${Date.now() - started} ms`);
+    const refused = fd.refused();
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.equal(fd.refused(), refused, "no delivery of either kind continued after close()");
+  } finally {
+    store.close();
+    await fd.close();
+  }
+});
+
+test("a delivery that completed before close() keeps its cursor advance", async () => {
+  const fd = await consumer(() => false);
+  const dir = mkdtempSync(join(tmpdir(), "pw-stop-teams-"));
+  assert.ok("files" in emitTeam(definition, dir, platform));
+  const store = openStore(join(mkdtempSync(join(tmpdir(), "pw-stop-db-")), "broker.sqlite"));
+  try {
+    const broker = await startBroker({ store, teams: loadTeams(dir, platform), env: { SOCIAL_MEDIA_CALLBACK: fd.url }, host: "127.0.0.1", port: 0, log: () => {} });
+    await fetch(`${broker.url}${API}/jobs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jobId: JOB, team: "social-media", task: { prompt: "p" } }) });
+    await until("the queued event delivered", () => fd.received.length === 1);
+    const id = store.transitions({ jobId: JOB })[0]!.id;
+    await until("the cursor advance", () => (store.db.prepare("SELECT delivered_through FROM event_outbox_team_cursor WHERE team = 'social-media'").get() as { delivered_through: number } | undefined)?.delivered_through === id);
+    await broker.close();
+    assert.deepEqual(store.db.prepare("SELECT delivered_through FROM event_outbox_team_cursor WHERE team = 'social-media'").get(), { delivered_through: id });
+    assert.deepEqual(store.db.prepare("SELECT COUNT(*) AS n FROM event_outbox_failures").get(), { n: 0 });
+  } finally {
+    store.close();
     await fd.close();
   }
 });

@@ -68,7 +68,6 @@ export interface EmitterOptions {
   onDeliveryError?: (err: DeliveryError) => void;
 }
 
-/** An event that could not be delivered: a permanent 3xx/4xx, or the retry budget ran out. */
 /** emit() was aborted by its caller (a stopping outbox): not a delivery failure, and nothing to record. */
 export class DeliveryAborted extends Error {
   readonly event: CloudEvent;
@@ -79,6 +78,7 @@ export class DeliveryAborted extends Error {
   }
 }
 
+/** An event that could not be delivered: a permanent 3xx/4xx, or the retry budget ran out. */
 export class DeliveryError extends Error {
   readonly event: CloudEvent;
   readonly attempts: number;
@@ -155,7 +155,10 @@ export function createEmitter(opts: EmitterOptions) {
   return {
     /** `signal` aborts the delivery, before or between attempts or mid-request, with DeliveryAborted. */
     emit(event: CloudEvent, o: { signal?: AbortSignal } = {}): Promise<void> {
-      const run = tail.then(() => deliver(event, o.signal));
+      // An aborted emit does not wait for earlier, unsignalled work queued on this emitter.
+      const signal = o.signal;
+      const turn = signal ? Promise.race([tail, new Promise<void>((r) => (signal.aborted ? r() : signal.addEventListener("abort", () => r(), { once: true })))]) : tail;
+      const run = turn.then(() => deliver(event, signal));
       tail = run.catch((err: DeliveryError | DeliveryAborted) => {
         if (err instanceof DeliveryAborted) return;
         try { onDeliveryError(err); } catch { /* a failing hook must not stall later events */ }

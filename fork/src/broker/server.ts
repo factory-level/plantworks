@@ -218,7 +218,8 @@ export function startBroker(opts: BrokerOptions & { host: string; port: number }
         clearInterval(sweep);
         clearInterval(replay);
         stop?.();
-        // Abort in-flight event deliveries before the caller closes the store.
+        // Abort in-flight event deliveries (job-state and approval) before the caller closes the store.
+        delivery?.stop();
         await outbox?.stop();
         await new Promise<void>((r) => server.close(() => r()));
       } });
@@ -268,7 +269,13 @@ function teamDelivery(teams: Map<string, TeamSpec>, env: Record<string, string |
     return emitter ? emitter.emit(event, { signal }) : Promise.reject(new Error(`no event callback for team ${team}`));
   };
   // Delivery runs alongside the request; a slow consumer never holds the API.
-  return { deliver, send: (team: string, event: CloudEvent) => { void deliver(team, event).catch(() => {}); } };
+  // Approval events (send) are in memory only; stop() aborts them with the outbox so close() is prompt.
+  const stopping = new AbortController();
+  return {
+    deliver,
+    send: (team: string, event: CloudEvent) => { void deliver(team, event, stopping.signal).catch(() => {}); },
+    stop: () => stopping.abort(),
+  };
 }
 
 const digest = (s: string) => createHash("sha256").update(s).digest();
