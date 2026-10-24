@@ -86,14 +86,22 @@ governor and one line in `governBody`.
   which has no priority scheduling, this is a **no-op**: leave it unset.
 - **One job at a time per governor.** A worker's claim loop waits for each job to be `done` before
   it claims the next (`fork/src/broker/worker.ts`, `waitForDone`). So a per-seat value is per job.
-  The worker sets it after a claim and clears it when the job is done. A job the worker resumes
-  after a restart, or one whose handoff is unconfirmed, gets no priority, because its envelope
-  isn't at hand. `pw job run` passes the envelope offset; built-in classes have no base.
+- **No call goes out before the job's priority is known.** claim-next creates the qitem, and the
+  daemon can wake Pi then, before the worker has the claim response. So with hints on, the
+  governor **holds** every completion call while no priority is set. The worker sets the value
+  before it waits on any job, and clears it again when the job is `done`:
+  - a claimed job gets class base + envelope offset;
+  - a job held after a restart, or one whose handoff is unconfirmed, gets the class base, because
+    its envelope isn't at hand.
+- **`pw job run`** passes the envelope offset at governor start; built-in classes have no base.
 - **Tests:**
   - `priority.test.ts` covers the default off, setting and overriding Pi's value, switching
     between jobs, and `pw job run`;
-  - `fork/src/broker/worker-priority.test.ts` covers the worker path: base 2 + urgent gives -1,
-    then base 2 + low gives 4, then nothing.
+  - `fork/src/broker/worker-priority.test.ts` covers the worker path:
+    - a call made while the claim answer is still held back waits, then carries base 2 + urgent,
+      which is -1;
+    - the next job gives base 2 + low, which is 4;
+    - nothing goes out between jobs.
 
   None of them load a real vLLM; that check is gated.
 - The envelope `priority` field is fork-defined and still pending the HarnessHG ack (D11).

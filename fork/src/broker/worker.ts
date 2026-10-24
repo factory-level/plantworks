@@ -118,14 +118,23 @@ export function workerVerb(pw: Command): void {
           else { process.stderr.write(`plantworks worker: cannot read what ${opts.seat} holds (${view?.status ?? "no answer"}); not claiming\n`); await sleep(); }
         }
         // The timer starts now, not at the job's claim, so a cut-off after a restart comes late, never early.
-        for (const jobId of held ?? []) if (!stopping) await waitForDone(jobId, timeoutSeconds);
+        // PW-29: a held job's envelope isn't at hand, so it runs at the class base priority.
+        for (const jobId of held ?? []) {
+          if (stopping) break;
+          governor.setPriority(classPriority);
+          await waitForDone(jobId, timeoutSeconds);
+          governor.setPriority(undefined);
+        }
         while (!stopping) {
           const claim = await fetch(`${base}/plantworks/v1/claim-next`, { method: "POST", headers, body: JSON.stringify({ team: opts.team, seat: opts.seat, ...(opts.class ? { class: opts.class } : {}) }), signal: AbortSignal.timeout(15_000) });
           let jobId: string;
           let timeoutS = timeoutSeconds;
           if (claim.status === 503 || claim.status === 409) {
             const body = await claim.json().catch(() => ({})) as { error?: string; jobId?: string };
-            if ((body.error === "handoff_unconfirmed" || body.error === "reservation_lost") && body.jobId) jobId = body.jobId;
+            if ((body.error === "handoff_unconfirmed" || body.error === "reservation_lost") && body.jobId) {
+              jobId = body.jobId;
+              governor.setPriority(classPriority); // no envelope in this answer: the class base
+            }
             else { await sleep(); continue; }
           } else if (claim.status === 204 || claim.status === 429) { await sleep(); continue; }
           else if (!claim.ok) throw new Error(`claim-next returned ${claim.status}: ${(await claim.text()).slice(0, 300)}`);

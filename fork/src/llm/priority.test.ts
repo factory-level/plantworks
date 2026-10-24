@@ -37,20 +37,27 @@ test("governor: off by default, so no priority reaches the endpoint even after s
   assert.equal("priority" in model.requests[0].body, false);
 });
 
-test("governor with priority hints: each request carries the current job's priority, and a seat's jobs switch it in turn", async () => {
+test("governor with priority hints: a call waits until the job's priority is set, carries it, and a seat's jobs switch it in turn", async () => {
   const model = await stubModel();
   open.add(model.close);
   const g = await startGovernor({ endpoint: { url: model.url }, workerClass: CLASSES.quick, priorityHints: true });
   open.add(g.close);
-  await call(g.url, {}); // before any job: nothing set
+  const early = call(g.url, { priority: 5 }); // before the job's priority is known
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(model.requests.length, 0, "held, not sent without a priority");
   g.setPriority(-3); // an urgent job on a base-0 class
-  await call(g.url, { priority: 5 }); // Pi's own value from models.json is replaced
+  await early;
   await call(g.url, {});
   g.setPriority(7); // the seat's next job: a low job on a base-5 class
   await call(g.url, {});
-  g.setPriority(undefined); // between jobs
-  await call(g.url, {});
-  assert.deepEqual(model.requests.map((r) => r.body.priority), [undefined, -3, -3, 7, undefined]);
+  assert.deepEqual(model.requests.map((r) => r.body.priority), [-3, -3, 7], "Pi's own value is replaced");
+  g.setPriority(undefined); // between jobs: calls wait again
+  const stray = call(g.url, {});
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(model.requests.length, 3);
+  g.setPriority(0);
+  await stray;
+  assert.equal(model.requests[3].body.priority, 0);
 });
 
 test("pw job run: an urgent job's offset reaches the endpoint when PLANTWORKS_LLM_PRIORITY=1, and nothing when unset", async () => {

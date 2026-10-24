@@ -21,7 +21,7 @@ async function until(what: string, ok: () => boolean, ms = 10_000) {
   }
 }
 
-test("worker run with PLANTWORKS_LLM_PRIORITY=1: each job's effective priority reaches the endpoint while it runs, and none between jobs", async (t) => {
+test("worker run with PLANTWORKS_LLM_PRIORITY=1: each job's effective priority reaches the endpoint, even for a call made before the claim answer, and none goes out without a job", async (t) => {
   const teams = mkdtempSync(join(tmpdir(), "pw-wprio-teams-"));
   assert.ok("files" in emitTeam({
     team: "t", trains: 1, perTrain: { orchestrators: 1, workers: { small: 1 } },
@@ -34,13 +34,18 @@ test("worker run with PLANTWORKS_LLM_PRIORITY=1: each job's effective priority r
   const jobs = [{ jobId: "job-a", priority: "urgent" }, { jobId: "job-b", priority: "low" }];
   let claims = 0;
   const done = new Set<string>();
-  const broker = createServer((req, res) => {
+  // The first claim-next answer is held back, as when the daemon wakes Pi on qitem create before
+  // the broker has answered the worker.
+  let releaseFirstClaim!: () => void;
+  const firstClaimHeld = new Promise<void>((r) => (releaseFirstClaim = r));
+  const broker = createServer(async (req, res) => {
     const json = (body: unknown) => res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(body));
     if (req.method === "DELETE") return json({});
     if (req.url!.endsWith("/drain")) return json({ inFlight: [] });
     if (req.url === "/plantworks/v1/claim-next") {
       const job = jobs[claims++];
       if (!job) return res.writeHead(204).end();
+      if (job.jobId === "job-a") await firstClaimHeld;
       return json({ job: { jobId: job.jobId }, envelope: { jobId: job.jobId, team: "t", priority: job.priority, task: { prompt: "p" } } });
     }
     const id = decodeURIComponent(req.url!.split("/").pop()!);
@@ -83,15 +88,23 @@ test("worker run with PLANTWORKS_LLM_PRIORITY=1: each job's effective priority r
   }
   const pi = () => fetch(`${baseUrl}/chat/completions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "qwen3.5:9b", messages: [] }) });
 
-  await until("job-a claimed", () => claims >= 1);
-  await pi();
+  await until("job-a's claim in flight", () => claims >= 1);
+  // Pi was woken by the qitem and calls before the worker has job-a's priority: the call is held.
+  const early = pi();
+  await new Promise((r) => setTimeout(r, 300));
+  assert.deepEqual(seen, [], "no model call reaches the endpoint before the job's priority is known");
+  releaseFirstClaim();
+  await early;
   done.add("job-a");
   await until("job-b claimed", () => claims >= 2);
   await pi();
   done.add("job-b");
   await until("the next claim finds nothing", () => claims >= 3);
-  await pi();
-  assert.deepEqual(seen, [2 + -3, 2 + 2, undefined], "class base 2 + urgent -3, then base 2 + low +2, then no job");
+  // Between jobs nothing should call; one that does waits for the next job's priority.
+  const stray = pi();
+  await new Promise((r) => setTimeout(r, 300));
+  assert.deepEqual(seen, [2 + -3, 2 + 2], "class base 2 + urgent -3, then base 2 + low +2; nothing without a job");
+  void stray.catch(() => {});
 
   process.emit("SIGTERM" as NodeJS.Signals);
   await running;

@@ -41,7 +41,10 @@ export type GovernorOptions = {
  */
 export type Governor = {
   url: string; close: () => Promise<void>; cutOff: (why: string) => void; restore: () => void;
-  /** PW-29: the effective priority of the job this seat runs now; undefined sends none. One job at a time per seat. */
+  /**
+   * PW-29: the effective priority of the job this seat runs now. One job at a time per seat. With
+   * priority hints on, undefined holds model calls until a value is set, so no call goes out early.
+   */
   setPriority: (priority: number | undefined) => void;
 };
 
@@ -82,6 +85,10 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
   let failed = false;
   let cut: string | null = null;
   let priority: number | undefined = opts.priority;
+  // With hints on, a model call waits until the seat's job priority is known: the daemon can wake
+  // Pi as soon as the qitem exists, before the worker has the claim response (PW-29).
+  const waiting: (() => void)[] = [];
+  const priorityKnown = () => (priority !== undefined ? Promise.resolve() : new Promise<void>((r) => waiting.push(r)));
   const inFlight = new Set<AbortController>();
 
   async function handle(req: IncomingMessage, res: ServerResponse) {
@@ -89,7 +96,9 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
     for await (const chunk of req) chunks.push(chunk as Buffer);
     let body: Buffer | undefined = chunks.length ? Buffer.concat(chunks) : undefined;
     const path = req.url ?? "/";
-    if (body && req.method === "POST" && /\/(chat\/)?completions$/.test(path.split("?")[0])) body = governBody(body, c, opts.priorityHints ? priority : undefined);
+    const completion = req.method === "POST" && /\/(chat\/)?completions$/.test(path.split("?")[0]);
+    if (completion && opts.priorityHints) await priorityKnown();
+    if (body && completion) body = governBody(body, c, opts.priorityHints ? priority : undefined);
 
     const headers: Record<string, string> = {};
     for (const [k, v] of Object.entries(req.headers)) if (!HOP_BY_HOP.has(k) && typeof v === "string") headers[k] = v;
@@ -172,6 +181,9 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
       for (const a of inFlight) a.abort(new Error(`cut off: ${why}`));
     },
     restore() { cut = null; },
-    setPriority(n) { priority = n; },
+    setPriority(n) {
+      priority = n;
+      if (n !== undefined) for (const release of waiting.splice(0)) release();
+    },
   };
 }
