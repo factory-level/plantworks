@@ -20,6 +20,7 @@ fork/container/smoke.sh [image]    # checks every role against stubs (needs Dock
 - **State:** `OPENRIG_HOME=/var/lib/fork` holds the daemon home and the broker's SQLite, so mount a volume there.
 - **Team specs:** these are read from `/etc/fork/teams/<team>/team.json`; mount the emitted files read-only.
 - **Broker settings:** `PLANTWORKS_PLATFORM_FILE` and `PLANTWORKS_BROKER_DB` pass `--platform` and `--db` through.
+- **Worker settings:** the worker reads the same team specs and `PLANTWORKS_PLATFORM_FILE`, and runs its seat's call governor on `127.0.0.1:7535` (`PLANTWORKS_GOVERNOR_PORT`), so it needs `PLANTWORKS_LLM_URL` (and `PLANTWORKS_LLM_API_KEY` if the endpoint takes one). It writes the seat's Pi files under `OPENRIG_HOME`, so it shares the daemon's state volume, and it must start before the daemon launches the seat.
 - **Secrets:** `PLANTWORKS_SLOT_CAP`, `PLANTWORKS_BROKER_TOKEN`, `PLANTWORKS_LLM_URL`, `PLANTWORKS_LLM_API_KEY` and `*_CALLBACK` are passed at run time. The build adds no secret of its own.
 
 ## How the roles fit together, and what this doesn't solve
