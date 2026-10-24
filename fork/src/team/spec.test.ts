@@ -41,6 +41,16 @@ test("the ADR's map form of max_in_progress_per_profile is rejected (Hermes 0.22
   assert.match(validateSpec(s, platform).join("\n"), /hermesProfile must be .*"max_in_progress_per_profile":1/);
   s.hermesProfile = { name: "other", kanban: { max_in_progress_per_profile: 1 } };
   assert.equal(validateSpec(s, platform).length, 1, "a profile name other than the team is rejected too");
+  s.hermesProfile = { name: "social-media", kanban: { max_in_progress_per_profile: 1, extra: 2 } };
+  assert.equal(validateSpec(s, platform).length, 1, "an extra kanban key is rejected");
+});
+
+test("key order in the spec does not matter (JSON objects are unordered)", () => {
+  const s = spec();
+  s.hermesProfile = { kanban: { max_in_progress_per_profile: 1 }, name: "social-media" };
+  assert.deepEqual(validateSpec(s, platform), []);
+  const reversed = Object.fromEntries(Object.entries(spec()).reverse());
+  assert.deepEqual(validateSpec(reversed, platform), []);
 });
 
 test("each ADR validator rule rejects what it should", () => {

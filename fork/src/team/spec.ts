@@ -160,8 +160,13 @@ export function validateSpec(spec: unknown, platform: Platform = PHASE_0_1): str
   }
 
   // The Hermes profile is derived, so it must match the team.
-  const expected = buildSpec(spec).hermesProfile;
-  if (JSON.stringify(spec.hermesProfile) !== JSON.stringify(expected)) errors.push(`hermesProfile must be ${JSON.stringify(expected)} (name = team, max_in_progress_per_profile = trains × orchestrators)`);
+  // Compared field by field: JSON objects are unordered, so key order must not matter.
+  const expected = buildSpec(spec).hermesProfile as TeamSpec["hermesProfile"];
+  const got = spec.hermesProfile;
+  const matches = obj(got) && Object.keys(got).length === 2 && got.name === expected.name
+    && obj(got.kanban) && Object.keys(got.kanban).length === 1
+    && got.kanban.max_in_progress_per_profile === expected.kanban.max_in_progress_per_profile;
+  if (!matches) errors.push(`hermesProfile must be ${JSON.stringify(expected)} (name = team, max_in_progress_per_profile = trains × orchestrators)`);
   return errors;
 }
 
