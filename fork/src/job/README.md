@@ -27,9 +27,37 @@ plantworks pw job run job.json --cwd ./workspace --pi /path/to/pi
 | 3 consecutive model calls cut at the class deadline (the governor) | `call-deadline` |
 | The job runs past `timeoutSeconds` (default: the class ceiling, 900 s for `quick` or 3600 s for `long`) | `timeout` |
 | Pi reports a model error, rejects the prompt or exits early; setup fails after the claim | `error` |
+| The runner gets Ctrl-C or SIGTERM. Pi is stopped first (below), and `failed` is reported only once its process has exited | `interrupted` |
 
 A setup failure, or a Pi that cannot start, moves `claimed -> failed` and never reports
 `running`.
+An interrupt before Pi runs does the same. A second Ctrl-C/SIGTERM gets the default action, so a
+stop that hangs can still be killed; a runner killed with SIGKILL reports nothing. No branch is
+created, so there is none to leave intact.
+
+**One job at a time.** The runner holds `<home>/plantworks/job.lock` while a job runs, where
+`<home>` is the selected home: `PLANTWORKS_HOME` when set (it wins over `OPENRIG_HOME`, as for every
+`plantworks` command), else `OPENRIG_HOME`. The lock is created exclusively,
+recording the runner's and Pi's PIDs. A second `pw job run` with that lock is rejected (exit 2)
+before any event. The lock is per home by default; set `PLANTWORKS_JOB_LOCK` to one path to
+cover every home on the host. Fail-closed:
+- the lock is released when the run ends, and only if it is still this run's;
+- it is stale, and replaced, only when the runner and the Pi it records are both gone, so a Pi left
+  running by a killed runner still holds it. The lock says `starting` just before Pi is spawned and
+  names its PID right after, so a runner that dies in between leaves a lock that is refused, not
+  taken over (see below for how to clear it);
+- a lock file that can't be read as one is refused and never removed.
+
+To clear a lock the runner refuses (a runner died while starting Pi, or the file is unreadable), as
+the refusal message also says:
+1. Check that no runner Pi is left: `pgrep -af -- '--mode rpc --no-session'` prints nothing, or only
+   Pis you can account for. Stop any stray one.
+2. Delete the lock file the refusal names, exactly that path. It is the selected home's (with
+   `PLANTWORKS_HOME` set, that home, not `OPENRIG_HOME`), or `PLANTWORKS_JOB_LOCK`; don't rebuild it
+   by hand.
+
+A PID can be reused, so a stale lock whose PIDs now belong to other processes is refused until it
+is removed.
 
 **Pi's environment** is an allow-list: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`,
 `LC_*`, `TERM`, `TMPDIR`, `TZ`, Pi's own `PI_*`, and the seat's `PI_CODING_AGENT_DIR`, with

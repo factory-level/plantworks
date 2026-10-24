@@ -63,7 +63,7 @@ test("submit is idempotent on jobId: 201 new, 200 the same envelope, 409 job_con
   const first = await t.call("POST", "/jobs", envelope());
   assert.equal(first.status, 201);
   const rec = await first.json();
-  assert.deepEqual({ ...rec, createdAt: 0, updatedAt: 0 }, { jobId: envelope().jobId, team: "social-media", class: "quick", state: "queued", detail: {}, createdAt: 0, updatedAt: 0, result: null });
+  assert.deepEqual({ ...rec, createdAt: 0, updatedAt: 0 }, { jobId: envelope().jobId, team: "social-media", class: "quick", state: "queued", detail: {}, priority: 0, createdAt: 0, updatedAt: 0, result: null });
   // Same envelope, other key order: the existing job, nothing new emitted.
   const again = await t.call("POST", "/jobs", { task: { prompt: "Say hi" }, team: "social-media", jobId: envelope().jobId });
   assert.equal(again.status, 200);

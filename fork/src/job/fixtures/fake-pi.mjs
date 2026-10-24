@@ -12,6 +12,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const mode = process.env.PI_FAKE_MODE ?? "ok";
+if (process.env.PI_FAKE_SELF_PIDFILE) writeFileSync(process.env.PI_FAKE_SELF_PIDFILE, String(process.pid));
 let toolChild = null;
 const models = JSON.parse(readFileSync(join(process.env.PI_CODING_AGENT_DIR, "models.json"), "utf8"));
 const provider = Object.values(models.providers)[0];

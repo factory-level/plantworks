@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { RejectedJob, runJob, sessionFor, type RunOptions } from "./run.ts";
+import { RejectedJob, runJob, sessionFor, takeJobLock, type RunOptions } from "./run.ts";
 import { stubConsumer, stubModel } from "./fixtures/stubs.ts";
 
 const fakePi = [process.execPath, fileURLToPath(new URL("./fixtures/fake-pi.mjs", import.meta.url))];
@@ -200,4 +200,91 @@ test("real Pi in RPC mode completes a job against the stub model", { skip: !proc
   const models = JSON.parse(readFileSync(join(t.home, "state", "pi", sessionFor(envelope.jobId), "agent", "models.json"), "utf8"));
   assert.match(models.providers.plantworks.baseUrl, /^http:\/\/127\.0\.0\.1:/);
   await t.close();
+});
+
+const gone = (pid: number) => { try { process.kill(pid, 0); return false; } catch (e) { return (e as NodeJS.ErrnoException).code === "ESRCH"; } };
+
+test("an interrupt stops Pi first, then ends the job failed with reason interrupted", async () => {
+  const t = await setup("hang");
+  const pidfile = join(t.home, "pi.pid");
+  const interrupt = new AbortController();
+  const states: string[] = [];
+  const running = runJob(t.opts({ signal: interrupt.signal, env: { ...t.opts().env, PI_FAKE_SELF_PIDFILE: pidfile } }));
+  let pi: number;
+  try {
+    // `running` follows Pi's spawn, which can come before the fake Pi has written its PID.
+    while (!t.consumer.states().includes("running") || !existsSync(pidfile)) await new Promise((r) => setTimeout(r, 20));
+    pi = Number(readFileSync(pidfile, "utf8"));
+  } finally {
+    interrupt.abort();
+  }
+  const result = await running;
+  states.push(...t.consumer.states());
+  assert.equal(result.state, "failed");
+  assert.equal((result.detail as { reason: string }).reason, "interrupted");
+  assert.deepEqual(states, ["queued", "claimed", "running", "failed"]);
+  assert.ok(gone(pi!), "Pi's process has exited by the time the job is reported failed");
+  assert.equal(existsSync(join(t.home, "plantworks", "job.lock")), false, "the lock is released");
+  await t.close();
+});
+
+test("an interrupt before Pi runs fails the job from claimed, never running", async () => {
+  const t = await setup();
+  const interrupt = new AbortController();
+  interrupt.abort();
+  const result = await runJob(t.opts({ signal: interrupt.signal }));
+  assert.equal((result.detail as { reason: string }).reason, "interrupted");
+  assert.deepEqual(t.consumer.states(), ["queued", "claimed", "failed"]);
+  await t.close();
+});
+
+test("one job at a time: a second run is refused before any event while the first holds the lock", async () => {
+  const t = await setup("hang");
+  const other = await stubConsumer();
+  open.add(other.close);
+  const interrupt = new AbortController();
+  const first = runJob(t.opts({ signal: interrupt.signal, envelope: { ...envelope, timeoutSeconds: 30 } }));
+  try {
+    while (!t.consumer.states().includes("running")) await new Promise((r) => setTimeout(r, 20));
+    const lock = JSON.parse(readFileSync(join(t.home, "plantworks", "job.lock"), "utf8"));
+    assert.equal(lock.runner, process.pid);
+    assert.ok(Number.isInteger(lock.pi), "the lock records Pi's PID once it runs");
+    await assert.rejects(runJob(t.opts({ callbackUrl: other.url })), (e: Error) => e instanceof RejectedJob && /one job at a time on this host/.test(e.message));
+    assert.equal(other.events.length, 0, "the refused job emitted nothing");
+  } finally {
+    interrupt.abort();
+    await first;
+  }
+  const again = await runJob(t.opts({ envelope: { ...envelope, jobId: "kb-social-media-t_3fa9c01e-a2" }, env: { ...t.opts().env, PI_FAKE_MODE: "ok" } }));
+  assert.equal(again.state, "done", "after the first ends, the next job runs");
+  await t.close();
+});
+
+test("a stale lock (runner and Pi both gone) is replaced; an unreadable one is refused and kept", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pw-lock-"));
+  const path = join(home, "plantworks", "job.lock");
+  mkdirSync(join(home, "plantworks"));
+  const dead = (await import("node:child_process")).spawnSync(process.execPath, ["-e", ""]).pid;
+  writeFileSync(path, JSON.stringify({ runner: dead, pi: dead, token: "old", since: "then" }));
+  const lock = takeJobLock(path);
+  assert.equal(JSON.parse(readFileSync(path, "utf8")).runner, process.pid, "taken over");
+  lock.release();
+  assert.equal(existsSync(path), false);
+
+  // A configured path with shell metacharacters is still named exactly, as data.
+  const odd = join(home, "it's $(x) lock");
+  writeFileSync(odd, "{not json");
+  assert.throws(() => takeJobLock(odd), (e: Error) => e.message.endsWith(`delete exactly this lock file: ${JSON.stringify(odd)}`) && !e.message.includes("rm "));
+  writeFileSync(path, JSON.stringify({ runner: dead, pi: process.pid, token: "x", since: "then" }));
+  assert.throws(() => takeJobLock(path), /one job at a time/, "a live Pi from a dead runner still holds it");
+  // A runner that died between recording "starting" and Pi's PID: a Pi may be running unrecorded.
+  const starting = JSON.stringify({ runner: dead, pi: "starting", token: "y", since: "then" });
+  writeFileSync(path, starting);
+  assert.throws(() => takeJobLock(path), (e: Error) => e instanceof RejectedJob && /died while starting Pi/.test(e.message) && e.message.includes("pgrep -af -- '--mode rpc --no-session'") && e.message.includes(`delete exactly this lock file: ${JSON.stringify(path)}`), "the refusal says how to verify and clear it");
+  assert.equal(readFileSync(path, "utf8"), starting, "and the lock is kept");
+  for (const garbage of ["", "{not json", JSON.stringify({ runner: "me" })]) {
+    writeFileSync(path, garbage);
+    assert.throws(() => takeJobLock(path), (e: Error) => e instanceof RejectedJob && /can't be read as a job lock/.test(e.message));
+    assert.equal(readFileSync(path, "utf8"), garbage, "the unreadable lock is left exactly as it was");
+  }
 });

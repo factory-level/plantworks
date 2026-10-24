@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import {
   JOB_PRIORITIES,
   DNS_NAME, INITIAL_STATES, JOB_ID, JOB_STATES, MAX_PROMPT, MAX_TITLE,
@@ -53,6 +53,16 @@ test("valid envelopes pass unchanged; the broker resolves an absent class", () =
   const full = { ...good, class: "long", task: { prompt: "x", title: "t" }, timeoutSeconds: 900, repo: "factory-level/plantworks", contextBudget: 8192, origin: { kind: "card", ref: "PW-09" } };
   assert.deepEqual(validateEnvelope(full), { ok: true, envelope: full });
   assert.deepEqual(validateEnvelope({ ...good, repo: "o/r", origin: { kind: "opaque", ref: "anything" } }).ok, true);
+});
+
+test("published envelope examples pass the runtime validator", () => {
+  const examples = new URL("../../schema/examples/", import.meta.url);
+  const names = readdirSync(examples).filter((name) => name.endsWith(".json"));
+  assert.ok(names.length > 0, "publish at least one JSON envelope example");
+  for (const name of names) {
+    const envelope = JSON.parse(readFileSync(new URL(name, examples), "utf8"));
+    assert.equal(validateEnvelope(envelope).ok, true, name);
+  }
 });
 
 test("invalid envelopes are rejected with every reason", () => {

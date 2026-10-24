@@ -5,11 +5,15 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { CLASSES, ceilingProblems } from "./classes.ts";
 import { preflight, readEndpoint } from "./endpoint.ts";
 import { governBody, startGovernor, type CallRecord } from "./governor.ts";
+import { emitTeam } from "../team/command.ts";
 
 type Seen = { method: string; url: string; auth?: string; body: string };
 
@@ -173,5 +177,61 @@ test("`plantworks pw llm preflight` checks the class model against the endpoint"
     await assert.rejects(run({ PLANTWORKS_LLM_URL: s.url }), (e: { code: number; stdout: string }) => e.code === 1 && JSON.parse(e.stdout).ok === false);
   } finally {
     await s.close();
+  }
+});
+
+test("`plantworks pw llm preflight` with team specs checks every model their classes name, not just the default class", async () => {
+  const quick = { slots: 1, model: "qwen3.5:9b", context: { maxContextTokens: 16384, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1536, deadlineSeconds: 60 }, approval: "never", timeoutSeconds: 900, maxAttempts: 1 };
+  const team = (name: string, model: string) => ({
+    team: name, trains: 1, perTrain: { orchestrators: 1, workers: { quick: 1, big: 1 } },
+    endpoint: { url: "${PLANTWORKS_LLM_URL}", slotBudgetKey: name }, defaultClass: "quick",
+    classes: { quick, big: { ...quick, model } }, events: { callbackDefault: "${PLANTWORKS_FRONTDOOR_CALLBACK}", approvalConsumer: "frontdoor" },
+  });
+  const platform = { slotCaps: { a: 2, b: 2 }, models: ["qwen3.5:9b", "other-a:7b", "other-b:3b"], maxContextTokens: 32768 };
+  const root = mkdtempSync(join(tmpdir(), "pw-preflight-"));
+  const teams = join(root, "teams");
+  const platformFile = join(root, "platform.json");
+  writeFileSync(platformFile, JSON.stringify(platform));
+  for (const [name, model] of [["a", "other-a:7b"], ["b", "other-b:3b"]]) assert.ok("files" in emitTeam(team(name, model), teams, platform));
+  const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
+  const run = (args: string[], env: Record<string, string>) => promisify(execFile)(process.execPath, [bin, "pw", "llm", "preflight", "--json", ...args],
+    { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: root, ...env } })
+    .then((r) => ({ code: 0, out: r.stdout, err: r.stderr }), (e) => ({ code: e.code as number, out: e.stdout as string, err: e.stderr as string }));
+  const partial = await stub(models(["qwen3.5:9b", "other-a:7b"]));
+  const full = await stub(models(["qwen3.5:9b", "other-a:7b", "other-b:3b", "unrelated"]));
+  try {
+    const missing = await run(["--teams", teams, "--platform", platformFile], { PLANTWORKS_LLM_URL: partial.url });
+    assert.equal(missing.code, 1, missing.err);
+    assert.deepEqual(JSON.parse(missing.out).checked, ["other-a:7b", "other-b:3b", "qwen3.5:9b"]);
+    assert.deepEqual(JSON.parse(missing.out).missing, ["other-b:3b"], "the default class's model alone would have passed");
+
+    const served = await run(["--teams", teams, "--platform", platformFile], { PLANTWORKS_LLM_URL: full.url });
+    assert.equal(served.code, 0, served.err);
+    assert.equal(JSON.parse(served.out).source, "teams");
+
+    const fromEnv = await run(["--platform", platformFile], { PLANTWORKS_LLM_URL: partial.url, PLANTWORKS_TEAMS_DIR: teams });
+    assert.deepEqual(JSON.parse(fromEnv.out).missing, ["other-b:3b"], "PLANTWORKS_TEAMS_DIR selects the same specs");
+
+    const bad = await run(["--teams", join(root, "nowhere")], { PLANTWORKS_LLM_URL: full.url });
+    assert.equal(bad.code, 2);
+    assert.match(bad.err, /preflight: /);
+
+    // An explicit --class wins over an ambient PLANTWORKS_TEAMS_DIR (the image sets one); explicit conflicts refuse.
+    const explicit = await run(["--class", "long"], { PLANTWORKS_LLM_URL: partial.url, PLANTWORKS_TEAMS_DIR: teams });
+    assert.equal(explicit.code, 0, explicit.err);
+    assert.deepEqual([JSON.parse(explicit.out).source, JSON.parse(explicit.out).checked], ["class", ["qwen3.5:9b"]]);
+    for (const args of [["--class", "long", "--teams", teams], ["--platform", platformFile]]) {
+      const refused = await run(args, { PLANTWORKS_LLM_URL: full.url });
+      assert.equal(refused.code, 2, args.join(" "));
+      assert.match(refused.err, /preflight: /, args.join(" "));
+    }
+
+    const classOnly = await run([], { PLANTWORKS_LLM_URL: partial.url });
+    assert.equal(classOnly.code, 0, classOnly.err);
+    assert.deepEqual([JSON.parse(classOnly.out).source, JSON.parse(classOnly.out).checked], ["class", ["qwen3.5:9b"]]);
+  } finally {
+    await partial.close();
+    await full.close();
+    rmSync(root, { recursive: true, force: true });
   }
 });
