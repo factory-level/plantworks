@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
-import { NAMES, createPlantworksProgram } from "./program.ts";
+import { NAMES, PLANTWORKS_RELEASE, brandedVersion, createPlantworksProgram } from "./program.ts";
 
 const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
 const run = (...args: string[]) => execFileSync(process.execPath, [bin, ...args], { encoding: "utf8" });
@@ -16,6 +16,14 @@ test("adds the fork namespace on top of upstream and registers fork verbs under 
   assert.equal(program.name(), "plantworks");
   assert.deepEqual(program.commands.map((c) => c.name()), ["queue", "pw"]);
   assert.deepEqual(program.commands[1].commands.map((c) => c.name()), ["job"]);
+});
+
+test("the version is upstream's, branded with the fork release; a program without one gets none", () => {
+  const program = createPlantworksProgram([], () => new Command("rig").version("9.8.7"));
+  assert.equal(program.version(), "9.8.7+plantworks." + PLANTWORKS_RELEASE);
+  assert.equal(program.options.filter((o) => o.long === "--version").length, 1, "one version option, not two");
+  assert.equal(brandedVersion("0.7.0"), `0.7.0+plantworks.${PLANTWORKS_RELEASE}`);
+  assert.equal(createPlantworksProgram([], () => new Command("rig")).version(), undefined);
 });
 
 test("refuses to start when upstream takes the namespace, by name or alias", () => {
@@ -33,7 +41,8 @@ test("the real binary runs upstream commands and the pw namespace", () => {
   assert.match(run("queue", "--help"), /Usage: plantworks queue/);
   assert.match(run("pw", "--help"), /Usage: plantworks pw/);
   const upstreamVersion = JSON.parse(readFileSync(new URL("../../../packages/cli/package.json", import.meta.url), "utf8")).version;
-  assert.equal(run("--version").trim(), upstreamVersion);
+  assert.equal(run("--version").trim(), `${upstreamVersion}+plantworks.${PLANTWORKS_RELEASE}`);
+  assert.equal(run("-V").trim(), `${upstreamVersion}+plantworks.${PLANTWORKS_RELEASE}`);
 });
 
 test("plantworks and pwctl are the same binary", () => {

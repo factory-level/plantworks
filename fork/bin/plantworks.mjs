@@ -16,7 +16,7 @@ const fromFile = (key) => {
 
 let refused;
 try {
-  applyDaemonDefaults(process.env, process.argv, { port: fromFile("daemon.port"), host: fromFile("daemon.host") });
+  applyDaemonDefaults(process.env, process.argv, { port: fromFile("daemon.port"), host: fromFile("daemon.host"), dbConflict: fromFile("daemon.db_conflict") });
 } catch (e) {
   refused = e;
 }
