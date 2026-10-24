@@ -324,6 +324,13 @@ closes a job.
 
 These are lifecycle counts, not observed execution. A job counts until the broker records its end.
 
+**Seat liveness.** `plantworks pw worker live --seat <session>` reads the seat's
+`$OPENRIG_HOME/state/pi/<seat>/runner-state.json`, the sidecar upstream's pi-runner writes, with
+upstream's own path and parser. It exits 1 only when the runner recorded that Pi exited. A missing
+sidecar or a launch not yet ready (`starting`) and an unreadable one (`unknown`) exit 0. The
+runner writes the sidecar on events, not on a timer, so `live` doesn't tell a hung runner from an
+idle one. A recorded exit is about the Pi process: it doesn't fail a job or free a slot.
+
 **Drain.** A seat's in-flight jobs are the ones claimed or running for it, plus any queued job
 under its reservation, of any age: once the daemon may have delivered the qitem, the seat may be
 working on it. Draining a seat changes none of those jobs. It only stops new claims. The flag is

@@ -54,7 +54,8 @@ case "${role}" in
   health)
     # Container health, by role. The broker: its unauthenticated /healthz (PW-22) answers 200, which
     # means the process serves and its store answers. The daemon: `daemon status` reports it running
-    # and not UNHEALTHY. The worker: the `pw worker run` process the role started is alive. Health says nothing about
+    # and not UNHEALTHY. The worker: the `pw worker run` process the role started is alive and `pw worker live`
+    # finds no recorded Pi exit for its seat. Health says nothing about
     # jobs or about any Pi run.
     read -r recorded pid < "${role_file}" 2>/dev/null || true
     case "${recorded:-}" in
@@ -66,7 +67,8 @@ case "${role}" in
         status="$(plantworks daemon status 2>/dev/null || true)"
         echo "${status}" | grep -q "^Daemon running" && ! echo "${status}" | grep -q "UNHEALTHY"
         ;;
-      worker) [ -n "${pid:-}" ] && kill -0 "${pid}" 2>/dev/null ;;
+      # The worker process is alive, and its seat's Pi hasn't recorded an exit (runner-state.json).
+      worker) [ -n "${pid:-}" ] && kill -0 "${pid}" 2>/dev/null && plantworks pw worker live --seat "${PLANTWORKS_SEAT:?}" >/dev/null ;;
       *) exit 0 ;;  # a one-off command, not a long-running role
     esac
     ;;
