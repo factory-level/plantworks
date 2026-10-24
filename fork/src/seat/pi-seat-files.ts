@@ -6,21 +6,22 @@
 // the PW-11 governor, which is the only baseUrl Pi sees. No key is written: the governor adds it.
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { classByName } from "../llm/classes.ts";
+import { classByName, type WorkerClass } from "../llm/classes.ts";
 
 export const PROVIDER = "plantworks";
 /** Pi needs some apiKey for an openai-completions provider; the governor replaces it with the real one. */
 export const PLACEHOLDER_KEY = "governor-supplied";
 
-export type SeatFilesInput = { openrigHome: string; session: string; className: string; governorUrl: string };
+/** `workerClass` is the class's limits, for example a team spec class (classFromSpec); without it, the built-in class of that name. */
+export type SeatFilesInput = { openrigHome: string; session: string; className: string; governorUrl: string; workerClass?: WorkerClass };
 
 export function seatAgentDir(openrigHome: string, session: string): string {
   if (!/^[A-Za-z0-9][A-Za-z0-9._@-]*$/.test(session) || session.includes("..")) throw new Error(`unsafe session name: ${JSON.stringify(session)}`);
   return join(openrigHome, "state", "pi", session, "agent");
 }
 
-export function renderSeatFiles({ className, governorUrl }: Pick<SeatFilesInput, "className" | "governorUrl">) {
-  const c = classByName(className);
+export function renderSeatFiles({ className, governorUrl, workerClass }: Pick<SeatFilesInput, "className" | "governorUrl" | "workerClass">) {
+  const c = workerClass ?? classByName(className);
   const modelsJson = {
     providers: {
       [PROVIDER]: {

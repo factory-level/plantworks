@@ -178,6 +178,26 @@ seat's transport identity. The broker does not close qitems during cleanup.
 
 ### Worker lifecycle (PW-21)
 
+**The seat's call governor (PW-11/PW-12, W3-B).** Before it claims anything, `worker run` loads
+its team spec (`--teams`/`PLANTWORKS_TEAMS_DIR`, validated against `--platform`/`PLANTWORKS_PLATFORM_FILE`
+as the broker does) and starts the seat's call governor with the limits of the class it serves
+(`--class`, else the team's `defaultClass`): `perCall.maxOutputTokens`, `perCall.deadlineSeconds`
+and `context.maxContextTokens`, not the built-in classes. It then renders the seat's Pi
+`models.json`/`settings.json` into `$OPENRIG_HOME/state/pi/<seat>/agent`, the directory the
+daemon's Pi seat reads, with the governor as the only `baseUrl`. The endpoint key stays in the
+worker. The governor listens on `127.0.0.1:7535` (`--governor-port`/`PLANTWORKS_GOVERNOR_PORT`),
+a fixed port so a restarted worker keeps the seat's `baseUrl` valid. So:
+- start the worker before the daemon launches the seat: Pi reads these files when it starts, and a
+  seat that was already running keeps whatever it loaded;
+- the worker refuses to start, before claiming, without a valid spec, the class, `OPENRIG_HOME` or
+  `PLANTWORKS_LLM_URL`, or when the port is taken (for example a second worker in the pod);
+- when the worker stops, its governor stops, so the seat's model calls fail rather than reach the
+  endpoint ungoverned.
+
+A 503 from the endpoint is waited out inside the governor: the broker job doesn't change state and
+no attempt is used. After three consecutive calls cut at the deadline the worker logs
+`call-deadline`; it doesn't fail or release the broker job (see fail-closed above).
+
 `plantworks pw worker run --team <team> --seat <session>` claims one job at a time and polls its
 broker record. It asks for another job only after the broker reports `done`. A worker process
 exit, timeout, unreadable qitem, daemon outage, generic failure/cancellation, administrative
@@ -268,6 +288,14 @@ kept in the broker's SQLite file (`seat_drains`), so it survives a broker restar
        with this qitem. Call it only on evidence that the qitem was never delivered.
 
   A reservation leaves the job `queued` and emits nothing. Any transition clears it.
+- **History.** `transitions({afterId?, jobId?, limit?})` reads `job_transitions`, oldest first:
+  one row per state a job enters. That is its initial `queued` or `held` (`from_state` null) and
+  then every transition. Each row has the checked PW-09 `detail` and the row `columns` it set. A
+  row is written in the same transaction as the state change, so the table never disagrees with
+  `jobs`. Ids are monotonic across the store, so a reader can resume after the last id it saw.
+  Reservations and releases are not state changes and are not recorded. A broker file created
+  before this table has no rows for the earlier states of its existing jobs. There is no HTTP
+  route for it yet.
 
 ## Defaults open for review
 
