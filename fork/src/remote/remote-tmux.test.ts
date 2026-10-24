@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The router and the seat agent against real tmux: two private sockets on this host stand in for
 // the daemon's server and a remote one. No real transport and no remote host. Skipped without tmux.
-import { test, after } from "node:test";
+import { test, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -41,6 +41,7 @@ const onSocket = (socket: string, argv: string[]) => (argv[0] === "tmux" ? ["tmu
 const tmux = (socket: string, ...args: string[]) => execFileSync("tmux", ["-L", socket, ...args], { encoding: "utf8" });
 /** Ends both servers. A server whose last session ended has already exited. */
 const reset = () => { for (const s of [L, R]) { try { tmux(s, "kill-server"); } catch { /* not running */ } } };
+beforeEach(reset); // a failed test never leaves sessions for the next one
 after(reset);
 
 const agent = createSeatAgent({ prefix: "rs-", run: (argv, stdin) => runTmux(onSocket(R, argv), stdin) });
@@ -116,8 +117,9 @@ test("a routed seat is created, written to and read through upstream's adapter, 
   assert.equal(await adapter.hasSession("rs-w"), true);
   assert.deepEqual(await adapter.sendText("rs-w", "echo routed-$((40+2))", undefined, { bracketed: false }), { ok: true });
   await adapter.sendKeys("rs-w", ["Enter"]);
-  await sleep(300);
-  assert.match((await adapter.capturePaneContent("rs-w", 20)) ?? "", /routed-42/);
+  let screen = "";
+  for (let i = 0; i < 50 && !/routed-42/.test(screen); i++) { await sleep(100); screen = (await adapter.capturePaneContent("rs-w", 20)) ?? ""; }
+  assert.match(screen, /routed-42/);
   assert.equal(tmux(L, "list-buffers"), "", "no local buffer is left behind");
   assert.deepEqual(await adapter.killSession("rs-w"), { ok: true });
   assert.deepEqual(await adapter.probeSession("rs-w"), { state: "absent" }, "the remote tmux's own absence text");
