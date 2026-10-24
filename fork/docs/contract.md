@@ -14,7 +14,7 @@ rejected.
 | Reuse a `jobId` with a different envelope | Returns `409 job_conflict` |
 | Retry work after a terminal failure | The front door chooses the next attempt and submits a new `jobId`, such as `-a2`; the broker does not retry task content |
 | Endpoint returns `503` because it is busy | The governor waits and retries the model call; the broker job state and attempt do not change |
-| Consecutive model calls exceed their deadline | The worker reports `call-deadline`; this can fail the job. A busy response alone does not |
+| Consecutive model calls exceed their deadline | On standalone `pw job run`, `call-deadline` fails the job. On the broker worker path, it is logged only; broker state is unchanged and the slot remains held. A busy response alone does not change state |
 
 The broker's upstream qitem ID is an internal reservation value, not a deterministic derivation
 from `jobId`. Callers should use `jobId` for submit idempotency and should not construct qitem IDs.
