@@ -36,6 +36,7 @@ import type { AgentActivity } from "./types.js";
 import { DeliveryGuardError, type AdmissionInput, type GuardTarget, type SeatDeliveryGuard } from "./seat-delivery-guard.js";
 import { withUrgentLine } from "./urgent-line.js";
 import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "../lib/pane-envelope.js";
+import { isBoundTerminalSeat } from "./terminal-seat.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { isShellForeground } from "./shell-classifier.js";
@@ -261,7 +262,7 @@ function findClaudeComposer(paneContent: string, options: ClassifyPaneOptions = 
   return { text: prompt.slice(indent.length), bar: lines[bar]!.trim(), framed, hasWarnings: bar < lines.length - 1, supportedWarningFooter, modeFooter, headSeen, liveStatus };
 }
 
-const unknown = (): ComposerInput => ({ state: "unknown", rows: [], columns: 0, cursorAtEnd: false, collapsedPaste: null });
+const unknown = (unknownReason: string, cursor?: ComposerSnapshot["cursor"]): ComposerInput => ({ state: "unknown", rows: [], columns: 0, cursorAtEnd: false, collapsedPaste: null, unknownReason, ...(cursor ? { cursor } : {}) });
 const rule = (line: string): boolean => /^[─━═-]{6,}(?: .+ [─━═-]+)?$/.test(line.trim());
 const codexFooter = (line: string): boolean => isComposerFooter(line)
   || /(?:\b\d+% context left\b|\bContext \[)/.test(line);
@@ -301,13 +302,14 @@ function styledTextLines(screen: string) {
  */
 export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime: string | null = null, owned?: import("./composer-prompts.js").ComposerOwnership): ComposerInput {
   const promptClass = composerPromptClassForRuntime(runtime);
-  if (!snapshot || snapshot.inMode) return unknown();
+  if (!snapshot) return unknown("capture_unavailable");
+  if (snapshot.inMode) return unknown("pane_in_mode", snapshot.cursor);
   const { x, y, width, height } = snapshot.cursor;
-  if (![x, y, width, height].every(Number.isInteger) || x < 0 || y < 0 || x >= width || y >= height || width < 3 || height < 1) return unknown();
+  if (![x, y, width, height].every(Number.isInteger) || x < 0 || y < 0 || x >= width || y >= height || width < 3 || height < 1) return unknown("invalid_cursor", snapshot.cursor);
   const styled = styledTextLines(snapshot.screen);
   const lines = styled.map(line => line.text);
   if (lines.at(-1) === "") lines.pop();
-  if (lines.length > height || !lines[y]) return unknown();
+  if (lines.length > height || !lines[y]) return unknown("incomplete_frame", snapshot.cursor);
   const footerAt = findClaudeFooterIndex(lines);
   const footer = lines[footerAt]?.trim() ?? "";
   let claudeEnd = footerAt - 1;
@@ -346,6 +348,7 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
     // A literal placeholder or text before a moved cursor remains authored input.
     const cursorRow = y - start;
     let ghost: ComposerInput["ghost"];
+    let suggestionRows: string[] = [];
     const currentRow = rows[cursorRow]!;
     let cursorOffset = x === prefix ? 0 : -1;
     let offset = 0;
@@ -359,6 +362,7 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
         faint: styled[y + i]!.faintCells.slice(prefix + (i === 0 ? cursorOffset : 0), prefix + row.length),
       }));
       if (suffix.some(row => row.text.length > 0) && suffix.every(row => row.faint.every(Boolean))) {
+        suggestionRows = suffix.map(row => row.text);
         ghost = { line: y, offset: prefix + cursorOffset, continuationRows: rows.length - cursorRow - 1 };
         rows.splice(cursorRow + 1);
         rows[cursorRow] = currentRow.slice(0, cursorOffset);
@@ -378,7 +382,7 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
     const cursorAtEnd = y === start + last && x === prefix + stringWidth(visible[last] ?? "");
     const label = visible.length === 1 && COMPOSER_COLLAPSED_PASTE_PATTERN.test(visible[0]!) ? visible[0]! : null;
     const frame = JSON.stringify([prompt.glyph, prefix, width, footer]);
-    const input: ComposerInput = { state: empty ? "empty" : "text", rows: visible, columns: width - prefix, cursorAtEnd, collapsedPaste: label, frame,
+    const input: ComposerInput = { state: empty ? "empty" : "text", cursor: { ...snapshot.cursor }, suggestionRows, rows: visible, columns: width - prefix, cursorAtEnd, collapsedPaste: label, frame,
       ...(ghost ? { ghost } : {}) };
     // A numbered body is allowed only as this operation's exact text in its
     // previously empty composer. A newly observed menu gains no such authority.
@@ -390,7 +394,7 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
     }
     candidates.push(input);
   }
-  return candidates.length === 1 ? candidates[0]! : unknown();
+  return candidates.length === 1 ? candidates[0]! : unknown(candidates.length ? "ambiguous_composer" : "unrecognized_composer", snapshot.cursor);
 }
 
 
@@ -1613,6 +1617,8 @@ export interface SendOpts {
   // send. `actorSession` is the caller identity recorded in that audit. (`--raw` is purely a CLI-side
   // envelope concern — the daemon guard behaves identically for raw and wrapped text.)
   dangerouslyInteract?: boolean;
+  /** Explicit per-send choice: no input inspection or clearing. Only with dangerouslyInteract. */
+  typeWithoutChecking?: boolean;
   reason?: string;
   actorSession?: string | null;
   // GHOST-STAGE (h): the envelope's compose stamp (ISO), threaded to send() so the WRITE-moment
@@ -1635,6 +1641,13 @@ export interface SendOpts {
    *  renders as "[Pasted text #N +X lines]"; X must match this count for the placeholder to count
    *  as evidence of THIS piece. */
   expectedStagedLineCount?: number;
+  /** The text without the From/To envelope. When set and the recipient is a terminal seat
+   *  (`runtime: terminal`), send() types this instead of `text`, so the shell never runs the
+   *  envelope lines. Agent recipients keep `text`. */
+  exactText?: string;
+  /** Internal: send() is typing `exactText` to a terminal seat, so its bytes stay exactly as given: no urgent line, which
+   *  the shell would run. An urgent mark still admits the input and stays in the result. Never accepted from HTTP. */
+  typedExactly?: true;
 }
 
 const CALLER_CANCELLED = "caller_cancelled";
@@ -1660,7 +1673,22 @@ export interface BroadcastOpts extends SendOpts {
   // deterministic tests) now lives on the base SendOpts — (h) send() reads it for delivered-latency.
 }
 
+/** Transient caller-only evidence. Never put these rows in receipts, events or held messages. */
+export interface ExistingInput {
+  target: GuardTarget;
+  classification: "typed_or_pasted" | "suggestion_only" | "empty" | "unreadable" | "not_checked";
+  rows: string[];
+  suggestionRows: string[];
+  cursor: ComposerSnapshot["cursor"] | null;
+  fullContentsVisible: boolean;
+  reason?: string;
+  cleared: false;
+}
+
+type OverrideInputAudit = { classification: ExistingInput["classification"]; visibleRows: number; suggestionRows: number; choice: "inspect" | "type_without_checking"; outcome: "stopped" | "proceed"; clearAttempted: false };
+
 export interface SendResult {
+  existingInput?: ExistingInput;
   ok: boolean;
   sessionName: string;
   /** Present when the send was marked urgent: who marked it. */
@@ -1697,6 +1725,8 @@ export interface SendResult {
   waitedMs?: number;
   attempts?: number;
   sent?: boolean;
+  /** The recipient is a terminal seat, so `exactText` was typed without the From/To envelope. */
+  envelopeOmitted?: true;
   /** Context, not a status: the seat was in a managed compaction or restore OpenRig had recorded when this send ran. The
    *  send's own result (ok, outcome, error) is unchanged by it, and it never says the restore finished. */
   managedCompaction?: { stage: string; observed: "before_send" | "after_send"; notice: string };
@@ -2185,6 +2215,15 @@ export class SessionTransport {
    * send, add a notice saying so. The notice is context beside the send's own result, which it never changes.
    */
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
+    // A terminal seat's shell would run the envelope lines as commands. Swap before the guard,
+    // whose outbox body, hash and delivery-ID identity all key on the text actually typed.
+    // Without the envelope there's no Sent: line, so stampISO is dropped too: the delivered-latency
+    // segment must never edit a line of the exact text.
+    if (opts?.exactText !== undefined && !opts.dangerouslyInteract) {
+      const { exactText, ...rest } = opts;
+      if (!isBoundTerminalSeat(this.db, sessionName)) return this.send(sessionName, text, rest);
+      return { ...(await this.send(sessionName, exactText, { ...rest, stampISO: undefined, typedExactly: true })), envelopeOmitted: true };
+    }
     const observe = () => { try { return this.compactionObserver?.(sessionName) ?? null; } catch { return null; } };
     const before = observe();
     const result = await this.sendWithoutCompactionNotice(sessionName, text, opts);
@@ -2200,15 +2239,16 @@ export class SessionTransport {
     // Shown on delivery, and kept with a held message: who marked it urgent.
     console.info(`[transport] urgent send to ${sessionName}, marked by ${opts.urgent.by}`);
     // An explicit prompt answer is typed as keys, and a submit-only retry types no text at all: the label's letters would
-    // act as keystrokes (a menu shortcut, say). Their bytes stay exactly as given; the mark stays in the result and the log.
-    const rawKeys = opts.dangerouslyInteract === true || opts.submitOnly === true;
+    // act as keystrokes (a menu shortcut, say). A terminal seat's exact text would run the label as a command. Their bytes
+    // stay exactly as given; the mark stays in the result and the log.
+    const rawKeys = opts.dangerouslyInteract === true || opts.submitOnly === true || opts.typedExactly === true;
     const result = await this.sendClassified(sessionName, rawKeys ? text : withUrgentLine(text, opts.urgent.by), opts);
     return { ...result, urgent: opts.urgent };
   }
 
   private async sendClassified(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     const guard = this.tmuxAdapter.deliveryGuard;
-    const admission: AdmissionInput = { source: opts?.openrigNotice ? "openrig" : "agent", urgent: !!opts?.urgent };
+    const admission: AdmissionInput = { source: opts?.openrigNotice ? "openrig" : "agent", urgent: !!opts?.urgent, override: opts?.dangerouslyInteract === true };
     if (!guard) {
       // No guard, so no recorded delivery to read back: a caller already gone ends the send here.
       if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
@@ -2275,7 +2315,7 @@ export class SessionTransport {
         const members = recheck(false);
         const memberText = members?.text ?? text;
         const memberOpts = members ? { ...sendOpts, committedOutboxIds: members.outboxIds } : sendOpts;
-        if (this.guardedDelivery && !memberOpts?.submitOnly && guard.needsInputCheck(sessionName)) {
+        if (this.guardedDelivery && !memberOpts?.submitOnly && !memberOpts?.dangerouslyInteract && guard.needsInputCheck(sessionName)) {
           if (callerSignal(memberOpts)?.aborted) return callerCancelled(sessionName);
           return this.guardedDelivery.send(sessionName, memberText, memberOpts ?? {},
             memberOpts?.committedOutboxIds ?? [`guard-send-${randomUUID()}`]);
@@ -2454,6 +2494,7 @@ export class SessionTransport {
       attachmentType: meta.attachmentType,
       timeoutMs,
       binding: { sessionName, nodeId: meta.nodeId, occupant: meta.occupant, pane: meta.pane },
+      privateInput: opts.dangerouslyInteract === true,
       readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
       signal: callerSignal(opts), cancelledBy: "caller",
     });
@@ -2513,14 +2554,17 @@ export class SessionTransport {
         error: `'${sessionName}' is in a tmux mode (such as copy mode) and could not leave it, so Enter would not reach the agent. ${outcome}` };
     };
     // S01/S02 P2 observation context, frozen at attempt entry before any await.
-    const observed = this.captureObserver ? {
+    const observed = this.captureObserver && !opts?.dangerouslyInteract ? {
       attemptId: randomUUID(),
       binding: Object.freeze({ sessionName, nodeId: sessionMeta.nodeId, occupant: sessionMeta.occupant, pane: sessionMeta.pane }),
       pre: (opts?.verify ? { state: "not_reached" } : { state: "not_requested" }) as CaptureSlot,
       post: (opts?.verify ? { state: "not_reached" } : { state: "not_requested" }) as CaptureSlot,
       sentHash: null as string | null,
     } : null;
+    let existingInput: ExistingInput | undefined;
+    let overrideBeforePaste: (() => Promise<void>) | undefined;
     const observe = (result: SendResult): SendResult => {
+      if (existingInput) result = { ...result, existingInput };
       if (result.ok && runtimeAdvisory) result = { ...result, warning: [runtimeAdvisory, result.warning].filter(Boolean).join(" ") };
       if (observed && this.captureObserver) {
         safeRecord(this.captureObserver, {
@@ -2700,6 +2744,7 @@ export class SessionTransport {
         attachmentType: sessionMeta.attachmentType,
         timeoutMs: waitForIdleMs,
         binding: observed?.binding,
+        privateInput: opts?.dangerouslyInteract === true,
         readinessFromPaneOnly: opts?.readinessFromPaneOnly === true,
         signal: callerSignal(opts), cancelledBy: "caller",
       });
@@ -2757,6 +2802,7 @@ export class SessionTransport {
           // Message-only: the re-wait runs on the leftover budget, but the
           // timeout names the configured --wait-for-idle value.
           timeoutLabelMs: waitForIdleMs,
+          privateInput: opts.dangerouslyInteract === true,
           binding: observed?.binding,
           readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
           signal: callerSignal(opts), cancelledBy: "caller",
@@ -2784,7 +2830,7 @@ export class SessionTransport {
           attachmentType: sessionMeta.attachmentType,
           binding: observed?.binding,
           readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
-        });
+        }, opts.dangerouslyInteract === true);
         if (recheck.state !== "idle") {
           const late: { reason: string; error: string } =
             recheck.state === "needs_input"
@@ -2833,14 +2879,15 @@ export class SessionTransport {
     // the positive-picker guard (FR-4 — the footgun separation). The advisory is carried on the
     // success result via `warning` so the honest telemetry is surfaced.
     let sendAdvisory: string | undefined;
-    const promptOverride = waitForIdleMs === undefined && Boolean(opts?.dangerouslyInteract);
-    if (waitForIdleMs === undefined) {
+    // Broadcast can carry wait + override: after waiting, it still uses the same deliberate-input boundary.
+    const promptOverride = Boolean(opts?.dangerouslyInteract);
+    if (waitForIdleMs === undefined || promptOverride) {
       const readiness = await this.classifySendReadiness({
         sessionName,
         runtime,
         attachmentType: sessionMeta.attachmentType,
         binding: observed?.binding,
-      });
+      }, opts?.dangerouslyInteract === true);
 
       // Explicit interaction selects key input even when readiness cannot recognize the prompt.
       // Only bypassing a positive picker requires a successful audit; other states already sent.
@@ -2853,12 +2900,33 @@ export class SessionTransport {
             error: "--dangerously-interact requires --reason explaining why the prompt is being driven. No text was sent.",
           };
         }
-        const audit = this.recordPromptOverride({
-          sessionName,
-          readiness,
-          actorSession: opts.actorSession ?? null,
-          overrideReason: opts.reason ?? null,
-        });
+        const auditInput = { sessionName, readiness, actorSession: opts.actorSession ?? null, overrideReason: opts.reason ?? null };
+        const target = this.tmuxAdapter.deliveryGuard?.maybeTarget(sessionName);
+        // Native menus retain their audited key-driving path. Otherwise inspect under the same lease,
+        // after buffer preparation, immediately before the adapter's final identity check and paste.
+        if (target && readiness.state !== "needs_input") {
+          overrideBeforePaste = async () => {
+            const unchecked = opts.typeWithoutChecking === true;
+            const snapshot = unchecked ? null : await this.readWithinDeadline("session_transport.override_input",
+              () => this.tmuxAdapter.captureComposerSnapshot(target.pane ?? sessionName));
+            const input = unchecked ? null : inspectComposerInput(snapshot, runtime);
+            const classification: ExistingInput["classification"] = unchecked ? "not_checked" : input!.state === "unknown" ? "unreadable"
+              : input!.state === "text" ? "typed_or_pasted" : input!.ghost ? "suggestion_only" : "empty";
+            existingInput = { target, classification, rows: input?.rows ?? [], suggestionRows: input?.suggestionRows ?? [],
+              cursor: input?.cursor ?? null, fullContentsVisible: !!input && input.state !== "unknown" && !input.collapsedPaste,
+              ...(input?.unknownReason ? { reason: input.unknownReason } : {}), cleared: false };
+            const stopped = classification === "typed_or_pasted" || classification === "unreadable";
+            const audit = this.recordPromptOverride({ ...auditInput, input: { classification, visibleRows: existingInput.rows.length,
+              suggestionRows: existingInput.suggestionRows.length, choice: unchecked ? "type_without_checking" : "inspect",
+              outcome: stopped ? "stopped" : "proceed", clearAttempted: false } });
+            if (!audit.ok) sendAdvisory = `prompt-override: audit unavailable (${audit.reason}).`;
+            if (stopped) throw new DeliveryGuardError(classification === "unreadable" ? "override_input_unknown" : "override_input_present",
+              classification === "unreadable" ? "Input could not be read. Nothing was typed. Inspect the native terminal, deliberately clear its prompt with native/tmux controls, then retry; or explicitly choose --type-without-checking (does not clear)."
+                : "Existing typed or pasted input (author unknown). Nothing was typed. Inspect the shown input, deliberately clear the prompt with native/tmux controls, then retry. Manual clearing is outside OpenRig's lease and observation checks and is not recorded.");
+            if (unchecked) sendAdvisory = [sendAdvisory, "Input was not checked or cleared; this send may join or submit existing text."].filter(Boolean).join(" ");
+          };
+        }
+        const audit = overrideBeforePaste ? { ok: true as const } : this.recordPromptOverride(auditInput);
         if (!audit.ok && readiness.state === "needs_input") {
           return {
             ok: false,
@@ -2956,7 +3024,7 @@ export class SessionTransport {
       () => {
         opts?.beforeWrite?.();
         writeIssued = true;
-        if (promptOverride) return this.tmuxAdapter.sendText(sessionName, text, beforePaste, { bracketed: false });
+        if (promptOverride) return this.tmuxAdapter.sendText(sessionName, text, beforePaste, { bracketed: false, beforePaste: overrideBeforePaste });
         return beforePaste ? this.tmuxAdapter.sendText(sessionName, text, beforePaste) : this.tmuxAdapter.sendText(sessionName, text);
       },
       (result) => result.ok ? "ok" : "failed",
@@ -2966,7 +3034,7 @@ export class SessionTransport {
     }
     if (!textResult.ok) {
       // A draft refusal is the guard holding the write before any input; it is not an attempted write.
-      const policyRefusal = typeof textResult.code === "string" && (textResult.code.startsWith("draft_") || textResult.code === "managed_compaction_pending");
+      const policyRefusal = typeof textResult.code === "string" && (textResult.code.startsWith("draft_") || textResult.code.startsWith("override_input_") || textResult.code === "managed_compaction_pending");
       return observe({
         ok: false,
         sessionName,
@@ -3154,6 +3222,7 @@ export class SessionTransport {
     signal?: AbortSignal;
     /** Whose cancellation the signal carries: managed preparation (the default) or the send's caller. */
     cancelledBy?: "caller";
+    privateInput?: boolean;
     binding?: ObservedBinding;
     readinessFromPaneOnly?: boolean;
     // Optional display value for timeout messages. The deadline always comes
@@ -3248,12 +3317,12 @@ export class SessionTransport {
    *  caller's cancellation. Null when the deadline or the cancellation wins; the abandoned observation is ignored,
    *  never delivered on. */
   private async observeReadinessWithin(
-    input: { sessionName: string; runtime: string | null; attachmentType: string | null; binding?: ObservedBinding; readinessFromPaneOnly?: boolean },
+    input: { sessionName: string; runtime: string | null; attachmentType: string | null; binding?: ObservedBinding; readinessFromPaneOnly?: boolean; privateInput?: boolean },
     remainingMs: number,
     cancel?: AbortSignal,
   ): Promise<AgentActivity | null> {
     if (cancel?.aborted) return null;
-    const observation = this.classifySendReadiness(input);
+    const observation = this.classifySendReadiness(input, input.privateInput);
     observation.catch(() => undefined);
     let timer: ReturnType<typeof setTimeout> | undefined;
     let onAbort: (() => void) | undefined;
@@ -3317,7 +3386,7 @@ export class SessionTransport {
     attachmentType: string | null;
     binding?: ObservedBinding;
     readinessFromPaneOnly?: boolean;
-  }): Promise<AgentActivity> {
+  }, privateInput = false): Promise<AgentActivity> {
     const now = this.now();
     const composerSnapshot = this.tmuxAdapter.deliveryGuard?.needsInputCheck(input.sessionName)
       ? () => this.tmuxAdapter.captureComposerSnapshot(input.binding?.pane ?? input.sessionName) : undefined;
@@ -3363,7 +3432,7 @@ export class SessionTransport {
             attachmentType: input.attachmentType as "tmux" | "external_cli" | null | undefined,
             tmuxAdapter: this.tmuxAdapter,
             now,
-            captureObserver: this.captureObserver,
+            captureObserver: privateInput ? undefined : this.captureObserver,
             binding: input.binding,
           });
           if (paneVeto.state === "needs_input") return paneVeto;
@@ -3391,7 +3460,7 @@ export class SessionTransport {
           attachmentType: input.attachmentType as "tmux" | "external_cli" | null | undefined,
           tmuxAdapter: this.tmuxAdapter,
           now,
-          captureObserver: this.captureObserver,
+          captureObserver: privateInput ? undefined : this.captureObserver,
           binding: input.binding,
         });
         if (paneVeto.state === "needs_input") {
@@ -3408,7 +3477,7 @@ export class SessionTransport {
       attachmentType: input.attachmentType as "tmux" | "external_cli" | null | undefined,
       tmuxAdapter: this.tmuxAdapter,
       now,
-      captureObserver: this.captureObserver,
+      captureObserver: privateInput ? undefined : this.captureObserver,
       binding: input.binding,
       // Pane-only readiness must not send into a status row whose timer hasn't appeared yet.
       timerlessStatusIsLive: input.readinessFromPaneOnly === true,
@@ -3564,6 +3633,7 @@ export class SessionTransport {
     readiness: AgentActivity;
     actorSession: string | null;
     overrideReason: string | null;
+    input?: OverrideInputAudit;
   }): { ok: true } | { ok: false; reason: string } {
     if (!this.eventBus) return { ok: false, reason: "audit_unconfigured" };
     const resolved = this.agentActivityStore?.resolveSession({ sessionName: input.sessionName });
@@ -3579,6 +3649,7 @@ export class SessionTransport {
         detectedReason: input.readiness.reason,
         evidenceSource: input.readiness.evidenceSource,
         overrideReason: input.overrideReason,
+        ...(input.input ? { input: input.input } : {}),
       });
       return { ok: true };
     } catch {
@@ -3730,6 +3801,7 @@ export class SessionTransport {
       // (h) thread the resolved stampISO so send()'s delivered-latency calc measures from the SAME
       // compose stamp the envelope carries (opts may not have carried one; the local stampISO is truth).
       const result = await this.send(session.sessionName, perRecipientText, { ...opts, stampISO,
+        exactText: opts?.envelopeSender ? text : undefined,
         deliveryId: opts?.deliveryId ? `${opts.deliveryId}:${session.sessionName}` : undefined });
       results.push(result);
     }
