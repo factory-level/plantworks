@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # The image's entrypoint: `daemon`, `broker` or `worker` runs that role. Anything else is passed to
-# the `plantworks` CLI, for example `--version` or `pw worker drain --seat <s> --timeout-s <n>`.
+# the `plantworks` CLI, for example `--version` or `pw team emit ...`.
 #
 # Network: the daemon binds 127.0.0.1 only, because its queue routes aren't authenticated (PW-16).
 # So the broker and workers must share the daemon's network namespace (one pod, or Docker's
 # `--network container:<daemon>`). These images don't provide remote seat transport: Pi seats run
-# in the daemon's container, as local tmux sessions.
+# in the daemon's container, as local tmux sessions. Run exactly one worker per seat, with a
+# unique, stable PLANTWORKS_SEAT: never several replicas sharing one seat.
 set -euo pipefail
 
 role="${1:-help}"

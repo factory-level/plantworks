@@ -25,8 +25,14 @@ fork/container/smoke.sh [image]    # checks every role against stubs (needs Dock
 
 - **One network namespace.** The daemon binds loopback only, because its queue routes aren't authenticated (see `../src/daemon/README.md`). So the broker and the workers must share its network namespace: containers in one pod, or `docker run --network container:<daemon>`. The broker reaches the daemon at `PLANTWORKS_DAEMON_URL` (default `http://127.0.0.1:7533`).
 - **No remote seat transport.** Pi seats are local tmux sessions in the daemon's container, as upstream runs them. A worker in another pod can't drive a seat, and neither the S1 startup-options passthrough (PW-31) nor these images change that. It's a recorded deployment blocker, not something these images fix.
+- **One worker per seat, with a stable identity.** Each worker container needs its own unique
+  `PLANTWORKS_SEAT` that stays the same across restarts, and no two workers may ever run for the
+  same seat at once. So don't run workers as one Deployment with replicas sharing a `--seat`:
+  give each seat its own workload (for example a StatefulSet ordinal or one Deployment per seat).
+  Overlapping workers on a seat can interfere with each other's drain (PW-22) and with
+  reconciliation.
 - **The slot cap is unchanged.** It counts broker job states, not physical Pi execution. An ambiguous handoff keeps its slot, and stopping a worker container proves nothing about a Pi run in progress.
-- **No health checks or drain hooks yet.** The image defines no `HEALTHCHECK`. The broker's `/healthz` and `worker drain` come with PW-22; add them once it merges.
+- **No health check yet; it's tracked in this card.** The image defines no `HEALTHCHECK` until PW-22 (the broker's `/healthz` and `worker drain`) merges. PW-25 then adds it, with a delta review and a smoke run on the final head. Until then, `worker drain` isn't available.
 
 ## Pins and how the image is built
 
