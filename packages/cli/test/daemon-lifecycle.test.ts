@@ -381,7 +381,7 @@ describe("Daemon Lifecycle", () => {
     await import("@openrig/daemon/instance-initialization");
     vi.useFakeTimers();
     const child = Object.assign(new EventEmitter(), { pid: 12345, exitCode: null as number | null, signalCode: null, unref: vi.fn() });
-    const reason = "OPENRIG_DB_CONFLICT: Another live daemon holds /fixture/shared.sqlite. To proceed once, run OPENRIG_ALLOW_DB_CONFLICT=1 rig daemon start.";
+    const reason = "OPENRIG_DB_CONFLICT: Another live daemon holds /fixture/shared.sqlite. To proceed once, run rig daemon start --allow-db-conflict.";
     const deps = mockDeps({
       fetch: vi.fn().mockRejectedValue(new Error("refused")),
       readFileFrom: vi.fn(() => `Error: ${reason}\n`),

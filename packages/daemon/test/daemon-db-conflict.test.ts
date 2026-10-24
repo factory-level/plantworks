@@ -34,7 +34,7 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(
 
 it("stops before opening the database on an opted-in confirmed live-daemon conflict, with a one-start remedy", async () => {
   policy = "stop";
-  await expect(createDaemon({ dbPath })).rejects.toThrow(/OPENRIG_DB_CONFLICT:.*OPENRIG_ALLOW_DB_CONFLICT=1/s);
+  await expect(createDaemon({ dbPath })).rejects.toThrow(/OPENRIG_DB_CONFLICT:.*--allow-db-conflict/s);
   expect(openDb).not.toHaveBeenCalled();
   expect(readFileSync(dbPath, "utf8")).toBe("original database bytes");
 });

@@ -118,7 +118,7 @@ export async function daemonDatabaseWarnings(dbPath: string, home: string, selec
   }));
   const confirmed = conflicts.filter((message): message is string => message !== undefined);
   if (confirmed.length && opts?.conflictPolicy === "stop" && !opts.allowConflict) {
-    throw new Error(`OPENRIG_DB_CONFLICT: ${confirmed.join(" ")} Daemon startup stopped before opening the database (daemon.db_conflict=stop). Use separate database paths for independent instances. To proceed once deliberately, run OPENRIG_ALLOW_DB_CONFLICT=1 rig daemon start with the same options.`);
+    throw new Error(`OPENRIG_DB_CONFLICT: ${confirmed.join(" ")} Daemon startup stopped before opening the database (daemon.db_conflict=stop). Use separate database paths for independent instances. To proceed once deliberately, run rig daemon start --allow-db-conflict with the same options.`);
   }
   return [...warnings, ...confirmed.map(message => `${message} Startup and database writes continue; use separate database paths for independent instances.`)];
 }
