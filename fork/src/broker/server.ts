@@ -9,7 +9,8 @@ import { bodyLimit } from "hono/body-limit";
 import { serve } from "@hono/node-server";
 import { isLoopbackBind } from "../../../packages/daemon/dist/middleware/auth-bearer-token.js";
 import { canTransition, validateEnvelope, type JobEnvelope, type JobState } from "../contract/job.ts";
-import { createEmitter, jobStateEvent } from "../events/job-state.ts";
+import { createEmitter, jobStateEvent, type CloudEvent } from "../events/job-state.ts";
+import { SWEEP_MS, decisionRoute, requestApproval, sweepApprovals } from "./approvals.ts";
 import { PHASE_0_1, validateSpec, type Platform, type TeamSpec } from "../team/spec.ts";
 import type { JobRow, Store } from "./store.ts";
 
@@ -44,7 +45,17 @@ export function jobRecord(row: JobRow) {
 }
 
 export type Emit = (row: Pick<JobRow, "job_id" | "team">, state: JobState, detail?: Record<string, unknown>) => void;
-export interface BrokerContext { store: Store; teams: Map<string, TeamSpec>; emit: Emit }
+/** Posts any Plantworks CloudEvent to the team's callbackDefault. */
+export type Send = (team: string, event: CloudEvent) => void;
+export interface BrokerContext {
+  store: Store;
+  teams: Map<string, TeamSpec>;
+  /** A plantworks.job.state event for a row. */
+  emit: Emit;
+  send: Send;
+  /** The absolute URL a decision for this job is POSTed to. */
+  decisionUrl: (jobId: string) => string;
+}
 /** Adds routes to the broker without editing this file (PW-18's claim-next, PW-23's decisions). */
 export type BrokerRoutes = (app: Hono, ctx: BrokerContext) => void;
 
@@ -55,7 +66,9 @@ export interface BrokerOptions {
   token?: string;
   routes?: BrokerRoutes[];
   /** Test hook; defaults to one PW-10 emitter per team, posting to its events.callbackDefault. */
-  emit?: Emit;
+  send?: Send;
+  /** The broker's address as callers reach it, for decision URLs (PLANTWORKS_BROKER_PUBLIC_URL). startBroker defaults it to the listen address. */
+  publicUrl?: string;
   /** Where `${NAME}` placeholders in a spec's callbackDefault are read from. Defaults to process.env. */
   env?: Record<string, string | undefined>;
   log?: (line: string) => void;
@@ -64,10 +77,16 @@ export interface BrokerOptions {
 const fail = (status: 400 | 401 | 404 | 409 | 413, error: string, message: string, extra: Record<string, unknown> = {}) =>
   Response.json({ error, message, ...extra }, { status });
 
-export function createBroker(opts: BrokerOptions): Hono {
+export function createBroker(opts: BrokerOptions): Hono & { sweepApprovals: () => number } {
   const { store, teams } = opts;
   const log = opts.log ?? ((l) => process.stderr.write(`${l}\n`));
-  const emit = opts.emit ?? teamEmitters(teams, opts.env ?? process.env, log);
+  const send = opts.send ?? teamSenders(teams, opts.env ?? process.env, log);
+  const emit: Emit = (row, state, detail = {}) => send(row.team, jobStateEvent({ jobId: row.job_id, team: row.team }, state, detail));
+  const decisionUrl = (jobId: string) => {
+    if (!opts.publicUrl) throw new Error("no publicUrl for decision URLs");
+    return `${opts.publicUrl.replace(/\/$/, "")}${API}/jobs/${encodeURIComponent(jobId)}/decision`;
+  };
+  const ctx: BrokerContext = { store, teams, emit, send, decisionUrl };
   const app = new Hono();
 
   if (opts.token) {
@@ -100,13 +119,12 @@ export function createBroker(opts: BrokerOptions): Hono {
     if (job.timeoutSeconds !== undefined && job.timeoutSeconds > qc.timeoutSeconds) {
       return fail(400, "timeout_over_ceiling", `timeoutSeconds ${job.timeoutSeconds} exceeds the ${cls} ceiling of ${qc.timeoutSeconds}`);
     }
-    // ponytail: approval classes are refused until PW-23 adds held jobs and decisions, so no
-    // job ever runs unapproved; PW-23 replaces this with `held`.
-    if (qc.approval !== "never") return fail(400, "approval_unsupported", `class ${cls} needs approval (${qc.approval}), which this broker does not handle yet`);
-
-    const { row, created } = store.insert(job, cls, "queued");
+    // A class that needs approval (per-job or always) holds every job until it is decided.
+    const held = qc.approval !== "never";
+    const { row, created } = store.insert(job, cls, held ? "held" : "queued", held ? qc.approvalTtlSeconds : undefined);
     if (!created) return replay(row, job);
-    emit(row, "queued");
+    emit(row, row.state);
+    if (held) requestApproval(row, ctx);
     return c.json(jobRecord(row), 201);
   });
 
@@ -125,8 +143,9 @@ export function createBroker(opts: BrokerOptions): Hono {
     return c.json(jobRecord(next));
   });
 
-  for (const add of opts.routes ?? []) add(app, { store, teams, emit });
-  return app;
+  decisionRoute(API, fail, jobRecord)(app, ctx);
+  for (const add of opts.routes ?? []) add(app, ctx);
+  return Object.assign(app, { sweepApprovals: () => sweepApprovals(ctx) });
 
   function replay(row: JobRow, job: JobEnvelope) {
     if (canonical(JSON.parse(row.envelope)) === canonical(job)) return Response.json(jobRecord(row), { status: 200 });
@@ -139,11 +158,15 @@ export function startBroker(opts: BrokerOptions & { host: string; port: number }
   if (!isLoopbackBind(opts.host) && !opts.token) {
     throw new Error(`refusing to bind the broker on ${opts.host} without PLANTWORKS_BROKER_TOKEN`);
   }
-  const app = createBroker(opts);
+  const live = { ...opts }; // publicUrl is filled in once the port is known; createBroker reads it per request
+  const app = createBroker(live);
   return new Promise((resolve) => {
     const server = serve({ fetch: app.fetch, hostname: opts.host, port: opts.port }, (info) => {
       const host = info.address.includes(":") ? `[${info.address}]` : info.address;
-      resolve({ url: `http://${host}:${info.port}`, close: () => new Promise((r) => server.close(() => r())) });
+      const url = `http://${host}:${info.port}`;
+      live.publicUrl ??= url;
+      const sweep = setInterval(() => app.sweepApprovals(), SWEEP_MS);
+      resolve({ url, close: () => new Promise((r) => { clearInterval(sweep); server.close(() => r()); }) });
     });
   });
 }
@@ -162,15 +185,20 @@ export function expand(value: string, env: Record<string, string | undefined>): 
   });
 }
 
-function teamEmitters(teams: Map<string, TeamSpec>, env: Record<string, string | undefined>, log: (l: string) => void): Emit {
-  const emitters = new Map([...teams].map(([name, spec]) => [name, createEmitter({
-    url: expand(spec.events.callbackDefault, env),
-    onDeliveryError: (err) => log(`plantworks.job.state not delivered: ${err.message}`),
-  })]));
-  return (row, state, detail = {}) => {
-    // Delivery runs alongside the request; a slow consumer never holds the API.
-    emitters.get(row.team)?.emit(jobStateEvent({ jobId: row.job_id, team: row.team }, state, detail)).catch(() => {});
-  };
+/**
+ * One PW-10 emitter per team, posting to its callbackDefault. Approval events go there too: the
+ * front door is the only approval consumer this broker knows (`events.approvalConsumer: frontdoor`).
+ */
+function teamSenders(teams: Map<string, TeamSpec>, env: Record<string, string | undefined>, log: (l: string) => void): Send {
+  const emitters = new Map([...teams].map(([name, spec]) => {
+    if (spec.events.approvalConsumer !== "frontdoor") throw new Error(`team ${name}: events.approvalConsumer ${spec.events.approvalConsumer} is not supported (only frontdoor)`);
+    return [name, createEmitter({
+      url: expand(spec.events.callbackDefault, env),
+      onDeliveryError: (err) => log(`${err.event.type} not delivered: ${err.message}`),
+    })];
+  }));
+  // Delivery runs alongside the request; a slow consumer never holds the API.
+  return (team, event) => { emitters.get(team)?.emit(event).catch(() => {}); };
 }
 
 const digest = (s: string) => createHash("sha256").update(s).digest();

@@ -9,10 +9,12 @@ import { fileURLToPath } from "node:url";
 import { emitTeam } from "../team/command.ts";
 import { PHASE_0_1 } from "../team/spec.ts";
 import { stubConsumer } from "../job/fixtures/stubs.ts";
-import { API, createBroker, expand, jobRecord, loadTeams, startBroker, type BrokerRoutes, type Emit } from "./server.ts";
+import { API, createBroker, expand, jobRecord, loadTeams, startBroker, type BrokerRoutes, type Send } from "./server.ts";
+import type { CloudEvent } from "../events/job-state.ts";
 import { openStore } from "./store.ts";
+import Database from "better-sqlite3";
 
-// The ADR 0204 sample team: `quick` needs no approval, `long` is per-job (refused until PW-23).
+// The ADR 0204 sample team: `quick` needs no approval, `long` is per-job; `review` is `always`, with a 60 s TTL.
 const definition = (team = "social-media") => ({
   team,
   trains: 1,
@@ -22,6 +24,7 @@ const definition = (team = "social-media") => ({
   classes: {
     quick: { slots: 1, model: "qwen3.5:9b", context: { maxContextTokens: 16384, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1536, deadlineSeconds: 60 }, approval: "never", timeoutSeconds: 900, maxAttempts: 2 },
     long: { slots: 0, model: "qwen3.5:9b", context: { maxContextTokens: 32768, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1024, deadlineSeconds: 60 }, approval: "per-job", timeoutSeconds: 3600, maxAttempts: 1 },
+    review: { slots: 0, model: "qwen3.5:9b", context: { maxContextTokens: 16384, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1536, deadlineSeconds: 60 }, approval: "always", approvalTtlSeconds: 60, timeoutSeconds: 900, maxAttempts: 1 },
   },
   events: { callbackDefault: "${PLANTWORKS_FRONTDOOR_CALLBACK}", approvalConsumer: "frontdoor" },
 });
@@ -35,14 +38,22 @@ function teamsDir(defs = [definition()]) {
 
 const envelope = (over: Record<string, unknown> = {}) => ({ jobId: "kb-social-media-t_3fa9c01e-a1", team: "social-media", task: { prompt: "Say hi" }, ...over });
 
-function setup(opts: { token?: string; routes?: BrokerRoutes[] } = {}) {
-  const store = openStore(":memory:");
+function setup(opts: { token?: string; routes?: BrokerRoutes[]; now?: () => Date } = {}) {
+  const store = openStore(":memory:", opts.now);
+  const sent: CloudEvent[] = [];
+  // plantworks.job.state events as [jobId, state, detail]
   const events: [string, string, Record<string, unknown>][] = [];
-  const emit: Emit = (row, state, detail = {}) => events.push([row.job_id, state, detail]);
-  const app = createBroker({ store, teams: loadTeams(teamsDir(), platform), emit, ...opts });
+  const send: Send = (_team, e) => {
+    sent.push(e);
+    if (e.type !== "plantworks.job.state") return;
+    const { jobId, team, attempt, state, ...detail } = e.data;
+    events.push([jobId as string, state as string, detail]);
+  };
+  const { now: _now, ...rest } = opts;
+  const app = createBroker({ store, teams: loadTeams(teamsDir(), platform), send, publicUrl: "http://broker.test", ...rest });
   const call = (method: string, path: string, body?: unknown, headers: Record<string, string> = {}) =>
     app.request(`${API}${path}`, { method, headers: { "content-type": "application/json", ...headers }, body: body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body) });
-  return { store, events, app, call };
+  return { store, events, sent, app, call };
 }
 
 test("submit is idempotent on jobId: 201 new, 200 the same envelope, 409 job_conflict a different one", async () => {
@@ -70,7 +81,6 @@ test("submit refuses what the team spec does not allow, before storing anything"
     [envelope({ team: "other-team", jobId: "kb-x-t_00000000-a1" }), "unknown_team"],
     [envelope({ class: "huge" }), "unknown_class"],
     [envelope({ timeoutSeconds: 901 }), "timeout_over_ceiling"],
-    [envelope({ class: "long" }), "approval_unsupported"],
   ];
   for (const [body, error] of cases) {
     const res = await t.call("POST", "/jobs", body);
@@ -215,4 +225,131 @@ test("plantworks pw broker serve: submit over HTTP, the event is delivered, and 
   assert.equal((await post(b.url, envelope())).status, 200, "the restarted broker still knows the job");
   await b.stop();
   await consumer.close();
+});
+
+// --- Approvals (PW-23) -----------------------------------------------------------------------
+
+const approvals = (t: { sent: CloudEvent[] }) => t.sent.filter((e) => e.type.startsWith("plantworks.approval.")).map((e) => {
+  const { jobId, team, attempt, ...data } = e.data;
+  return [e.type.slice("plantworks.approval.".length), data];
+});
+const decide = (t: ReturnType<typeof setup>, jobId: string, body: unknown) => t.call("POST", `/jobs/${jobId}/decision`, body);
+
+test("an approval class holds the job and asks for a decision; approve queues it once", async () => {
+  const t = setup();
+  const job = envelope({ class: "long", task: { prompt: "Long one", title: "Weekly recap" } });
+  const res = await t.call("POST", "/jobs", job);
+  assert.equal(res.status, 201);
+  assert.equal((await res.json()).state, "held");
+  assert.deepEqual(t.events, [[job.jobId, "held", {}]]);
+  assert.deepEqual(approvals(t), [["requested", { class: "long", decisionUrl: `http://broker.test${API}/jobs/${job.jobId}/decision`, expiresAt: null, title: "Weekly recap" }]]);
+  assert.equal(t.store.reserve("social-media", "long", "seat-1", "q-1"), undefined, "a held job is not claimable");
+
+  const ok = await decide(t, job.jobId, { decision: "approve", by: "a-person" });
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).state, "queued");
+  assert.deepEqual(t.events.at(-1), [job.jobId, "queued", {}]);
+  assert.deepEqual(approvals(t).at(-1), ["resolved", { decision: "approved", by: "a-person" }]);
+  assert.ok(t.store.reserve("social-media", "long", "seat-1", "q-1"), "approved, it is claimable");
+
+  const again = await decide(t, job.jobId, { decision: "approve" });
+  assert.equal(again.status, 200, "the same decision again is idempotent");
+  const flip = await decide(t, job.jobId, { decision: "deny" });
+  assert.equal(flip.status, 409);
+  assert.equal((await flip.json()).error, "already_decided");
+  assert.equal(t.sent.length, 4, "neither repeat emitted anything");
+});
+
+test("deny cancels a held job with reason denied, and the reason travels as its message", async () => {
+  const t = setup();
+  const job = envelope({ class: "review" });
+  await t.call("POST", "/jobs", job);
+  const res = await decide(t, job.jobId, { decision: "deny", by: "a-person", reason: "not this week" });
+  assert.equal(res.status, 200);
+  const rec = await res.json();
+  assert.deepEqual([rec.state, rec.detail], ["cancelled", { reason: "denied", message: "not this week" }]);
+  assert.deepEqual(approvals(t).at(-1), ["resolved", { decision: "denied", by: "a-person", reason: "not this week" }]);
+});
+
+test("a run-out TTL cancels the job as approval-expired, by the sweep or at decision time", async () => {
+  let clock = Date.parse("2026-10-24T12:00:00Z");
+  const t = setup({ now: () => new Date(clock) });
+  const a = envelope({ class: "review" });
+  const b = envelope({ class: "review", jobId: "kb-social-media-t_3fa9c01e-a2" });
+  await t.call("POST", "/jobs", a);
+  assert.deepEqual(approvals(t)[0]![1], { class: "review", decisionUrl: `http://broker.test${API}/jobs/${a.jobId}/decision`, expiresAt: "2026-10-24T12:01:00.000Z" });
+  clock += 30_000;
+  await t.call("POST", "/jobs", b);
+  assert.equal(t.app.sweepApprovals(), 0);
+  clock += 30_000;
+  assert.equal(t.app.sweepApprovals(), 1, "a's TTL ran out; b has 30 s left");
+  assert.deepEqual(t.store.get(a.jobId)!.state, "cancelled");
+  assert.deepEqual(JSON.parse(t.store.get(a.jobId)!.detail), { reason: "approval-expired" });
+  assert.deepEqual(approvals(t).at(-1), ["resolved", { decision: "expired" }]);
+
+  clock += 30_000; // b runs out too, before any sweep
+  const late = await decide(t, b.jobId, { decision: "approve" });
+  assert.equal(late.status, 409);
+  assert.equal((await late.json()).error, "approval_expired");
+  assert.equal(t.store.get(b.jobId)!.state, "cancelled");
+});
+
+test("decisions are refused for unknown, never-held or front-door-cancelled jobs and bad bodies", async () => {
+  const t = setup();
+  assert.equal((await decide(t, "kb-social-media-t_00000000-a1", { decision: "approve" })).status, 404);
+  await t.call("POST", "/jobs", envelope());
+  const notHeld = await decide(t, envelope().jobId, { decision: "approve" });
+  assert.deepEqual([notHeld.status, (await notHeld.json()).error], [409, "not_held"]);
+  const held = envelope({ class: "long", jobId: "kb-social-media-t_3fa9c01e-a2" });
+  await t.call("POST", "/jobs", held);
+  for (const body of ["{nope", { decision: "maybe" }, { decision: "approve", extra: 1 }, { decision: "deny", reason: "x".repeat(1001) }]) {
+    const res = await decide(t, held.jobId, body);
+    assert.deepEqual([res.status, (await res.json()).error], [400, "invalid_decision"], JSON.stringify(body).slice(0, 40));
+  }
+  assert.equal((await t.call("POST", `/jobs/${held.jobId}/cancel`)).status, 200, "the front door can still cancel a held job");
+  const after = await decide(t, held.jobId, { decision: "approve" });
+  assert.deepEqual([after.status, (await after.json()).error], [409, "not_held"]);
+});
+
+test("a broker file from before PW-23 gains the approval columns", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "pw-mig-")), "broker.sqlite");
+  openStore(file).close();
+  const raw = new Database(file);
+  raw.exec("ALTER TABLE jobs DROP COLUMN approval_expires_at; ALTER TABLE jobs DROP COLUMN approval_decision");
+  raw.close();
+  const store = openStore(file);
+  const { row } = store.insert(envelope() as any, "review", "held", 60);
+  assert.ok(row.approval_expires_at);
+  assert.equal(row.approval_decision, null);
+  store.close();
+});
+
+test("plantworks pw broker serve: a held job is approved through the decision URL it announced", async () => {
+  const consumer = await stubConsumer();
+  const home = mkdtempSync(join(tmpdir(), "pw-broker-"));
+  const platformFile = join(home, "platform.json");
+  writeFileSync(platformFile, JSON.stringify(platform));
+  const env = { ...process.env, OPENRIG_HOME: home, PLANTWORKS_TEAMS_DIR: teamsDir(), PLANTWORKS_FRONTDOOR_CALLBACK: consumer.url, PLANTWORKS_BROKER_TOKEN: "t0k" };
+  const child = spawn(process.execPath, [fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url)), "pw", "broker", "serve", "--platform", platformFile, "--port", "0"], { env });
+  try {
+    const url = await new Promise<string>((resolve, reject) => {
+      let out = "";
+      child.stdout.on("data", (d) => { out += d; const m = /listening on (\S+)/.exec(out); if (m) resolve(m[1]!); });
+      child.on("exit", (code) => reject(new Error(`broker exited ${code}`)));
+    });
+    const auth = { authorization: "Bearer t0k", "content-type": "application/json" };
+    const job = envelope({ class: "long" });
+    assert.equal((await fetch(`${url}${API}/jobs`, { method: "POST", headers: auth, body: JSON.stringify(job) })).status, 201);
+    const until = async (n: number) => { for (let i = 0; i < 100 && consumer.events.length < n; i++) await new Promise((r) => setTimeout(r, 20)); };
+    await until(2);
+    const requested = consumer.events.find((e) => e.type === "plantworks.approval.requested");
+    assert.equal(requested.data.decisionUrl, `${url}${API}/jobs/${job.jobId}/decision`);
+    const res = await fetch(requested.data.decisionUrl, { method: "POST", headers: auth, body: JSON.stringify({ decision: "approve", by: "a-person" }) });
+    assert.equal(res.status, 200);
+    await until(4);
+    assert.deepEqual(consumer.events.map((e) => e.id), ["held", "approval.requested", "queued", "approval.resolved"].map((s) => `${job.jobId}:${s}`));
+  } finally {
+    await new Promise<void>((r) => { child.once("exit", () => r()); child.kill("SIGTERM"); });
+    await consumer.close();
+  }
 });

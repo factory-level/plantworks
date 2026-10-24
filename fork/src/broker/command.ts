@@ -19,14 +19,15 @@ export function brokerVerb(pw: Command): void {
     .option("--db <path>", "broker SQLite file (default: $OPENRIG_HOME/plantworks/broker.sqlite)")
     .option("--host <host>", "bind address; anything but loopback needs PLANTWORKS_BROKER_TOKEN", BROKER_DEFAULTS.host)
     .option("--port <port>", "port", String(BROKER_DEFAULTS.port))
-    .action(async (opts: { teams?: string; platform?: string; db?: string; host: string; port: string }) => {
+    .option("--public-url <url>", "the broker's address as callers reach it, for approval decision URLs (default: $PLANTWORKS_BROKER_PUBLIC_URL, else the listen address)")
+    .action(async (opts: { teams?: string; platform?: string; db?: string; host: string; port: string; publicUrl?: string }) => {
       const dir = opts.teams ?? process.env.PLANTWORKS_TEAMS_DIR;
       let store;
       try {
         if (!dir) throw new Error("no team specs: pass --teams or set PLANTWORKS_TEAMS_DIR");
         const teams = loadTeams(dir, loadPlatform(opts.platform));
         store = openStore(opts.db ?? join(process.env.OPENRIG_HOME!, "plantworks", "broker.sqlite"));
-        const server = await startBroker({ store, teams, token: process.env.PLANTWORKS_BROKER_TOKEN?.trim() || undefined, host: opts.host, port: Number(opts.port) });
+        const server = await startBroker({ store, teams, token: process.env.PLANTWORKS_BROKER_TOKEN?.trim() || undefined, host: opts.host, port: Number(opts.port), publicUrl: opts.publicUrl ?? (process.env.PLANTWORKS_BROKER_PUBLIC_URL?.trim() || undefined) });
         console.log(`plantworks broker listening on ${server.url} for ${[...teams.keys()].join(", ")}`);
         const stop = async () => { await server.close(); store!.close(); };
         process.once("SIGINT", stop);

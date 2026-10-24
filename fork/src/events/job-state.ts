@@ -17,6 +17,9 @@ export interface JobStateEvent {
   data: { jobId: string; team: string; attempt: number; state: JobState } & TransitionDetail;
 }
 
+/** Any Plantworks CloudEvent the emitter can carry: plantworks.job.state, or plantworks.approval.* (PW-23). */
+export type CloudEvent = Omit<JobStateEvent, "type" | "data"> & { type: string; data: Record<string, unknown> };
+
 export function jobStateEvent(
   job: { jobId: string; team: string },
   state: JobState,
@@ -55,9 +58,9 @@ export interface EmitterOptions {
 
 /** An event that could not be delivered: a permanent 3xx/4xx, or the retry budget ran out. */
 export class DeliveryError extends Error {
-  readonly event: JobStateEvent;
+  readonly event: CloudEvent;
   readonly attempts: number;
-  constructor(message: string, event: JobStateEvent, attempts: number) {
+  constructor(message: string, event: CloudEvent, attempts: number) {
     super(message);
     this.event = event;
     this.attempts = attempts;
@@ -93,7 +96,7 @@ export function createEmitter(opts: EmitterOptions) {
   } = opts;
   let tail: Promise<unknown> = Promise.resolve();
 
-  async function deliver(event: JobStateEvent): Promise<void> {
+  async function deliver(event: CloudEvent): Promise<void> {
     for (let attempt = 1; ; attempt++) {
       let why: string;
       let wait: number | undefined;
@@ -120,7 +123,7 @@ export function createEmitter(opts: EmitterOptions) {
   }
 
   return {
-    emit(event: JobStateEvent): Promise<void> {
+    emit(event: CloudEvent): Promise<void> {
       const run = tail.then(() => deliver(event));
       tail = run.catch((err: DeliveryError) => {
         try { onDeliveryError(err); } catch { /* a failing hook must not stall later events */ }
