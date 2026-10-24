@@ -84,6 +84,7 @@ test("submit refuses what the team spec does not allow, before storing anything"
     [envelope({ class: "huge" }), "unknown_class"],
     [envelope({ timeoutSeconds: 901 }), "timeout_over_ceiling"],
     [envelope({ class: "off" }), "class_disabled"],
+    [envelope({ contextBudget: 16385 }), "context_over_ceiling"],
   ];
   for (const [body, error] of cases) {
     const res = await t.call("POST", "/jobs", body);

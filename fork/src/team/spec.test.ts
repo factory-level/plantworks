@@ -81,6 +81,7 @@ test("each ADR validator rule rejects what it should", () => {
     ["8 perCall ceilings", (d) => { d.classes.long.perCall.maxOutputTokens = 1536; d.classes.quick.perCall.deadlineSeconds = 90; }, /long exceeds a platform ceiling: output 1536 > 1024[\s\S]*quick exceeds a platform ceiling: deadline 90s > 60s|quick exceeds a platform ceiling: deadline 90s > 60s[\s\S]*long exceeds a platform ceiling: output 1536 > 1024/],
     ["thinking off", (d) => { d.classes.quick.context.thinkingTokens = 512; }, /thinkingTokens must be 0/],
     ["default class", (d) => { d.defaultClass = "huge"; }, /defaultClass must name one of the classes/],
+    ["default class 16K", (d) => { d.defaultClass = "long"; }, /defaultClass long has a 32768-token context; the default class is at most 16384/],
     ["one orchestrator", (d) => { d.perTrain.orchestrators = 2; }, /perTrain\.orchestrators must be 1/],
     ["unknown field", (d) => { d.classes.quick.perCall.temperature = 0; d.extra = 1; }, /unknown field extra[\s\S]*unknown field classes\.quick\.perCall\.temperature/],
     ["worker class", (d) => { d.perTrain.workers.ghost = 1; }, /perTrain\.workers\.ghost is not a class/],
