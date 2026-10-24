@@ -104,16 +104,19 @@ export function createBroker(opts: BrokerOptions): Hono {
     // job ever runs unapproved; PW-23 replaces this with `held`.
     if (qc.approval !== "never") return fail(400, "approval_unsupported", `class ${cls} needs approval (${qc.approval}), which this broker does not handle yet`);
 
-    const { row, created } = store.insert(job, cls, "queued");
+    // The new job and the retirement of a failed previous attempt (ADR: failed -> retried when
+    // Hermes resubmits) commit together; events go out after the commit.
+    const { row, created, retired } = store.tx(() => {
+      const inserted = store.insert(job, cls, "queued");
+      if (!inserted.created) return { ...inserted, retired: undefined };
+      const id = parseJobId(job.jobId)!;
+      const previous = id.attempt > 1 ? store.get(`kb-${id.board}-${id.cardId}-a${id.attempt - 1}`) : undefined;
+      const retire = previous?.state === "failed" && previous.team === job.team;
+      return { ...inserted, retired: retire ? store.transition(previous.job_id, "retried") : undefined };
+    });
     if (!created) return replay(row, job);
     emit(row, "queued");
-    // The next attempt retires a failed previous one (ADR: failed -> retried when Hermes resubmits).
-    const id = parseJobId(job.jobId)!;
-    const previous = id.attempt > 1 ? store.get(`kb-${id.board}-${id.cardId}-a${id.attempt - 1}`) : undefined;
-    if (previous?.state === "failed" && previous.team === job.team) {
-      const { row: retired, detail } = store.transition(previous.job_id, "retried");
-      emit(retired, "retried", detail);
-    }
+    if (retired) emit(retired.row, "retried", retired.detail);
     return c.json(jobRecord(row), 201);
   });
 
