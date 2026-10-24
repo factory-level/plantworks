@@ -6,7 +6,12 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { transition as checkTransition, type JobEnvelope, type JobState, type TransitionDetail } from "../contract/job.ts";
 
-/** How long a claim-next reservation (PW-18) holds a queued job before another seat may take it. */
+/**
+ * How old a claim-next reservation must be before reconciliation (PW-21) treats it as stuck and
+ * looks at it. Age never releases a reservation or lets another seat take the job: once the
+ * daemon may have created and delivered the qitem, nothing short of verified evidence proves Pi
+ * never started.
+ */
 export const RESERVATION_LEASE_MS = 60_000;
 
 export interface JobRow {
@@ -73,20 +78,29 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
   const have = new Set((db.prepare("PRAGMA table_info(jobs)").all() as { name: string }[]).map((c) => c.name));
   for (const col of ADDED_COLUMNS) if (!have.has(col.split(" ")[0]!)) db.exec(`ALTER TABLE jobs ADD COLUMN ${col}`);
   const iso = () => now().toISOString();
-  const tx = <T>(fn: () => T): T => db.transaction(fn)();
+  // IMMEDIATE: the write lock is taken up front, so a read inside the transaction can't go stale
+  // against another broker process on the same file. Nested calls run as savepoints.
+  const tx = <T>(fn: () => T): T => db.transaction(fn).immediate();
   const get = (jobId: string) => db.prepare("SELECT * FROM jobs WHERE job_id = ?").get(jobId) as JobRow | undefined;
 
-  /** One PW-09 transition and its row update, atomically. Throws on an illegal transition. */
-  const apply = (jobId: string, to: JobState, detail: Record<string, unknown>, columns: TransitionColumns) => tx(() => {
+  /**
+   * One PW-09 transition and its row update, atomically. Throws on an illegal transition. A reserved
+   * job moves only for its holder (`holder`, from confirmClaim). The check is both a read inside
+   * the immediate transaction and a condition on the UPDATE itself.
+   */
+  const apply = (jobId: string, to: JobState, detail: Record<string, unknown>, columns: TransitionColumns, holder?: { seat: string; qitemId: string }) => tx(() => {
     const row = get(jobId);
     if (!row) throw new Error(`no job ${jobId}`);
+    if (row.reserved_by && !holder) throw new Error(`job ${jobId} is reserved for a seat; settle the handoff with confirmClaim or release first`);
     const checked = checkTransition(row.state, to, detail);
     const names = Object.keys(columns);
     const bad = names.filter((c) => !TRANSITION_COLUMNS.includes(c));
     if (bad.length) throw new Error(`transition cannot set ${bad.join(", ")}`);
     const sets = names.map((c) => `, ${c} = @${c}`).join("");
-    db.prepare(`UPDATE jobs SET state = @to, detail = @detail, updated_at = @at, reserved_by = NULL, reserved_at = NULL, reserved_qitem_id = NULL${sets} WHERE job_id = @jobId`)
-      .run({ ...columns, to, detail: JSON.stringify(checked), at: iso(), jobId });
+    const guard = holder ? "reserved_by = @seat AND reserved_qitem_id = @qitemId" : "reserved_by IS NULL";
+    const r = db.prepare(`UPDATE jobs SET state = @to, detail = @detail, updated_at = @at, reserved_by = NULL, reserved_at = NULL, reserved_qitem_id = NULL${sets} WHERE job_id = @jobId AND state = @from AND ${guard}`)
+      .run({ ...columns, to, from: row.state, detail: JSON.stringify(checked), at: iso(), jobId, seat: holder?.seat ?? null, qitemId: holder?.qitemId ?? null });
+    if (r.changes !== 1) throw new Error(`job ${jobId} changed while it was being moved to ${to}`);
     return { row: get(jobId)!, detail: checked };
   });
 
@@ -112,36 +126,35 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
      */
     transition(jobId: string, to: JobState, detail: Record<string, unknown> = {}, columns: TransitionColumns = {}): { row: JobRow; detail: TransitionDetail } {
       if (to === "claimed") throw new Error("claim through confirmClaim, which checks the reservation");
+      // A reserved job is mid-handoff and its qitem may be delivered (PW-19 fail-closed): only
+      // confirmClaim or a verified release may end the reservation; apply() refuses it here.
       return apply(jobId, to, detail, columns);
     },
 
     /**
-     * PW-18's claim-next reservation: the oldest queued job for (team, class) that is unreserved
-     * or whose lease has run out. The state stays queued and nothing is emitted.
-     * `previousQitemId` is the expired holder's qitem when this takes over a lease, for the caller to close.
+     * PW-18's claim-next reservation: the oldest queued job for (team, class) that nobody has
+     * reserved. The state stays queued and nothing is emitted. A reserved job is never taken over,
+     * however old the reservation: only `confirmClaim` or a verified `release` ends it.
      */
-    reserve(team: string, cls: string, seat: string, qitemId: string, leaseMs = RESERVATION_LEASE_MS): { job: JobRow; previousQitemId: string | null } | undefined {
+    reserve(team: string, cls: string, seat: string, qitemId: string): JobRow | undefined {
       return tx(() => {
-        const at = now();
-        const expired = new Date(at.getTime() - leaseMs).toISOString();
-        const row = db.prepare("SELECT * FROM jobs WHERE team = ? AND class = ? AND state = 'queued' AND (reserved_at IS NULL OR reserved_at <= ?) ORDER BY seq LIMIT 1")
-          .get(team, cls, expired) as JobRow | undefined;
+        const row = db.prepare("SELECT * FROM jobs WHERE team = ? AND class = ? AND state = 'queued' AND reserved_by IS NULL ORDER BY seq LIMIT 1")
+          .get(team, cls) as JobRow | undefined;
         if (!row) return undefined;
-        db.prepare("UPDATE jobs SET reserved_by = ?, reserved_at = ?, reserved_qitem_id = ? WHERE job_id = ?").run(seat, at.toISOString(), qitemId, row.job_id);
-        return { job: get(row.job_id)!, previousQitemId: row.reserved_qitem_id };
+        db.prepare("UPDATE jobs SET reserved_by = ?, reserved_at = ?, reserved_qitem_id = ? WHERE job_id = ?").run(seat, iso(), qitemId, row.job_id);
+        return get(row.job_id);
       });
     },
 
     /**
      * Turns a reservation into the claim: queued -> claimed, only if the job is still reserved by
-     * this seat with this qitem. Otherwise (lease taken over, job cancelled) returns "lost", and
-     * the caller closes its own qitem.
+     * this seat with this qitem. Otherwise returns "lost".
      */
     confirmClaim(jobId: string, seat: string, qitemId: string): { row: JobRow; detail: TransitionDetail } | "lost" {
       return tx(() => {
         const row = get(jobId);
         if (!row || row.state !== "queued" || row.reserved_by !== seat || row.reserved_qitem_id !== qitemId) return "lost";
-        return apply(jobId, "claimed", {}, { claimed_by: seat, claimed_at: iso(), qitem_id: qitemId });
+        return apply(jobId, "claimed", {}, { claimed_by: seat, claimed_at: iso(), qitem_id: qitemId }, { seat, qitemId });
       });
     },
 
@@ -151,8 +164,9 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
     },
 
     /**
-     * Drops a reservation, only if it is still this seat's with this qitem. The qitem fences it:
-     * the same seat may hold a newer reservation on the job after its own lease ran out.
+     * Drops a reservation, only if it is still this seat's with this qitem. Call it only on
+     * evidence that the qitem was never delivered (the daemon refused to create it, or
+     * reconciliation verified it doesn't exist): releasing makes the job claimable again.
      */
     release(jobId: string, seat: string, qitemId: string): void {
       db.prepare("UPDATE jobs SET reserved_by = NULL, reserved_at = NULL, reserved_qitem_id = NULL WHERE job_id = ? AND reserved_by = ? AND reserved_qitem_id = ?").run(jobId, seat, qitemId);

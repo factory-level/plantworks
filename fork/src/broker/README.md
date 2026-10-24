@@ -41,7 +41,7 @@ plantworks pw broker serve --teams <dir> [--platform platform.json] [--db file] 
 | `POST /plantworks/v1/jobs` with the PW-09 envelope (at most 512 KiB) | `201` and the record for a new job. `200` and the existing record when the same envelope is posted again (key order doesn't matter). `409 job_conflict` when the jobId exists with a different envelope |
 | `GET /plantworks/v1/jobs/{jobId}` | `200` and the record, or `404 not_found` |
 | `POST /plantworks/v1/jobs/{jobId}/decision` with `{decision: "approve" \| "deny", by?, reason?}` | For a `held` job, see Approvals below: `200` and the record. The same decision again is `200`. `409 already_decided` (the other decision was made), `409 approval_expired`, `409 not_held` (never held, or cancelled by the front door), `404 not_found`, `400 invalid_decision` |
-| `POST /plantworks/v1/jobs/{jobId}/cancel` | `queued` or `held` becomes `cancelled` with reason `front-door`: `200` and the record. Already `cancelled`: `200` (idempotent). Any other state: `409 not_cancellable`. Unknown job: `404 not_found` |
+| `POST /plantworks/v1/jobs/{jobId}/cancel` | `queued` or `held` becomes `cancelled` with reason `front-door`: `200` and the record. Already `cancelled`: `200` (idempotent). Any other state, or a job being handed to a seat (reserved): `409 not_cancellable`. Unknown job: `404 not_found` |
 
 The record is `fork/schema/job-record.schema.json`:
 `{jobId, team, class, state, detail, createdAt, updatedAt, result}`.
@@ -116,20 +116,59 @@ will do the work, for example `dev-worker@team`. No `class` means the team's `de
 | `200 {job, qitemId, seat, envelope}` | The oldest queued job of that class is now `claimed` by the seat. Its upstream qitem `qitemId` is addressed to the seat and claimed for it |
 | `204` | Nothing claimable in that class |
 | `400` | `invalid_claim`, `unknown_team`, `unknown_class` |
-| `409 reservation_lost` | The job was cancelled, or its lease taken over, while it was being handed to this seat. Ask again |
-| `503 daemon_unavailable` | The daemon refused or didn't answer. The job stays claimable at once |
+| `429 slot_cap_reached` | The team's `slotBudgetKey` already has its cap of jobs in flight (PW-19). The body has `{slotBudgetKey, cap, inFlight}`. Ask again later |
+| `503 daemon_refused` | The daemon answered and refused to create the qitem (a 4xx other than 409), so nothing was delivered. The reservation is released and the job is claimable again |
+| `503 handoff_unconfirmed {jobId, qitemId, seat}` | The outcome is unknown: a timeout, a 5xx or 409 on create, or a failed claim after the create. The qitem may exist and may have been delivered, so the job **stays reserved and counted** and can't be claimed again until reconciliation (PW-21) settles it |
+| `409 reservation_lost` | Shouldn't happen: reservations are never taken over, and cancel refuses a reserved job. Left for reconciliation |
 
 This is **late binding**: the upstream qitem exists only from the moment a seat claims, and its
 destination is that seat. Steps:
-1. `reserve`, with a qitem id chosen first.
-2. Close the expired holder's qitem, if this took over a lease.
-3. Create the qitem with that id. Upstream treats a retried create with the same id as
+1. `reserve` the oldest unreserved queued job, with a qitem id chosen first.
+2. Create the qitem with that id. The daemon delivers (wakes the seat) when it creates the qitem,
+   so from here on Pi may be working. Upstream treats a retried create with the same id as
    idempotent.
-4. Claim it for the seat.
-5. `confirmClaim`, then emit `claimed`.
+3. Claim it for the seat.
+4. `confirmClaim`, then emit `claimed`.
 
-Failure handling: on a daemon failure, the reservation is released and the qitem closed. On
-`lost`, the broker's own qitem is closed. Nothing is ever emitted for a claim that didn't happen.
+**Fail-closed handoff.** A reservation is released only on evidence that nothing was delivered:
+the daemon refusing the create. Every other failure, and a broker crash between `reserve` and
+`confirmClaim`, leaves the reservation in place with its `reserved_qitem_id`. It counts against
+the slot cap, it is never taken over however old it is, and it is never "cleaned up" by closing
+the qitem, because a closed qitem doesn't prove Pi never started. Only `confirmClaim`, or a
+`release` that reconciliation (PW-21) justifies from verified evidence, ends it. For example,
+verified evidence could be that the daemon has no qitem with that id. Nothing is ever emitted
+for a claim that didn't happen.
+
+### Slot cap (PW-19, `slots.ts`)
+
+`PLANTWORKS_SLOT_CAP` caps the jobs in flight per `slotBudgetKey`, counted across every team that
+shares the key.
+
+- **Format.** `key=n` entries, comma-separated, with an optional bare `n` for every other key,
+  for example `social-media=1` or `2,social-media=1`.
+- **Unset** means the Phase 0–1 default of **1 per key**; it never means unlimited. `0` stops
+  claims for a key. A malformed value stops the broker from starting.
+- **In flight** means `claimed` or `running`, or `queued` under a claim-next reservation of
+  **any age**. A handoff in progress, or one whose outcome is unknown, holds its slot.
+- **A slot frees** when the job reaches a terminal state.
+- **Never exceeded.** claim-next counts and reserves in one immediate SQLite transaction, so
+  concurrent claims, or another broker on the same file, can't exceed the cap.
+- **Separate from other caps.** This runtime cap is independent of the team spec's validation
+  caps (`pw team validate --platform`) and of Hermes' `kanban.max_in_progress_per_profile`.
+
+**What the cap enforces: broker job states, not physical execution.** The cap counts jobs by
+their state in this broker. A slot frees when the broker records a terminal state for the job,
+and only then. It doesn't observe Pi processes, and it can't prove that work physically stopped.
+
+**Fail-closed.** Nothing frees a slot on a timeout alone. Node liveness doesn't free one
+automatically, and there's no force-free. A seat that dies while holding a job keeps its slot,
+because Pi may still be running. With cap 1, that stalls the key, which is the safe failure.
+
+Which events justify recording a terminal state belongs to the worker lifecycle and its
+reconciliation (PW-21). Those events must be verified, not assumed. For example, an upstream
+qitem closed by administrative cancel isn't by itself proof that Pi stopped. Recovering a stalled
+key is an operator procedure that first verifies the work stopped. It's documented with PW-21,
+not a broker endpoint.
 
 The daemon is `PLANTWORKS_DAEMON_URL` (default `http://127.0.0.1:7533`, the PW-16 port), with
 `OPENRIG_AUTH_BEARER_TOKEN` when set. Qitems are created as `PLANTWORKS_BROKER_SESSION` (default
@@ -145,18 +184,17 @@ seat's transport identity. Closing a qitem is `done` with `closureReason: cancel
 - **Store.** `openStore(path)` returns:
   - `insert`, `get`, and `tx(fn)`;
   - `transition(jobId, to, detail, columns)`: one PW-09 transition and the row update, in one
-    transaction. It refuses `claimed`, so a seat whose lease was taken over cannot claim around
-    `confirmClaim`;
+    transaction. It refuses `claimed`, so nothing can claim around `confirmClaim`;
   - claim-next, in three steps:
-    1. `reserve(team, class, seat, qitemId, leaseMs = RESERVATION_LEASE_MS)` returns
-       `{job, previousQitemId}`. `previousQitemId` is the expired holder's qitem when this
-       call took over a lease, and the caller closes it.
+    1. `reserve(team, class, seat, qitemId)` returns the oldest **unreserved** queued job, now
+       reserved, or `undefined`. A reserved job is never taken over.
+       `RESERVATION_LEASE_MS` is only the age at which reconciliation looks at a reservation,
+       and age never releases one.
     2. `confirmClaim(jobId, seat, qitemId)` moves the job from `queued` to `claimed`, but only
        while the reservation is still this seat's with this qitem (a compare-and-set).
-       Otherwise it returns `"lost"`, for example when a slow seat's lease was taken over or the
-       job was cancelled, and the caller closes its own qitem.
+       Otherwise it returns `"lost"`.
     3. `release(jobId, seat, qitemId)` drops a reservation only while it is still this seat's
-       with this qitem. The same seat may hold a newer reservation after its own lease ran out.
+       with this qitem. Call it only on evidence that the qitem was never delivered.
 
   A reservation leaves the job `queued` and emits nothing. Any transition clears it.
 

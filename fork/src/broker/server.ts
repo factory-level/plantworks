@@ -137,8 +137,19 @@ export function createBroker(opts: BrokerOptions): Hono & { sweepApprovals: () =
     const row = store.get(c.req.param("jobId"));
     if (!row) return fail(404, "not_found", `no job ${c.req.param("jobId")}`);
     if (row.state === "cancelled") return c.json(jobRecord(row));
+    // A reserved job is being handed to a seat, which may already have it (PW-19 fail-closed):
+    // cancelling would free its slot while Pi may run.
+    if (row.reserved_by) return fail(409, "not_cancellable", `job ${row.job_id} is being handed to ${row.reserved_by}; cancel it after the handoff settles`, { job: jobRecord(row) });
     if (!canTransition(row.state, "cancelled")) return fail(409, "not_cancellable", `a ${row.state} job cannot be cancelled`, { job: jobRecord(row) });
-    const { row: next, detail } = store.transition(row.job_id, "cancelled", { reason: "front-door" });
+    let moved;
+    try {
+      moved = store.transition(row.job_id, "cancelled", { reason: "front-door" });
+    } catch (e) {
+      // The job was reserved or changed between the read above and the transaction (another broker
+      // on the same file): refuse, as for a reserved job.
+      return fail(409, "not_cancellable", (e as Error).message, { job: jobRecord(store.get(row.job_id)!) });
+    }
+    const { row: next, detail } = moved;
     emit(next, "cancelled", detail);
     return c.json(jobRecord(next));
   });
@@ -169,7 +180,10 @@ export function startBroker(opts: BrokerOptions & { host: string; port: number }
       const host = info.address.includes(":") ? `[${info.address}]` : info.address;
       const url = `http://${host}:${info.port}`;
       live.publicUrl ??= url;
-      const sweep = setInterval(() => app.sweepApprovals(), SWEEP_MS);
+      // A store error in the sweep (a busy file, a lost conditional update) is logged and retried next tick, never a crash.
+      const sweep = setInterval(() => {
+        try { app.sweepApprovals(); } catch (e) { (opts.log ?? ((l) => process.stderr.write(`${l}\n`)))(`approval sweep failed: ${(e as Error).message}`); }
+      }, SWEEP_MS);
       resolve({ url, close: () => new Promise((r) => { clearInterval(sweep); server.close(() => r()); }) });
     });
   });
