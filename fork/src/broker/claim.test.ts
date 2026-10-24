@@ -191,17 +191,22 @@ test("daemonQueue speaks the daemon's queue API, and only a non-409 4xx counts a
   const server = createServer(async (req, res) => {
     let b = "";
     for await (const c of req) b += c;
-    seen.push({ url: req.url!, auth: req.headers.authorization, session: req.headers["x-openrig-session"] as string | undefined, body: JSON.parse(b) });
-    res.writeHead(status, { "content-type": "application/json" }).end("{}");
+    seen.push({ url: req.url!, auth: req.headers.authorization, session: req.headers["x-openrig-session"] as string | undefined, body: b ? JSON.parse(b) : null });
+    const result = req.method === "GET" && req.url?.endsWith("/transitions") ? "[]" : req.method === "GET" ? JSON.stringify({ qitemId: "qitem-1", state: "done", destinationSession: "dev-a@team" }) : "{}";
+    res.writeHead(status, { "content-type": "application/json" }).end(result);
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   try {
     const q = daemonQueue({ url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/`, token: "daemon-token" });
     await q.create({ qitemId: "qitem-1", source: "plantworks-broker", destination: "dev-a@team", body: "b", summary: "s", tags: ["plantworks"] });
     await q.claim("qitem-1", "dev-a@team");
+    const inspected = await q.inspect("qitem-1");
+    assert.deepEqual([inspected.qitemId, inspected.destinationSession, inspected.transitions], ["qitem-1", "dev-a@team", []]);
     assert.deepEqual(seen.map((s) => [s.url, s.auth, s.session]), [
       ["/api/queue/create", "Bearer daemon-token", undefined],
       ["/api/queue/qitem-1/claim", "Bearer daemon-token", undefined],
+      ["/api/queue/qitem-1", "Bearer daemon-token", undefined],
+      ["/api/queue/qitem-1/transitions", "Bearer daemon-token", undefined],
     ]);
     assert.deepEqual(seen[0].body, { qitemId: "qitem-1", sourceSession: "plantworks-broker", destinationSession: "dev-a@team", body: "b", summary: "s", tags: ["plantworks"] });
     assert.deepEqual(seen[1].body, { destinationSession: "dev-a@team" });
