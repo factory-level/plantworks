@@ -28,11 +28,12 @@ plantworks pw broker serve --teams <dir> [--platform platform.json] [--db file] 
 - **Auth.** With `PLANTWORKS_BROKER_TOKEN` set, every request under `/plantworks/v1/` needs
   `Authorization: Bearer <token>`, including routes other cards add under `/plantworks/v1/`. Without it (loopback, Phase
   0-1 dev only), the API is open.
-- **Events.** `plantworks.job.state` (PW-10) is posted to the team's `events.callbackDefault`.
-  `${NAME}` placeholders in that value are read from the broker's environment at start, so the
-  sample spec's `${PLANTWORKS_FRONTDOOR_CALLBACK}` works. Only names ending in `_CALLBACK` resolve,
-  so a spec cannot copy a broker secret (its token, an endpoint key) into the URL events go to.
-  Any other name, or an unset one, stops the broker.
+- **Events.** `plantworks.job.state` (PW-10) is posted to the team's `events.callbackDefault`,
+  which must be exactly an operator environment reference such as `${PLANTWORKS_FRONTDOOR_CALLBACK}`.
+  Literal and mixed callback URLs are rejected. Optional `events.auth.secretRef: FRONTDOOR` resolves
+  only `PLANTWORKS_CALLBACK_TOKEN_FRONTDOOR`; arbitrary broker and daemon variables are not
+  addressable. An unknown or unset callback reference stops the broker. Without `events.auth`, the
+  callback remains unauthenticated.
 
 ## API
 

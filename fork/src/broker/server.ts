@@ -10,7 +10,7 @@ import { serve } from "@hono/node-server";
 import { isLoopbackBind } from "../../../packages/daemon/dist/middleware/auth-bearer-token.js";
 import { canTransition, validateEnvelope, type JobEnvelope, type JobState } from "../contract/job.ts";
 import { createEmitter, type CloudEvent } from "../events/job-state.ts";
-import { createJobStateOutbox, eventForTransition } from "../events/outbox.ts";
+import { createJobStateOutbox, eventForTransition, transitionColumns } from "../events/outbox.ts";
 import { SWEEP_MS, decisionRoute, requestApproval, sweepApprovals } from "./approvals.ts";
 import { PHASE_0_1, validateSpec, type Platform, type TeamSpec } from "../team/spec.ts";
 import type { JobRow, Store } from "./store.ts";
@@ -89,7 +89,7 @@ export function createBroker(opts: BrokerOptions): Hono & { sweepApprovals: () =
     const job = store.get(row.job_id);
     const transition = store.db.prepare("SELECT * FROM job_transitions WHERE job_id = ? ORDER BY id DESC LIMIT 1").get(row.job_id) as import("./store.ts").TransitionRow | undefined;
     if (!job || !transition || transition.to_state !== state) throw new Error(`missing persisted ${state} transition for ${row.job_id}`);
-    send(row.team, eventForTransition(job, transition));
+    send(row.team, eventForTransition(job, transition, transitionColumns(store, transition)));
   });
   const decisionUrl = (jobId: string) => {
     if (!opts.publicUrl) throw new Error("no publicUrl for decision URLs");
@@ -190,7 +190,7 @@ export function startBroker(opts: BrokerOptions & { host: string; port: number }
     const job = opts.store.get(row.job_id);
     const transition = opts.store.db.prepare("SELECT * FROM job_transitions WHERE job_id = ? ORDER BY id DESC LIMIT 1").get(row.job_id) as import("./store.ts").TransitionRow | undefined;
     if (!job || !transition || transition.to_state !== state) throw new Error(`missing persisted ${state} transition for ${row.job_id}`);
-    send(row.team, eventForTransition(job, transition));
+    send(row.team, eventForTransition(job, transition, transitionColumns(opts.store, transition)));
   });
   const live = { ...opts, send, emitJobState: emit }; // publicUrl is filled in once the port is known; createBroker reads it per request
   const app = createBroker(live);
@@ -213,17 +213,24 @@ export function startBroker(opts: BrokerOptions & { host: string; port: number }
 }
 
 /**
- * `${NAME}` in a spec's callbackDefault, from the broker's environment. Only names ending in
- * `_CALLBACK` resolve, so a team spec cannot copy a broker secret (its token, an endpoint key) into
- * the URL every event is posted to. Throws on any other or unset name: the broker refuses to start.
+ * `callbackDefault` is one operator-supplied `${NAME_CALLBACK}` reference. Literal or mixed URLs
+ * would let a team spec choose where broker-held credentials are sent.
  */
 export function expand(value: string, env: Record<string, string | undefined>): string {
-  return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name: string) => {
-    if (!name.endsWith("_CALLBACK")) throw new Error(`only \${..._CALLBACK} names may be used in callbackDefault, not ${name}`);
-    const v = env[name]?.trim();
-    if (!v) throw new Error(`${name} is not set (used in ${value})`);
-    return v;
-  });
+  const match = /^\$\{([A-Za-z_][A-Za-z0-9_]*_CALLBACK)\}$/.exec(value);
+  if (!match) throw new Error("callbackDefault must be an operator callback reference (${NAME_CALLBACK})");
+  const name = match[1]!;
+  const v = env[name]?.trim();
+  if (!v) throw new Error(`${name} is not set (used in callbackDefault)`);
+  return v;
+}
+
+const CALLBACK_CREDENTIAL_PREFIX = "PLANTWORKS_CALLBACK_TOKEN_";
+
+function callbackCredentials(env: Record<string, string | undefined>): Map<string, string> {
+  return new Map(Object.entries(env)
+    .filter(([name, value]) => name.startsWith(CALLBACK_CREDENTIAL_PREFIX) && value?.trim())
+    .map(([name, value]) => [name.slice(CALLBACK_CREDENTIAL_PREFIX.length), value!.trim()]));
 }
 
 /**
@@ -231,14 +238,15 @@ export function expand(value: string, env: Record<string, string | undefined>): 
  * front door is the only approval consumer this broker knows (`events.approvalConsumer: frontdoor`).
  */
 function teamDelivery(teams: Map<string, TeamSpec>, env: Record<string, string | undefined>, log: (l: string) => void) {
+  const credentials = callbackCredentials(env);
   const emitters = new Map([...teams].map(([name, spec]) => {
     if (spec.events.approvalConsumer !== "frontdoor") throw new Error(`team ${name}: events.approvalConsumer ${spec.events.approvalConsumer} is not supported (only frontdoor)`);
-    const bearerToken = spec.events.auth ? env[spec.events.auth.secretRef] : undefined;
+    const bearerToken = spec.events.auth ? credentials.get(spec.events.auth.secretRef) : undefined;
     if (spec.events.auth && !bearerToken) throw new Error(`team ${name}: configured callback credential is unavailable`);
     return [name, createEmitter({
       url: expand(spec.events.callbackDefault, env),
       ...(bearerToken ? { bearerToken } : {}),
-      onDeliveryError: (err) => log(`${err.event.type} not delivered: ${err.message}`),
+      onDeliveryError: (err) => { if (err.event.type !== "plantworks.job.state") log(`${err.event.type} not delivered: ${err.message}`); },
     })];
   }));
   const deliver = (team: string, event: CloudEvent): Promise<void> => {

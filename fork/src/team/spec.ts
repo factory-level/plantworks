@@ -112,6 +112,7 @@ export function validateSpec(spec: unknown, platform: Platform = PHASE_0_1): str
   else {
     unknownFields(errors, "events.", events, ["callbackDefault", "approvalConsumer", "auth"]);
     for (const k of ["callbackDefault", "approvalConsumer"]) if (typeof events[k] !== "string" || events[k] === "") errors.push(`events.${k} must be a non-empty string`);
+    if (typeof events.callbackDefault === "string" && !/^\$\{[A-Za-z_][A-Za-z0-9_]*_CALLBACK\}$/.test(events.callbackDefault)) errors.push("events.callbackDefault must be exactly one operator callback reference (${NAME_CALLBACK})");
     if (events.auth !== undefined) {
       if (!obj(events.auth)) errors.push("events.auth must be an object");
       else {

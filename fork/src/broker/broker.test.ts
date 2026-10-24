@@ -184,8 +184,9 @@ test("team specs: an invalid spec, a misplaced one or an unset placeholder stops
   assert.throws(() => loadTeams(misplaced, { ...platform, slotCaps: { news: 1 } }), /team is news, but the directory is sports/);
   assert.throws(() => loadTeams(mkdtempSync(join(tmpdir(), "pw-empty-"))), /no team specs/);
 
-  assert.equal(expand("${A_CALLBACK}/events", { A_CALLBACK: "http://127.0.0.1:1" }), "http://127.0.0.1:1/events");
-  assert.throws(() => expand("http://x.invalid/cb?t=${PLANTWORKS_BROKER_TOKEN}", { PLANTWORKS_BROKER_TOKEN: "s3cret" }), /only .*_CALLBACK.* not PLANTWORKS_BROKER_TOKEN/, "a spec cannot copy a broker secret into its callback");
+  assert.equal(expand("${A_CALLBACK}", { A_CALLBACK: "http://127.0.0.1:1/events" }), "http://127.0.0.1:1/events");
+  assert.throws(() => expand("http://x.invalid/cb?t=${PLANTWORKS_BROKER_TOKEN}", { PLANTWORKS_BROKER_TOKEN: "s3cret" }), /must be an operator callback reference/, "a spec cannot choose a callback URL or copy a broker secret into it");
+  assert.throws(() => expand("${A_CALLBACK}/events", { A_CALLBACK: "http://127.0.0.1:1" }), /must be an operator callback reference/);
   assert.throws(() => expand("${PLANTWORKS_FRONTDOOR_CALLBACK}", {}), /PLANTWORKS_FRONTDOOR_CALLBACK is not set/);
   const store = openStore(":memory:");
   assert.throws(() => createBroker({ store, teams: loadTeams(teamsDir(), platform), env: {} }), /not set/);
@@ -242,10 +243,10 @@ test("configured callback auth resolves only the named environment credential", 
   const store = openStore(":memory:");
   const teams = loadTeams(teamsDir(), platform);
   const spec = teams.get("social-media")!;
-  teams.set("social-media", { ...spec, events: { ...spec.events, auth: { secretRef: "FRONTDOOR_TOKEN" } } });
+  teams.set("social-media", { ...spec, events: { ...spec.events, auth: { secretRef: "FRONTDOOR" } } });
   const broker = await startBroker({
     store, teams, host: "127.0.0.1", port: 0,
-    env: { PLANTWORKS_FRONTDOOR_CALLBACK: consumer.url, FRONTDOOR_TOKEN: "callback-secret" },
+    env: { PLANTWORKS_FRONTDOOR_CALLBACK: consumer.url, PLANTWORKS_CALLBACK_TOKEN_FRONTDOOR: "callback-secret" },
   });
   try {
     assert.equal((await fetch(`${broker.url}${API}/jobs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(envelope()) })).status, 201);
@@ -257,6 +258,49 @@ test("configured callback auth resolves only the named environment credential", 
     await consumer.close();
     store.close();
   }
+});
+
+test("a real failing callback is isolated from a healthy team's outbox delivery", async () => {
+  const bad = await stubConsumer(400);
+  const healthy = await stubConsumer(204);
+  const store = openStore(":memory:");
+  const multiPlatform = { ...PHASE_0_1, slotCaps: { a: 1, b: 1 } };
+  const teams = loadTeams(teamsDir([definition("a"), definition("b")]), multiPlatform);
+  teams.set("a", { ...teams.get("a")!, events: { ...teams.get("a")!.events, callbackDefault: "${TEAM_A_CALLBACK}" } });
+  teams.set("b", { ...teams.get("b")!, events: { ...teams.get("b")!.events, callbackDefault: "${TEAM_B_CALLBACK}" } });
+  const broker = await startBroker({
+    store, teams, host: "127.0.0.1", port: 0,
+    env: { TEAM_A_CALLBACK: bad.url, TEAM_B_CALLBACK: healthy.url },
+  });
+  try {
+    for (const team of ["a", "b"]) {
+      const res = await fetch(`${broker.url}${API}/jobs`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jobId: `kb-${team}-card1-a1`, team, task: { prompt: team } }),
+      });
+      assert.equal(res.status, 201);
+    }
+    for (let i = 0; i < 100 && !healthy.events.length; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.ok(bad.events.length >= 1, "a's callback saw its failed event");
+    assert.equal(healthy.events.length, 1, "b's independent callback receives its event despite a's 400");
+  } finally {
+    await broker.close();
+    await bad.close();
+    await healthy.close();
+    store.close();
+  }
+});
+
+test("team auth cannot resolve the broker token as a callback credential", async () => {
+  const store = openStore(":memory:");
+  const teams = loadTeams(teamsDir(), platform);
+  const spec = teams.get("social-media")!;
+  teams.set("social-media", { ...spec, events: { ...spec.events, auth: { secretRef: "PLANTWORKS_BROKER_TOKEN" } } });
+  assert.throws(() => startBroker({
+    store, teams, host: "127.0.0.1", port: 0,
+    env: { PLANTWORKS_FRONTDOOR_CALLBACK: "http://127.0.0.1:1/events", PLANTWORKS_BROKER_TOKEN: "broker-secret" },
+  }), (error: Error) => /configured callback credential is unavailable/.test(error.message) && !error.message.includes("broker-secret"));
+  store.close();
 });
 
 // --- Approvals (PW-23) -----------------------------------------------------------------------

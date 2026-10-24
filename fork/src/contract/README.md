@@ -26,10 +26,11 @@ emitter and tests.
 Unknown fields are rejected, so that a misspelt field is never silently ignored.
 
 **There is no per-job callback or auth.** Events go only to the operator-configured team
-`events.callbackDefault`. Optional `events.auth.secretRef` names a configured callback credential;
-the broker sends it as bearer auth and refuses to start if the reference cannot be resolved. The
-callback URL and credential remain operator-owned. These additive envelope fields and the event
-mapping are fork-defined pending HarnessHG acknowledgement.
+`events.callbackDefault`, which must be exactly an operator-supplied `${NAME_CALLBACK}` reference.
+Optional `events.auth.secretRef: NAME` resolves only `PLANTWORKS_CALLBACK_TOKEN_NAME`; it cannot
+address arbitrary process environment variables. Without auth, callbacks remain unauthenticated.
+The broker refuses to start if a configured callback reference cannot be resolved. These additive
+envelope fields and the event mapping are fork-defined pending HarnessHG acknowledgement.
 
 ## States
 

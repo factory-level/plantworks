@@ -44,6 +44,8 @@ test("callback auth accepts only an optional configured secret reference", () =>
   assert.deepEqual(problems((d) => { d.events.auth = { secretRef: "FRONTDOOR_TOKEN" }; }), []);
   assert.match(problems((d) => { d.events.auth = { secretRef: "missing-lowercase" }; }).join("\n"), /secretRef must name a configured credential/);
   assert.match(problems((d) => { d.events.auth = { secretRef: "FRONTDOOR_TOKEN", token: "inline-secret" }; }).join("\n"), /unknown field events\.auth\.token/);
+  assert.match(problems((d) => { d.events.callbackDefault = "https://untrusted.invalid/events"; }).join("\n"), /callbackDefault must be exactly one operator callback reference/);
+  assert.match(problems((d) => { d.events.callbackDefault = "${FRONTDOOR_CALLBACK}/events"; }).join("\n"), /callbackDefault must be exactly one operator callback reference/);
 });
 
 test("the ADR's map form of max_in_progress_per_profile is rejected (Hermes 0.22.5 would read it as no cap)", () => {

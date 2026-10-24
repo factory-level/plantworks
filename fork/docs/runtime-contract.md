@@ -49,8 +49,8 @@ too unless `--db` points elsewhere. A worker reads nothing from disk.
 | `PLANTWORKS_PLATFORM_FILE`, `PLANTWORKS_BROKER_DB` | image `broker` role | no | | Passed as `--platform` and `--db` (`fork/container/entrypoint.sh:39`–`:40`) |
 | `PLANTWORKS_SLOT_CAP` | broker | no | 1 per `slotBudgetKey` | A malformed value stops the broker (`fork/src/broker/command.ts:38`) |
 | `PLANTWORKS_BROKER_SESSION` | broker | no | `plantworks-broker` | The qitem source session |
-| `*_CALLBACK` | broker, `pw job run` | when a team spec names one | | Only `_CALLBACK` names resolve into a spec's callback URL |
-| team `events.auth.secretRef` | broker | when configured | | Names a broker-environment credential sent as bearer auth to the configured callback. Unknown or unset references stop broker startup; the value is not logged or emitted. |
+| `*_CALLBACK` | broker, `pw job run` | when a team spec names one | | `callbackDefault` must be exactly `${NAME_CALLBACK}`; the operator supplies the URL |
+| `PLANTWORKS_CALLBACK_TOKEN_<NAME>` | broker | when team `events.auth.secretRef` names `<NAME>` | | Only this dedicated operator credential namespace is available to team refs; broker/daemon process variables are not addressable. Unknown or unset references stop broker startup; values are not logged or emitted. |
 | `PLANTWORKS_BROKER_URL` | worker, kit | no | `http://127.0.0.1:7534` | `fork/src/broker/worker.ts:11` |
 | `PLANTWORKS_TEAM`, `PLANTWORKS_SEAT`, `PLANTWORKS_CLASS` | image `worker` role | team and seat | | `fork/container/entrypoint.sh:46`–`:49` |
 | `PLANTWORKS_TEAM` | kit | yes | | The kit serves exactly one team (`fork/src/hermes/command.ts:12`–`:13`) |
@@ -72,10 +72,15 @@ upstream or HarnessHG contract decision.
 - Broker event ids use the persisted `job_transitions.id` directly:
   `<jobId>:<transitionSeq>`. The id is stable across replay and distinct for repeated states. The
   sequence is globally increasing and increasing per job, but not dense per job.
-- Callback URL remains operator-owned in `events.callbackDefault`. Optional team
-  `events.auth: { secretRef: NAME }` references a configured broker environment credential next
-  to that URL setting. There is no job-envelope callback URL or auth field. With auth absent,
-  callbacks remain unauthenticated as before.
+- Callback URL remains operator-owned in `events.callbackDefault`, which must be exactly
+  `${NAME_CALLBACK}`; literal or mixed URLs are rejected. Optional team
+  `events.auth: { secretRef: NAME }` resolves only `PLANTWORKS_CALLBACK_TOKEN_NAME`, an explicit
+  callback-only operator credential. No general process environment name is addressable. There is
+  no job-envelope callback URL or auth field. With auth absent, callbacks remain unauthenticated.
+- The broker keeps a durable delivery cursor per team. It retries each event for at most three
+  exhausted emitter budgets (eight HTTP attempts per budget), then records it as parked and logs
+  once; other teams continue independently. Parked events remain in transition history and the
+  failure table, but no HTTP replay or pull endpoint is provided yet.
 
 ## Network
 

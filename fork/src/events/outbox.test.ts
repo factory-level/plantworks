@@ -51,3 +51,32 @@ test("replays the first unacknowledged transition after broker restart with a st
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a failing team's poison event is bounded and cannot block another team's cursor", async () => {
+  const store = openStore(":memory:");
+  try {
+    store.insert({ jobId: "kb-a-card1-a1", team: "a", task: { prompt: "a" } }, "quick", "queued");
+    store.insert({ jobId: "kb-b-card1-a1", team: "b", task: { prompt: "b" } }, "quick", "queued");
+    const attempts = new Map<string, number>();
+    const delivered: string[] = [];
+    const logs: string[] = [];
+    const outbox = createJobStateOutbox(store, async (team, event) => {
+      attempts.set(team, (attempts.get(team) ?? 0) + 1);
+      if (team === "a") throw new Error("HTTP 400");
+      delivered.push(event.id);
+    }, (line) => logs.push(line));
+
+    await outbox.pump();
+    assert.deepEqual(delivered, ["kb-b-card1-a1:2"]);
+    await outbox.pump();
+    await outbox.pump();
+    assert.deepEqual(delivered, ["kb-b-card1-a1:2"]);
+    assert.equal(attempts.get("a"), 3);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0]!, /event parked after 3 delivery cycles: kb-a-card1-a1:1/);
+    const parked = store.db.prepare("SELECT attempts, parked FROM event_outbox_failures WHERE team = 'a'").get() as { attempts: number; parked: number };
+    assert.deepEqual(parked, { attempts: 3, parked: 1 });
+  } finally {
+    store.close();
+  }
+});

@@ -15,35 +15,41 @@
 
 ## Delivery
 
-- **Destination:** the team spec's `events.callbackDefault`, which the operator configures. A job
-  envelope can't name a destination. Redirects are not followed: a `3xx` reply is a permanent
-  failure, so a consumer can't bounce the POST to another address.
-- **Authentication:** optional `events.auth.secretRef` resolves a credential from the broker's
-  configured environment and sends `Authorization: Bearer …`. An unresolved reference stops broker
-  startup; its value is never put in the event or error message. Without `events.auth`, callbacks
-  remain unauthenticated as before.
-- **Order:** events go out one at a time, in transition order. The durable broker outbox pauses at the first
-  failed row; later transitions wait behind it until delivery succeeds. Standalone emits are not
+- **Destination:** `events.callbackDefault` must be exactly an operator-supplied `${NAME_CALLBACK}`
+  reference. Literal or mixed URLs are rejected, and a job envelope can't name a destination.
+  Redirects are not followed.
+- **Authentication:** optional `events.auth.secretRef: NAME` resolves only the operator's
+  `PLANTWORKS_CALLBACK_TOKEN_NAME` variable. It cannot address arbitrary broker or daemon
+  environment variables. An unresolved reference stops broker startup; its value is never put in
+  the event or error message. Without `events.auth`, callbacks remain unauthenticated as before.
+- **Order:** events go out one at a time per team, in transition order. Each team has an independent
+  durable cursor, so a failing callback does not hold up another team. Standalone emits are not
   persisted.
 - **Retries:** network errors, request timeouts (10 s), `408`, `429` and `5xx` are retried with
   exponential backoff (0.5 s doubling, capped at 30 s) or the consumer's `Retry-After`, capped
   the same way. Any other `3xx` or `4xx` is permanent and is not retried.
-- **Budget:** 8 attempts by default. With the default delays that is about 61.5 s of waiting
-  plus up to 8 request timeouts, so **roughly 1 to 2.5 minutes**. A consumer that is down
-  longer than that misses the event.
+- **Budget:** 8 HTTP attempts per emitter cycle; the durable outbox parks an event after 3 exhausted
+  cycles (at most 24 attempts), records the final error, and logs once. With default delays that is
+  at most about 3 minutes of backoff plus up to 4 minutes of request timeouts. Later events for that
+  team continue after the park. Other teams continue independently.
 
 ### Restart behavior
 
-The broker stores every committed transition in the outbox cursor's source, `job_transitions`.
-After a restart it replays from the first unacknowledged row with the same event id. It advances
-the cursor only after a 2xx. Delivery is at least once, so consumers deduplicate by event id.
+The broker stores every committed transition in `job_transitions`. After a restart it replays from
+each team's first unacknowledged row with the same event id. A successful delivery advances that
+team's cursor. A permanently failing event is recorded in `event_outbox_failures` and parked after
+the retry budget, allowing that team's later transitions to proceed. There is not yet an HTTP
+endpoint to replay a parked event. Delivery is at least once before a park, so consumers deduplicate
+by event id. When enabling the outbox on a broker file that already has transition history, those
+existing rows are replayed on first start. Approval events remain in-memory and are not replayed.
 Standalone `pw job run` has no broker transition history and only tracks its local transitions.
 
-When a callback returns a permanent `3xx`/`4xx`, or the retry budget runs out, the outbox logs the
-failure and pauses at that row. A later pump retries it and later rows stay behind it.
+When a callback returns a permanent `3xx`/`4xx`, or the retry budget runs out, the outbox retries
+the next pump cycle until the three-cycle budget is exhausted, then records and logs the park once.
 
 Consumers must tolerate duplicates and should process events in transition order. The standalone
-runner's local event counter is not a durable broker sequence.
+runner's local event counter is not a durable broker sequence; reusing the same `jobId` across
+separate `pw job run` invocations can reuse event IDs.
 
 The front door maps these events to its own actions (complete, block or attach on the card). That
 mapping belongs to the front door, not to Plantworks.
