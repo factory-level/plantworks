@@ -241,7 +241,13 @@ as the broker does) and starts the seat's call governor with the limits of the c
 (`--class`, else the team's `defaultClass`): `perCall.maxOutputTokens`, `perCall.deadlineSeconds`
 and `context.maxContextTokens`, not the built-in classes. It then renders the seat's Pi
 `models.json`/`settings.json` into `$OPENRIG_HOME/state/pi/<seat>/agent`, the directory the
-daemon's Pi seat reads, with the governor as the only `baseUrl`. The endpoint key stays in the
+daemon's Pi seat reads, with the governor as the only `baseUrl`. The settings lower Pi's
+compaction to the class window (a quarter reserved and three eighths kept: 4096/6144 at 16K,
+8192/12288 at 32K). A class with `toolProfile: trimmed` also gets `defaultTools` `read, edit, bash`
+and the fork's short `SYSTEM.md`. The seat's `SYSTEM.md` is replaced or removed only when it is
+exactly the fork's own file: any other content there makes the worker refuse to start, and nothing
+is changed. The broker path has no per-job workspace yet, so a job repository's `.pi/SYSTEM.md` is
+not checked here (only `pw job run` refuses one). The endpoint key stays in the
 worker. The governor listens on `127.0.0.1:7535` (`--governor-port`/`PLANTWORKS_GOVERNOR_PORT`),
 a fixed port so a restarted worker keeps the seat's `baseUrl` valid. So:
 - start the worker before the daemon launches the seat: Pi reads these files when it starts, and a
