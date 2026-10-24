@@ -8,7 +8,7 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { serve } from "@hono/node-server";
 import { isLoopbackBind } from "../../../packages/daemon/dist/middleware/auth-bearer-token.js";
-import { canTransition, validateEnvelope, type JobEnvelope, type JobState } from "../contract/job.ts";
+import { canTransition, JOB_PRIORITIES, validateEnvelope, type JobEnvelope, type JobState } from "../contract/job.ts";
 import { createEmitter, jobStateEvent, type CloudEvent } from "../events/job-state.ts";
 import { SWEEP_MS, decisionRoute, requestApproval, sweepApprovals } from "./approvals.ts";
 import { PHASE_0_1, validateSpec, type Platform, type TeamSpec } from "../team/spec.ts";
@@ -122,7 +122,8 @@ export function createBroker(opts: BrokerOptions): Hono & { sweepApprovals: () =
     }
     // A class that needs approval (per-job or always) holds every job until it is decided.
     const held = qc.approval !== "never";
-    const { row, created } = store.insert(job, cls, held ? "held" : "queued", held ? qc.approvalTtlSeconds : undefined);
+    const priority = (qc.priority ?? 0) + JOB_PRIORITIES[job.priority ?? "normal"];
+    const { row, created } = store.insert(job, cls, held ? "held" : "queued", held ? qc.approvalTtlSeconds : undefined, priority);
     if (!created) return replay(row, job);
     emit(row, row.state);
     if (held) requestApproval(row, ctx);
