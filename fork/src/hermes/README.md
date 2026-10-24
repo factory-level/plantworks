@@ -41,6 +41,19 @@ job first and cancels only if it is this team's. A job's team never changes, so 
 safe. The broker token itself is broker-wide. The team scope is this server's, for the
 Hermes profile.
 
+**Limitation: this is not tenant isolation.** These checks protect another team's record
+contents and stop cancels of its jobs. They do not partition the `jobId` namespace, which is
+global across the broker, and a board is not bound to a team. A caller that knows another
+team's board and card IDs can therefore:
+
+- tell whether that `jobId` exists, because submit answers `job_conflict` instead of
+  creating the job;
+- take the ID first, so that team's own submit then gets `job_conflict`.
+
+Card IDs are random, so either needs knowledge of the other board. Teams that do not trust
+each other must not share a broker until board ownership or namespace enforcement exists.
+That is a tracked PW-20/PW-24 follow-up and is not implemented here.
+
 The Hermes profile entry. `plantworks pw team emit` writes it into
 `hermes-profile/config.yaml` (`hermesProfileConfig()`), and writes the skill to
 `hermes-profile/skills/plantworks-bridge/SKILL.md`, because a Hermes 0.22.5 profile home reads
@@ -179,7 +192,8 @@ This is what a caller can retrieve, and how much.
    and never returns artifact bytes. Fetching artifacts belongs to a later card, if it is
    needed.
 3. **Team scope only.** A server returns only its own team's jobs (it checks `record.team`),
-   and only by exact `jobId`. There is no list or search tool, so a caller cannot enumerate jobs or read
+   and only by exact `jobId`. This protects contents, not the shared `jobId` namespace
+   (see the limitation above). There is no list or search tool, so a caller cannot enumerate jobs or read
    another team's results.
 4. **Retention is the broker's.** A result is readable while the broker keeps the job
    (PW-17 owns retention, and result storage does not exist yet). Once it is gone, inspect returns `not_found`, and the kit keeps
