@@ -31,7 +31,27 @@ export type GovernorOptions = {
  * job passes its timeout; `restore` lets calls through again. A cut-off stops model calls only: it
  * doesn't stop Pi or the tools it runs.
  */
-export type Governor = { url: string; close: () => Promise<void>; cutOff: (why: string) => void; restore: () => void };
+export type Governor = { url: string; close: () => Promise<void>; cutOff: (why: string) => void; restore: () => void; usage: () => Usage };
+
+/** Token totals the endpoint reported on the calls that went through (PW-13). Calls that reported none add nothing. */
+export type Usage = { promptTokens: number; completionTokens: number };
+
+/** The OpenAI `usage` in a completions response: the JSON body, or the last SSE chunk that carries one. */
+export function usageOf(text: string): Usage | undefined {
+  const pick = (o: unknown) => {
+    const u = (o as { usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } } | null)?.usage;
+    return u && Number.isInteger(u.prompt_tokens) && Number.isInteger(u.completion_tokens) ? { promptTokens: u.prompt_tokens as number, completionTokens: u.completion_tokens as number } : undefined;
+  };
+  try { return pick(JSON.parse(text)); } catch { /* not one JSON body: an SSE stream */ }
+  let found: Usage | undefined;
+  for (const line of text.split("\n")) {
+    if (!line.startsWith("data:")) continue;
+    try { found = pick(JSON.parse(line.slice(5))) ?? found; } catch { /* [DONE], or a chunk cut by the scan window */ }
+  }
+  return found;
+}
+/** How much of a response is kept to read its usage: the usage chunk comes last, so the tail is enough. */
+const USAGE_WINDOW = 1 << 20;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "transfer-encoding", "content-length", "content-encoding", "host", "authorization"]);
@@ -65,6 +85,7 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
   let consecutiveDeadlines = 0;
   let failed = false;
   let cut: string | null = null;
+  const usage: Usage = { promptTokens: 0, completionTokens: 0 };
   const inFlight = new Set<AbortController>();
 
   async function handle(req: IncomingMessage, res: ServerResponse) {
@@ -72,7 +93,8 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
     for await (const chunk of req) chunks.push(chunk as Buffer);
     let body: Buffer | undefined = chunks.length ? Buffer.concat(chunks) : undefined;
     const path = req.url ?? "/";
-    if (body && req.method === "POST" && /\/(chat\/)?completions$/.test(path.split("?")[0])) body = governBody(body, c);
+    const isCompletion = req.method === "POST" && /\/(chat\/)?completions$/.test(path.split("?")[0]);
+    if (body && isCompletion) body = governBody(body, c);
 
     const headers: Record<string, string> = {};
     for (const [k, v] of Object.entries(req.headers)) if (!HOP_BY_HOP.has(k) && typeof v === "string") headers[k] = v;
@@ -100,9 +122,17 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
             const out: Record<string, string> = {};
             upstream.headers.forEach((v, k) => { if (!HOP_BY_HOP.has(k)) out[k] = v; });
             res.writeHead(upstream.status, out);
-            if (upstream.body) for await (const chunk of upstream.body) res.write(chunk);
+            const counts = upstream.ok && isCompletion;
+            const decoder = new TextDecoder();
+            let seen = "";
+            if (upstream.body) for await (const chunk of upstream.body) {
+              res.write(chunk);
+              if (counts) { seen += decoder.decode(chunk as Uint8Array, { stream: true }); if (seen.length > USAGE_WINDOW) seen = seen.slice(-USAGE_WINDOW); }
+            }
             res.end();
             record.status = upstream.status;
+            const u = counts ? usageOf(seen) : undefined;
+            if (u) { usage.promptTokens += u.promptTokens; usage.completionTokens += u.completionTokens; }
             return;
           }
           await upstream.body?.cancel();
@@ -155,5 +185,6 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
       for (const a of inFlight) a.abort(new Error(`cut off: ${why}`));
     },
     restore() { cut = null; },
+    usage: () => ({ ...usage }),
   };
 }

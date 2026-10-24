@@ -8,7 +8,8 @@ import { existsSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, un
 import { dirname, join } from "node:path";
 import { DEFAULT_CLASS, classByName, type WorkerClass } from "../llm/classes.ts";
 import { readEndpoint } from "../llm/endpoint.ts";
-import { startGovernor, type Governor } from "../llm/governor.ts";
+import { startGovernor, type Governor, type Usage } from "../llm/governor.ts";
+import { branchConflict, snapshotWork, type Artifacts } from "./artifacts.ts";
 import { writeSeatFiles } from "../seat/pi-seat-files.ts";
 import { transition, validateEnvelope, type JobEnvelope, type JobState, type TransitionDetail } from "../contract/job.ts";
 import { createEmitter, jobStateEvent, type DeliveryError } from "../events/job-state.ts";
@@ -43,6 +44,10 @@ export interface RunResult {
   text: string | null;
   /** Ids of state events the consumer never acknowledged; the caller owns re-sending them. */
   undelivered: string[];
+  /** Tokens the endpoint reported for the job's calls, and the seconds from `running` to the end (0 if it never ran). */
+  usage: Usage & { wallSeconds: number };
+  /** The work Pi left in the working tree, as branch pw/<jobId>, or why there is none. */
+  artifacts: Artifacts;
 }
 
 /** Project files Pi reads ahead of the seat's own system prompt. */
@@ -74,6 +79,9 @@ export async function runJob(opts: RunOptions): Promise<RunResult> {
   // dist/core/resource-loader.js:944-965), so a job repo that ships one is refused (PW-12).
   for (const name of PROJECT_PROMPT_FILES) if (existsSync(join(opts.cwd, ".pi", name))) throw new RejectedJob(`the job's repository ships .pi/${name}, which would replace the seat's system prompt; refusing it`);
 
+  // PW-13: the job's work becomes branch pw/<jobId>, which must not exist yet.
+  const conflict = branchConflict(opts.cwd, job.jobId);
+  if (conflict) throw new RejectedJob(conflict);
   const log = opts.log ?? ((line) => process.stderr.write(`${line}\n`));
   // PW-13: one job at a time. Taken before any event, so a refused job emits nothing.
   const lock = takeJobLock(opts.lockPath ?? join(opts.openrigHome, "plantworks", "job.lock"));
@@ -93,13 +101,15 @@ async function runLocked(opts: RunOptions, job: JobEnvelope, className: string, 
   const sent: Promise<void>[] = [];
   let state: JobState = "queued";
   let transitionSeq = 0;
-  const enter = (to: JobState, detail: Record<string, unknown> = {}) => {
+  const enter = (to: JobState, detail: Record<string, unknown> = {}, extra: { usage?: Usage; artifacts?: { name: string; uri: string }[] } = {}) => {
     const checked = to === "queued" ? {} : transition(state, to, detail);
     state = to;
     transitionSeq++;
     // Delivery runs alongside the job; a slow consumer never holds the seat.
-    sent.push(emitter.emit(jobStateEvent({ ...job, transitionSeq }, to, checked)).catch(() => {}));
+    sent.push(emitter.emit(jobStateEvent({ ...job, transitionSeq, ...extra }, to, checked)).catch(() => {}));
   };
+  let runningAt: number | undefined;
+  let tokens: Usage | undefined;
 
   enter("queued");
   enter("claimed");
@@ -133,6 +143,7 @@ async function runLocked(opts: RunOptions, job: JobEnvelope, className: string, 
     pi.exited.then((code) => stop({ state: "failed", detail: { reason: "error", message: `pi exited (${code}) before the job settled` } }));
 
     enter("running");
+    runningAt = Date.now();
     const timer = setTimeout(() => stop({ state: "failed", detail: { reason: "timeout", message: `job exceeded ${timeoutSeconds}s` } }), timeoutSeconds * 1000);
     try {
       const accepted = await Promise.race([pi.request({ type: "prompt", message: job.task.prompt }), stopped]);
@@ -160,13 +171,28 @@ async function runLocked(opts: RunOptions, job: JobEnvelope, className: string, 
   } finally {
     // The ending is recorded only after this: Pi's process has been seen to exit (or was SIGKILLed and reaped).
     await pi?.stop();
+    tokens = governor?.usage();
     await governor?.close();
   }
   if (interrupted) ending = interrupted;
 
-  enter(ending.state, ending.detail);
+  // Pi has stopped, so the work tree no longer changes under the snapshot. Any ending is kept,
+  // including an interrupted one. A snapshot that fails is reported, and never fails the job.
+  const why = (ending.detail.outcome ?? ending.detail.reason) as string;
+  let artifacts: Artifacts;
+  try {
+    artifacts = snapshotWork(opts.cwd, job.jobId, `Plantworks job ${job.jobId}: ${ending.state} (${why})`);
+  } catch (e) {
+    artifacts = { branch: null, skipped: `the snapshot failed: ${(e as Error).message.split("\n")[0]}` };
+  }
+  const usage = { promptTokens: tokens?.promptTokens ?? 0, completionTokens: tokens?.completionTokens ?? 0, wallSeconds: runningAt === undefined ? 0 : Math.round((Date.now() - runningAt) / 100) / 10 };
+  // The event carries the fork-defined D11 shapes only: usage without wall time, artifacts as {name, uri}.
+  enter(ending.state, ending.detail, {
+    ...(tokens ? { usage: tokens } : {}),
+    ...(artifacts.branch ? { artifacts: artifacts.files.map((f) => ({ name: f.path, uri: `git:${artifacts.commit}:${f.path}` })) } : {}),
+  });
   await Promise.all(sent);
-  return { jobId: job.jobId, state: ending.state, detail: ending.detail as TransitionDetail, text, undelivered };
+  return { jobId: job.jobId, state: ending.state, detail: ending.detail as TransitionDetail, text, undelivered, usage, artifacts };
 }
 
 /**

@@ -26,7 +26,10 @@ test("plantworks pw job run: done prints the result, a rejected job exits 2", as
 
   const ok = await run(["pw", "job", "run", file, "--pi", fakePi, "--cwd", home], env);
   assert.equal(ok.code, 0, ok.stderr);
-  assert.deepEqual(JSON.parse(ok.stdout), { jobId: "kb-default-t_00ff00ff-a1", state: "done", detail: { outcome: "succeeded" }, text: "hi from the stub", undelivered: [] });
+  const { usage, artifacts, ...rest } = JSON.parse(ok.stdout);
+  assert.deepEqual(rest, { jobId: "kb-default-t_00ff00ff-a1", state: "done", detail: { outcome: "succeeded" }, text: "hi from the stub", undelivered: [] });
+  assert.deepEqual([usage.promptTokens, usage.completionTokens, typeof usage.wallSeconds], [10, 2, "number"]);
+  assert.equal(artifacts.branch, null);
   assert.deepEqual(consumer.states(), ["queued", "claimed", "running", "done"]);
 
   writeFileSync(file, JSON.stringify({ jobId: "nope", team: "social-media", task: { prompt: "hi" } }));
