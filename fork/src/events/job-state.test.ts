@@ -28,7 +28,7 @@ async function stub(replies: Reply[] = []) {
   return { url, received, close: () => { server.closeAllConnections(); return new Promise((r) => server.close(r)); } };
 }
 
-test("builds a CloudEvents job.state event with its persisted transition sequence", () => {
+test("uses the persisted transition id so a repeated state cannot reuse its CloudEvent id", () => {
   const e = jobStateEvent({ ...job, transitionSeq: 17, qitemId: "qitem-1", seat: "dev-a@team", summary: "work" }, "done", { outcome: "succeeded", closure: "handoff-sre" }, new Date("2026-10-24T00:00:00Z"));
   assert.deepEqual(e, {
     specversion: "1.0",
@@ -40,7 +40,10 @@ test("builds a CloudEvents job.state event with its persisted transition sequenc
     datacontenttype: "application/json",
     data: { jobId: "kb-board1-card9-a2", team: "social-media", attempt: 2, state: "done", qitemId: "qitem-1", seat: "dev-a@team", summary: "work", outcome: "succeeded", closure: "handoff-sre" },
   });
-  assert.notEqual(jobStateEvent({ ...job, transitionSeq: 17 }, "running").id, jobStateEvent({ ...job, transitionSeq: 21 }, "running").id);
+  assert.deepEqual(
+    [jobStateEvent({ ...job, transitionSeq: 17 }, "running").id, jobStateEvent({ ...job, transitionSeq: 21 }, "running").id],
+    [`${job.jobId}:17`, `${job.jobId}:21`],
+  );
   assert.throws(() => jobStateEvent({ jobId: "nope", team: "t" }, "queued"), /invalid jobId/);
 });
 
