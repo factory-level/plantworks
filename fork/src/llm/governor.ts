@@ -114,7 +114,8 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
           failed = true;
           opts.onFail?.("call-deadline");
         }
-      } else if (record.status && record.status < 500) {
+      } else {
+        // Any call that was not cut at the deadline, error or not, ends the run.
         consecutiveDeadlines = 0;
       }
     }

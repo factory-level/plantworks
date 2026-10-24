@@ -11,7 +11,7 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "test": "node --import tsx --test",
+    "test": "node --test",
     "check:headers": "node scripts/check-headers.mjs"
   }
 }
