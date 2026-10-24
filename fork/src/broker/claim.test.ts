@@ -312,6 +312,10 @@ test("reconciliation keeps a dead worker's slot through ambiguity and releases i
     { ...observation, state: "done", closureReason: "no-follow-on", closingTransition: { transitionId: 2, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-b@team" }, transitions: [{ transitionId: 2, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-b@team", identityProvenance: "transport:v1" }] },
     { ...observation, state: "done", closureReason: "no-follow-on", closingTransition: { transitionId: 2, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-a@team" }, transitions: [{ transitionId: 2, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-a@team", identityProvenance: "claimed:v1" }] },
     { ...observation, state: "done", closureReason: "no-follow-on", closingTransition: { transitionId: 4, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-a@team" }, transitions: [{ transitionId: 3, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-a@team", identityProvenance: "transport:v1" }] },
+    { ...observation, state: "done", closureReason: "no-follow-on", closingTransition: { transitionId: 5, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-a@team" }, transitions: [
+      { transitionId: 5, state: "done", closureReason: "no-follow-on", closureTarget: null, actorSession: "dev-a@team", identityProvenance: "transport:v1" },
+      { transitionId: 6, state: "in-progress", closureReason: null, closureTarget: null, actorSession: "dev-a@team", identityProvenance: "transport:v1" },
+    ] },
   ] as QueueObservation[]) {
     observation = ambiguous;
     await reconcile();

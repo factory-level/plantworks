@@ -32,8 +32,12 @@ export function createReconciler(store: Store, daemon: DaemonQueue, emit: Emit, 
         emit(running.row, "running", running.detail);
         continue;
       }
-      const closing = item.transitions.find((t) => t.state === "done" && t.closureReason === "no-follow-on" && t.closureTarget == null && t.transitionId === item.closingTransition?.transitionId);
-      if (item.state !== "done" || item.closureReason !== "no-follow-on" || item.closureTarget != null || !closing || closing.actorSession !== item.destinationSession || closing.identityProvenance !== "transport:v1") continue;
+      let closingIndex = item.transitions.length - 1;
+      while (closingIndex >= 0 && item.transitions[closingIndex]!.state === "done") closingIndex--;
+      const closing = item.transitions[closingIndex + 1];
+      // transitions are ordered oldest-first; a later reopen invalidates an older done snapshot.
+      if (item.transitions.at(-1)?.state !== "done") continue;
+      if (item.state !== "done" || item.closureReason !== "no-follow-on" || item.closureTarget != null || !closing || closing.closureReason !== "no-follow-on" || closing.closureTarget != null || closing.transitionId !== item.closingTransition?.transitionId || closing.actorSession !== item.destinationSession || closing.identityProvenance !== "transport:v1") continue;
       if (current.state === "claimed") {
         const running = store.transition(current.job_id, "running");
         emit(running.row, "running", running.detail);
