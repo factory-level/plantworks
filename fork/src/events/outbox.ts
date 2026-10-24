@@ -68,13 +68,11 @@ export function createJobStateOutbox(
     VALUES (?, ?, 1, ?, ?, ?, ?) ON CONFLICT(team, transition_id) DO UPDATE SET attempts = attempts + 1, last_error = excluded.last_error, next_attempt_at = excluded.next_attempt_at, logged = MAX(event_outbox_failures.logged, excluded.logged), parked = excluded.parked`);
   const park = store.db.prepare("UPDATE event_outbox_failures SET parked = 1 WHERE team = ? AND transition_id = ?");
   const clearFailure = store.db.prepare("DELETE FROM event_outbox_failures WHERE team = ? AND transition_id = ?");
-  let running: Promise<void> | undefined;
+  const running = new Map<string, Promise<void>>();
 
-  async function drain() {
-    const teams = store.db.prepare("SELECT DISTINCT team FROM jobs ORDER BY team").all() as { team: string }[];
-    await Promise.all(teams.map(async ({ team }) => {
-      addCursor.run(team);
-      for (;;) {
+  async function drainTeam(team: string) {
+    addCursor.run(team);
+    for (;;) {
         const cursor = (readCursor.get(team) as { delivered_through: number }).delivered_through;
         const rows = store.db.prepare(`SELECT t.* FROM job_transitions t JOIN jobs j ON j.job_id = t.job_id
           WHERE j.team = ? AND t.id > ? ORDER BY t.id LIMIT ?`).all(team, cursor, BATCH_SIZE) as TransitionRow[];
@@ -82,7 +80,7 @@ export function createJobStateOutbox(
         let blocked = false;
         let currentCursor = cursor;
         for (const transition of rows) {
-          const prior = failed.get(team, transition.id) as { attempts: number; parked: number } | undefined;
+          const prior = failed.get(team, transition.id) as { attempts: number; parked: number; next_attempt_at: number; logged: number } | undefined;
           if (prior?.parked) {
             advance.run(transition.id, team, currentCursor);
             currentCursor = transition.id;
@@ -125,17 +123,22 @@ export function createJobStateOutbox(
           if (next.delivered_through !== transition.id) { blocked = true; break; }
         }
         if (blocked) break;
-      }
-    }));
+    }
   }
 
   function pump(): Promise<void> {
-    if (!running) {
-      running = drain().catch((error: unknown) => {
-        log(`plantworks event outbox pump failed: ${(error as Error).message}`);
-      }).finally(() => { running = undefined; });
+    const teams = store.db.prepare("SELECT DISTINCT team FROM jobs ORDER BY team").all() as { team: string }[];
+    for (const { team } of teams) {
+      if (running.has(team)) continue;
+      let task: Promise<void>;
+      task = drainTeam(team).catch((error: unknown) => {
+        log(`plantworks event outbox pump failed for ${team}: ${(error as Error).message}`);
+      }).finally(() => {
+        if (running.get(team) === task) running.delete(team);
+      });
+      running.set(team, task);
     }
-    return running;
+    return Promise.all(running.values()).then(() => {});
   }
 
   return {

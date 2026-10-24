@@ -139,3 +139,34 @@ test("a slow team does not delay another team's delivery", async () => {
     store.close();
   }
 });
+
+test("a newly active team starts draining while another team's pump is still running", async () => {
+  const store = openStore(":memory:");
+  try {
+    store.insert({ jobId: "kb-a-card1-a1", team: "a", task: { prompt: "a" } }, "quick", "queued");
+    let releaseA!: () => void;
+    let markAStarted!: () => void;
+    let markBDelivered!: () => void;
+    const aStarted = new Promise<void>((resolve) => { markAStarted = resolve; });
+    const bDelivered = new Promise<void>((resolve) => { markBDelivered = resolve; });
+    const outbox = createJobStateOutbox(store, async (team, event) => {
+      if (team === "a") {
+        markAStarted();
+        await new Promise<void>((resolve) => { releaseA = resolve; });
+        throw new DeliveryError("HTTP 503 after 8 attempts", event, 8);
+      }
+      markBDelivered();
+    }, () => {});
+
+    const slowPump = outbox.pump();
+    await aStarted;
+    store.insert({ jobId: "kb-b-card1-a1", team: "b", task: { prompt: "b" } }, "quick", "queued");
+    const newTeamPump = outbox.pump();
+    await bDelivered;
+    assert.equal((store.db.prepare("SELECT delivered_through FROM event_outbox_team_cursor WHERE team = 'b'").get() as { delivered_through: number }).delivered_through, 2);
+    releaseA();
+    await Promise.all([slowPump, newTeamPump]);
+  } finally {
+    store.close();
+  }
+});
