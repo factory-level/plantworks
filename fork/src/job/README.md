@@ -42,7 +42,9 @@ before any event. The lock is per home by default; set `PLANTWORKS_JOB_LOCK` to 
 cover every home on the host. Fail-closed:
 - the lock is released when the run ends, and only if it is still this run's;
 - it is stale, and replaced, only when the runner and the Pi it records are both gone, so a Pi left
-  running by a killed runner still holds it;
+  running by a killed runner still holds it. The lock says `starting` just before Pi is spawned and
+  names its PID right after, so a runner that dies in between leaves a lock that is refused, not
+  taken over: check for a stray Pi, then remove it by hand;
 - a lock file that can't be read as one is refused and never removed: check that no job is running,
   then remove it by hand.
 

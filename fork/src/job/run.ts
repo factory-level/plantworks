@@ -123,9 +123,12 @@ async function runLocked(opts: RunOptions, job: JobEnvelope, className: string, 
       onFail: (reason) => stop({ state: "failed", detail: { reason, message: "3 consecutive model calls hit the deadline" } }),
     });
     const agentDir = writeSeatFiles({ openrigHome: opts.openrigHome, session: sessionFor(job.jobId), className, governorUrl: governor.url });
+    // The lock says a Pi is starting before the spawn, and names its PID as soon as spawn() returns
+    // (synchronously), so a runner that dies in between leaves a lock nobody may take over.
+    lock.recordPi("starting");
     pi = startPi(opts.piCommand, { cwd: opts.cwd, env: piEnv(env, agentDir) }, log);
+    lock.recordPi(pi.pid ?? null);
     await pi.started; // a Pi that cannot start fails the job from `claimed`, never `running`
-    lock.recordPi(pi.pid);
     if (interrupted) throw new Error("interrupted before the job started running");
     pi.exited.then((code) => stop({ state: "failed", detail: { reason: "error", message: `pi exited (${code}) before the job settled` } }));
 
@@ -270,9 +273,12 @@ function startPi(command: string[], spawnOpts: { cwd: string; env: NodeJS.Proces
 
 // --- PW-13: the host's single-job lock --------------------------------------------------------
 
-/** The held lock: `recordPi` adds Pi's PID once it runs, `release` removes the lock if it is still ours. */
-export interface JobLock { recordPi(pid: number | undefined): void; release(): void }
-type LockRecord = { runner: number; pi: number | null; token: string; since: string };
+/**
+ * The held lock: `recordPi` records "starting" just before Pi is spawned and its PID (or null, when
+ * the spawn failed) right after; `release` removes the lock if it is still ours.
+ */
+export interface JobLock { recordPi(pid: number | "starting" | null): void; release(): void }
+type LockRecord = { runner: number; pi: number | "starting" | null; token: string; since: string };
 
 const alive = (pid: number) => {
   try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; }
@@ -305,11 +311,12 @@ export function takeJobLock(path: string, now = () => new Date()): JobLock {
     try {
       raw = readFileSync(path, "utf8");
       held = JSON.parse(raw);
-      if (!Number.isInteger(held.runner) || (held.pi !== null && !Number.isInteger(held.pi))) throw new Error("not a lock record");
+      if (!Number.isInteger(held.runner) || (held.pi !== null && held.pi !== "starting" && !Number.isInteger(held.pi))) throw new Error("not a lock record");
     } catch (e) {
       throw new RejectedJob(`${path} exists but can't be read as a job lock (${(e as Error).message}); refusing to run. Remove it only after checking that no job is running`);
     }
-    if (alive(held.runner) || (held.pi !== null && alive(held.pi))) throw new RejectedJob(`one job at a time on this host: ${path} is held by runner ${held.runner}${held.pi === null ? "" : ` and Pi ${held.pi}`} since ${held.since}`);
+    if (held.pi === "starting" && !alive(held.runner)) throw new RejectedJob(`${path}: runner ${held.runner} died while starting Pi, so a Pi may still be running unrecorded; refusing to run. Check for a stray Pi, then remove the lock by hand`);
+    if (alive(held.runner) || (typeof held.pi === "number" && alive(held.pi))) throw new RejectedJob(`one job at a time on this host: ${path} is held by runner ${held.runner}${typeof held.pi === "number" ? ` and Pi ${held.pi}` : ""} since ${held.since}`);
     // Stale: move it aside, then make sure what moved is the lock we judged stale, not one just taken.
     const aside = `${path}.stale.${process.pid}.${mine.token}`;
     renameSync(path, aside);
@@ -324,7 +331,7 @@ export function takeJobLock(path: string, now = () => new Date()): JobLock {
   const ours = () => { try { return (JSON.parse(readFileSync(path, "utf8")) as LockRecord).token === mine.token; } catch { return false; } };
   return {
     recordPi(pid) {
-      if (pid === undefined || !ours()) return;
+      if (!ours()) return;
       mine.pi = pid;
       const tmp = `${path}.${mine.token}.tmp`;
       write(tmp);

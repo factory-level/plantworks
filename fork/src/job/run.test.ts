@@ -273,6 +273,11 @@ test("a stale lock (runner and Pi both gone) is replaced; an unreadable one is r
 
   writeFileSync(path, JSON.stringify({ runner: dead, pi: process.pid, token: "x", since: "then" }));
   assert.throws(() => takeJobLock(path), /one job at a time/, "a live Pi from a dead runner still holds it");
+  // A runner that died between recording "starting" and Pi's PID: a Pi may be running unrecorded.
+  const starting = JSON.stringify({ runner: dead, pi: "starting", token: "y", since: "then" });
+  writeFileSync(path, starting);
+  assert.throws(() => takeJobLock(path), (e: Error) => e instanceof RejectedJob && /died while starting Pi/.test(e.message));
+  assert.equal(readFileSync(path, "utf8"), starting, "and the lock is kept");
   for (const garbage of ["", "{not json", JSON.stringify({ runner: "me" })]) {
     writeFileSync(path, garbage);
     assert.throws(() => takeJobLock(path), (e: Error) => e instanceof RejectedJob && /can't be read as a job lock/.test(e.message));
