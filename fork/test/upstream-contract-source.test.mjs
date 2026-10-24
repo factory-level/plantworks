@@ -9,11 +9,13 @@ import { piSeatPaths } from "../../packages/daemon/dist/adapters/pi-runner-proto
 const root = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const source = (path) => readFileSync(join(root, path), "utf8");
 
-test("daemon options at packages/daemon/src/startup.ts:199-230 and startServer at packages/daemon/src/index.ts:249 stay pinned", () => {
+test("DaemonOptions/createDaemon at packages/daemon/src/startup.ts:199-230,310 and startServer at packages/daemon/src/index.ts:249 stay pinned", () => {
   const startup = source("packages/daemon/src/startup.ts");
   const index = source("packages/daemon/src/index.ts");
   const options = startup.match(/interface DaemonOptions\s*\{([\s\S]*?)\n\}/)?.[1];
   assert.ok(options, "upstream packages/daemon/src/startup.ts:199 declares DaemonOptions");
+  assert.match(startup, /export async function createDaemon\(opts\?: DaemonOptions\)/,
+    "upstream packages/daemon/src/startup.ts:310 exports createDaemon with DaemonOptions");
   for (const name of [
     "dbPath", "bindPlan", "tmuxExec", "argvExec", "cmuxExec", "cmuxFactory", "cmuxTimeoutMs",
     "tmuxOptionPlatform", "slowOpRecorder", "bearerToken", "terminalBearerToken", "webUiEnabled",
