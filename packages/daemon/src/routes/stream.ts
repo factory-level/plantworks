@@ -3,6 +3,7 @@ import { streamSSE } from "hono/streaming";
 import type { EventBus } from "../domain/event-bus.js";
 import type { StreamStore } from "../domain/stream-store.js";
 import { listSubscriptions, readPage, subscribe, unsubscribe } from "../domain/stream-subscriptions.js";
+import { ReaderActionError, readerActions, recordReaderAction } from "../domain/stream-reader-actions.js";
 import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
 import { queryLimit } from "./query-limit.js";
 
@@ -228,6 +229,26 @@ export function streamRoutes(): Hono {
     const page = readPage(getStore(c).db, identity.session, { limit: typeof body.limit === "number" ? body.limit : undefined });
     if (!page) return c.json({ error: "subscription_not_found", message: `No stream subscription for ${identity.session}; create one with rig stream subscribe ${identity.session}` }, 404);
     return c.json(page);
+  });
+
+  // Slice 22 outcome 9: a reader's action on an item (act, decline, duplicate), as the transport identity.
+  app.post("/:streamItemId/act", async (c) => {
+    const body = await c.req.json<{ action?: string; workQitemId?: string | null; duplicateOf?: string | null; reason?: string | null; reader?: string }>()
+      .catch(() => ({} as never));
+    const identity = requireSenderIdentity(c, { verb: "stream act", bodyClaim: body.reader });
+    if (!identity.ok) return identity.response;
+    try {
+      return c.json(recordReaderAction(getStore(c).db, { streamItemId: c.req.param("streamItemId"), readerSession: identity.session,
+        action: body.action ?? "", workQitemId: body.workQitemId, duplicateOf: body.duplicateOf, reason: body.reason }), 201);
+    } catch (err) {
+      if (err instanceof ReaderActionError) return c.json({ error: err.code, message: err.message }, err.status);
+      throw err;
+    }
+  });
+
+  app.get("/:streamItemId/actions", (c) => {
+    const id = c.req.param("streamItemId");
+    return c.json({ streamItemId: id, ...readerActions(getStore(c).db, id) });
   });
 
   // GET /:streamItemId — fetch one
