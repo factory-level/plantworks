@@ -165,8 +165,53 @@ shares the key.
 - **A slot frees** when the job reaches a terminal state.
 - **Never exceeded.** claim-next counts and reserves in one immediate SQLite transaction, so
   concurrent claims, or another broker on the same file, can't exceed the cap.
-- **Separate from other caps.** This runtime cap is independent of the team spec's validation
-  caps (`pw team validate --platform`) and of Hermes' `kanban.max_in_progress_per_profile`.
+- **Separate from other caps.** This runtime cap is independent of Hermes'
+  `kanban.max_in_progress_per_profile`.
+- **Checked at start against the specs.** `pw broker serve` refuses to start when the classes of
+  the teams sharing a key ask for more `slots` than `PLANTWORKS_SLOT_CAP` gives that key. This is
+  the same parsed cap that claim-next enforces. Each spec's rule 1 still checks the `--platform`
+  file's `slotCaps`, so both must agree with the specs.
+
+**Per-call ceilings (PW-19).** The platform delivers the per-call ceilings with the cap. Classes
+are checked against them when the broker starts, and a class over a ceiling stops the start.
+
+| Variable | Format | Unset |
+|---|---|---|
+| `PLANTWORKS_MAX_CALL_SECONDS` | positive integer, at most 60 | 60 |
+| `PLANTWORKS_MAX_CALL_OUTPUT` | `<up to 16K context>/<above 16K>` tokens, or one number for both; at most `1536/1024` | `1536/1024` |
+
+A value can only tighten the ADR ceilings, never loosen them. A malformed, zero, negative or
+larger value stops the broker. The ceilings bind the broker's start check only. The worker's
+governor still enforces the ADR values and the class's own `perCall`. `pw team validate` also
+uses the ADR values, so a spec that validates can still be refused at broker start where the
+platform has tightened a ceiling.
+
+#### Runbook: moving the Phase 1 slot between teams
+
+The move is a config change only, with no code change and no broker endpoint. The example moves
+the single slot from team `a` (key `a`) to team `b` (key `b`). Nothing in this procedure releases
+a job on a timeout.
+
+1. **Stop new work for `a`.** Drain `a`'s worker seats (`plantworks pw worker drain --seat …`).
+2. **Wait until `a` is idle.** Wait for `GET /plantworks/v1/stats` to show `slots.a.inFlight: 0`.
+   That is the logical count. A drain timeout, or an `a` job that never settles, is not a reason
+   to go on. The keys are separate, so `b` would start while `a` may still be using the shared
+   lane. Settle a stuck job through the PW-21 operator procedure, which first verifies that the
+   work stopped.
+3. **Change the config, in one GitOps commit:**
+   - `PLANTWORKS_SLOT_CAP` changes from `a=1,b=0` to `a=0,b=1`;
+   - the platform file's `slotCaps` gets the same values;
+   - `a`'s class `slots` become 0;
+   - `b`'s class `slots` total 1, within its worker seats (rule 4).
+4. **Roll the broker.** The start refuses a change where any key's classes ask for more slots than
+   its cap, in `PLANTWORKS_SLOT_CAP` or in the platform file. It does **not** catch a cap left
+   higher than the slots, for example `PLANTWORKS_SLOT_CAP` still `a=1`. So after the roll, check
+   that `GET /plantworks/v1/stats` shows `slots.a.cap: 0` and `slots.b.cap: 1`. With no slots, nothing in `a`'s classes is claimed again. Once the
+   per-class slot check from #58 is on main, they also refuse new jobs (`400 class_disabled`).
+5. **Resume `b`'s seats.** A starting `worker run` resumes its own seat. `a`'s seats can stay
+   drained.
+
+Moving the slot back is the same procedure with `a` and `b` swapped.
 
 **What the cap enforces: broker job states, not physical execution.** The cap counts jobs by
 their state in this broker. A slot frees when the broker records a terminal state for the job,
