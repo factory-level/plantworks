@@ -289,7 +289,8 @@ test("two broker connections on one SQLite file: a side transition can't free an
 
 test("reconciliation keeps a dead worker's slot through ambiguity and releases it only on authenticated no-follow-on completion", async () => {
   let observation: QueueObservation = { qitemId: "qitem-test-1", state: "in-progress", destinationSession: "dev-a@team", transitions: [] };
-  const daemon = fakeDaemon({ inspect: () => observation }).daemon;
+  let readable = true;
+  const daemon = fakeDaemon({ inspect: () => { if (!readable) throw new Error("daemon unavailable"); return observation; } }).daemon;
   const t = setup(daemon, undefined, undefined, parseSlotCaps(undefined));
   await t.submit("t_1"); await t.submit("t_2");
   assert.equal((await t.claim("dev-a@team")).status, 200);
@@ -298,6 +299,11 @@ test("reconciliation keeps a dead worker's slot through ambiguity and releases i
   await reconcile();
   assert.equal(t.store.get(row.job_id)!.state, "running", "active daemon work does not complete");
   assert.equal((await t.claim("dev-b@team")).status, 429);
+  readable = false;
+  await reconcile();
+  assert.equal(t.store.get(row.job_id)!.state, "running", "unreadable completion evidence fails closed");
+  assert.equal((await t.claim("dev-b@team")).status, 429);
+  readable = true;
 
   for (const ambiguous of [
     { ...observation, state: "done", closureReason: "canceled", closingTransition: { transitionId: 1, state: "done", closureReason: "canceled", closureTarget: null, actorSession: "admin" }, transitions: [{ transitionId: 1, state: "done", closureReason: "canceled", closureTarget: null, actorSession: "admin", identityProvenance: "transport:v1" }] },

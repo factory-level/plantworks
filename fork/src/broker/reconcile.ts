@@ -6,6 +6,7 @@ import type { Store } from "./store.ts";
 /** Reconcile at most one batch from persisted qitem ids. Ambiguity always keeps the slot. */
 export function createReconciler(store: Store, daemon: DaemonQueue, emit: Emit, log: (line: string) => void = (line) => process.stderr.write(`${line}\n`), limit = 16) {
   let cursor = 0;
+  const lastLogged = new Map<string, number>();
   return async () => {
   let rows = store.unresolved(limit, cursor);
   if (!rows.length && cursor) { cursor = 0; rows = store.unresolved(limit); }
@@ -15,6 +16,7 @@ export function createReconciler(store: Store, daemon: DaemonQueue, emit: Emit, 
     if (!qitemId) continue;
     try {
       const item = await daemon.inspect(qitemId);
+      lastLogged.delete(qitemId);
       if (item.qitemId !== qitemId) continue;
       if (item.destinationSession !== (row.claimed_by ?? row.reserved_by)) continue;
       let current = store.get(row.job_id);
@@ -41,7 +43,13 @@ export function createReconciler(store: Store, daemon: DaemonQueue, emit: Emit, 
       const { row: done, detail } = store.transition(current.job_id, "done", { outcome: "succeeded" }, { result: JSON.stringify({ qitemId }) });
       emit(done, done.state, detail);
     } catch (error) {
-      log(`plantworks broker: reconciliation deferred for ${row.job_id} (${qitemId}): ${(error as Error).message}`);
+      const now = Date.now();
+      if (now - (lastLogged.get(qitemId) ?? 0) >= 60_000) {
+        log(`plantworks broker: reconciliation deferred for ${row.job_id} (${qitemId}): ${(error as Error).message}`);
+        lastLogged.delete(qitemId);
+        lastLogged.set(qitemId, now);
+        if (lastLogged.size > 128) lastLogged.delete(lastLogged.keys().next().value!);
+      }
     }
   }
   };

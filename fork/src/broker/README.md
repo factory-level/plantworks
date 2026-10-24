@@ -143,7 +143,9 @@ seat's transport identity. The broker does not close qitems during cleanup.
 broker record. It asks for another job only after the broker reports `done`. A worker process
 exit, timeout, unreadable qitem, daemon outage, generic failure/cancellation, administrative
 closure, or `handed-off` state does not release the slot. The broker reconciler polls persisted
-qitem IDs in bounded rotating batches and can continue after a worker or broker restart.
+qitem IDs in rotating batches of 16 every two seconds and can continue after a worker or broker
+restart. It reports an unreadable qitem at most once per minute and keeps only 128 diagnostic
+timestamps in memory.
 
 The reconciler treats a qitem as logically complete only when the exact stored qitem ID is
 returned as `done` with `no-follow-on`, has no closure target, and its closing transition matches
