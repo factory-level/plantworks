@@ -35,8 +35,9 @@ An interrupt before Pi runs does the same. A second Ctrl-C/SIGTERM gets the defa
 stop that hangs can still be killed; a runner killed with SIGKILL reports nothing. No branch is
 created, so there is none to leave intact.
 
-**One job at a time.** The runner holds `$OPENRIG_HOME/plantworks/job.lock` while a job runs (the
-selected home: `PLANTWORKS_HOME` wins, as for every `plantworks` command), created exclusively and
+**One job at a time.** The runner holds `<home>/plantworks/job.lock` while a job runs, where
+`<home>` is the selected home: `PLANTWORKS_HOME` when set (it wins over `OPENRIG_HOME`, as for every
+`plantworks` command), else `OPENRIG_HOME`. The lock is created exclusively,
 recording the runner's and Pi's PIDs. A second `pw job run` with that lock is rejected (exit 2)
 before any event. The lock is per home by default; set `PLANTWORKS_JOB_LOCK` to one path to
 cover every home on the host. Fail-closed:
@@ -51,7 +52,9 @@ To clear a lock the runner refuses (a runner died while starting Pi, or the file
 the refusal message also says:
 1. Check that no runner Pi is left: `pgrep -af -- '--mode rpc --no-session'` prints nothing, or only
    Pis you can account for. Stop any stray one.
-2. Remove the lock: `rm "$OPENRIG_HOME/plantworks/job.lock"` (or the `PLANTWORKS_JOB_LOCK` path).
+2. Delete the lock file the refusal names, exactly that path. It is the selected home's (with
+   `PLANTWORKS_HOME` set, that home, not `OPENRIG_HOME`), or `PLANTWORKS_JOB_LOCK`; don't rebuild it
+   by hand.
 
 A PID can be reused, so a stale lock whose PIDs now belong to other processes is refused until it
 is removed.

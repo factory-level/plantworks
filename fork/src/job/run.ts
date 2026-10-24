@@ -281,7 +281,9 @@ export interface JobLock { recordPi(pid: number | "starting" | null): void; rele
 type LockRecord = { runner: number; pi: number | "starting" | null; token: string; since: string };
 
 /** What an operator does about a lock the runner won't take over. Pi runs as `pi --mode rpc --no-session`. */
-const CLEAR_LOCK = (path: string) => `To clear it: check that no runner Pi is left (pgrep -af -- '--mode rpc --no-session' prints nothing, or only Pis you can account for; stop any stray one), then remove the lock (rm '${path}')`;
+// The path is given as data (JSON-quoted), not as a shell command, so any characters in a configured
+// PLANTWORKS_JOB_LOCK are shown exactly and nothing here is meant to be pasted into a shell.
+const CLEAR_LOCK = (path: string) => `To clear it: check that no runner Pi is left (pgrep -af -- '--mode rpc --no-session' prints nothing, or only Pis you can account for; stop any stray one), then delete exactly this lock file: ${JSON.stringify(path)}`;
 
 const alive = (pid: number) => {
   try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; }
