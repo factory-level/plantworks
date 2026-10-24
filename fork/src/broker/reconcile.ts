@@ -44,7 +44,7 @@ export function createReconciler(store: Store, daemon: DaemonQueue, emit: Emit, 
         current = running.row;
       }
       if (current.state !== "running") continue;
-      const { row: done, detail } = store.transition(current.job_id, "done", { outcome: "succeeded" }, { result: JSON.stringify({ qitemId }) });
+      const { row: done, detail } = store.transition(current.job_id, "done", { outcome: "succeeded" }, { result: JSON.stringify({ text: null, artifacts: [] }) });
       emit(done, done.state, detail);
     } catch (error) {
       const now = Date.now();

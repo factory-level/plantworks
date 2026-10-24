@@ -31,11 +31,15 @@ export interface JobRow {
   reserved_at: string | null;
   reserved_qitem_id: string | null;
   result: string | null;
+  /** When a held job's approval TTL runs out (PW-23); null for no TTL. */
+  approval_expires_at: string | null;
+  /** approved, denied or expired, once a held job is decided (PW-23). */
+  approval_decision: string | null;
 }
 
 /** Extra columns a transition may set alongside the state (PW-18 sets claimed_by, claimed_at and qitem_id). */
-export type TransitionColumns = Partial<Pick<JobRow, "claimed_by" | "claimed_at" | "qitem_id" | "result">>;
-const TRANSITION_COLUMNS = ["claimed_by", "claimed_at", "qitem_id", "result"];
+export type TransitionColumns = Partial<Pick<JobRow, "claimed_by" | "claimed_at" | "qitem_id" | "result" | "approval_decision">>;
+const TRANSITION_COLUMNS = ["claimed_by", "claimed_at", "qitem_id", "result", "approval_decision"];
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS jobs (
@@ -54,10 +58,14 @@ CREATE TABLE IF NOT EXISTS jobs (
   reserved_by TEXT,
   reserved_at TEXT,
   reserved_qitem_id TEXT,
-  result TEXT
+  result TEXT,
+  approval_expires_at TEXT,
+  approval_decision TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_claimable ON jobs (team, class, state, seq);
 `;
+/** Columns added after PW-17, for a broker file created before them. */
+const ADDED_COLUMNS = ["approval_expires_at TEXT", "approval_decision TEXT"];
 
 export type Store = ReturnType<typeof openStore>;
 
@@ -67,6 +75,8 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   db.exec(SCHEMA);
+  const have = new Set((db.prepare("PRAGMA table_info(jobs)").all() as { name: string }[]).map((c) => c.name));
+  for (const col of ADDED_COLUMNS) if (!have.has(col.split(" ")[0]!)) db.exec(`ALTER TABLE jobs ADD COLUMN ${col}`);
   const iso = () => now().toISOString();
   // IMMEDIATE: the write lock is taken up front, so a read inside the transaction can't go stale
   // against another broker process on the same file. Nested calls run as savepoints.
@@ -104,12 +114,13 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
       return db.prepare("SELECT * FROM jobs WHERE seq > ? AND state IN ('queued','claimed','running') AND (qitem_id IS NOT NULL OR reserved_qitem_id IS NOT NULL) ORDER BY seq LIMIT ?").all(afterSeq, limit) as JobRow[];
     },
 
-    /** Inserts a new job, or returns the existing row for that jobId (`created` says which). */
-    insert(envelope: JobEnvelope, cls: string, state: JobState): { row: JobRow; created: boolean } {
+    /** Inserts a new job, or returns the existing row for that jobId (`created` says which). A held job may carry its approval TTL. */
+    insert(envelope: JobEnvelope, cls: string, state: JobState, approvalTtlSeconds?: number): { row: JobRow; created: boolean } {
       return tx(() => {
         const at = iso();
-        const r = db.prepare("INSERT OR IGNORE INTO jobs (job_id, team, class, state, envelope, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-          .run(envelope.jobId, envelope.team, cls, state, JSON.stringify(envelope), at, at);
+        const expires = approvalTtlSeconds === undefined ? null : new Date(now().getTime() + approvalTtlSeconds * 1000).toISOString();
+        const r = db.prepare("INSERT OR IGNORE INTO jobs (job_id, team, class, state, envelope, created_at, updated_at, approval_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+          .run(envelope.jobId, envelope.team, cls, state, JSON.stringify(envelope), at, at, expires);
         return { row: get(envelope.jobId)!, created: r.changes === 1 };
       });
     },
@@ -150,6 +161,11 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
         if (!row || row.state !== "queued" || row.reserved_by !== seat || row.reserved_qitem_id !== qitemId) return "lost";
         return apply(jobId, "claimed", {}, { claimed_by: seat, claimed_at: iso(), qitem_id: qitemId }, { seat, qitemId });
       });
+    },
+
+    /** Held jobs whose approval TTL has run out. */
+    expiredHolds(): JobRow[] {
+      return db.prepare("SELECT * FROM jobs WHERE state = 'held' AND approval_expires_at IS NOT NULL AND approval_expires_at <= ? ORDER BY seq").all(iso()) as JobRow[];
     },
 
     /**

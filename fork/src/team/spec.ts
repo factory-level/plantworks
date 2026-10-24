@@ -179,7 +179,16 @@ export function validateSpec(spec: unknown, platform: Platform = PHASE_0_1): str
  * cap (PW-19) is separate and does not depend on this setting.
  */
 export function hermesProfileConfig(spec: TeamSpec): string {
-  return `kanban:\n  max_in_progress_per_profile: ${spec.hermesProfile.kanban.max_in_progress_per_profile}\n`;
+  return `kanban:\n  max_in_progress_per_profile: ${spec.hermesProfile.kanban.max_in_progress_per_profile}\n` +
+    // The Hermes integration kit (PW-24, ../hermes/README.md). The references stay literal: Hermes
+    // resolves them from the profile's secret scope and refuses to connect while one is unset.
+    "mcp_servers:\n" +
+    "  plantworks:\n" +
+    '    url: "${PLANTWORKS_MCP_URL}"\n' +
+    "    headers:\n" +
+    '      Authorization: "Bearer ${PLANTWORKS_MCP_TOKEN}"\n' +
+    "    tools:\n" +
+    "      include: [job_submit, job_inspect, job_cancel]\n";
 }
 
 export function validatePlatform(input: unknown): string[] {

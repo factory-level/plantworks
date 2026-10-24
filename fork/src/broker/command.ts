@@ -22,7 +22,8 @@ export function brokerVerb(pw: Command): void {
     .option("--db <path>", "broker SQLite file (default: $OPENRIG_HOME/plantworks/broker.sqlite)")
     .option("--host <host>", "bind address; anything but loopback needs PLANTWORKS_BROKER_TOKEN", BROKER_DEFAULTS.host)
     .option("--port <port>", "port", String(BROKER_DEFAULTS.port))
-    .action(async (opts: { teams?: string; platform?: string; db?: string; host: string; port: string }) => {
+    .option("--public-url <url>", "the broker's address as callers reach it, for approval decision URLs (default: $PLANTWORKS_BROKER_PUBLIC_URL, else the listen address)")
+    .action(async (opts: { teams?: string; platform?: string; db?: string; host: string; port: string; publicUrl?: string }) => {
       const dir = opts.teams ?? process.env.PLANTWORKS_TEAMS_DIR;
       let store;
       try {
@@ -35,7 +36,7 @@ export function brokerVerb(pw: Command): void {
         // PW-19: PLANTWORKS_SLOT_CAP per slotBudgetKey, 1 in flight per key when unset. A bad value refuses to start.
         const slotCaps = parseSlotCaps(process.env.PLANTWORKS_SLOT_CAP);
         const routes = [claimNextRoutes({ daemon, slotCaps, brokerSession: process.env.PLANTWORKS_BROKER_SESSION?.trim() || BROKER_DEFAULTS.session })];
-        const server = await startBroker({ store, teams, routes, token: process.env.PLANTWORKS_BROKER_TOKEN?.trim() || undefined, host: opts.host, port: Number(opts.port), onListen: ({ store, emit }) => {
+        const server = await startBroker({ store, teams, routes, token: process.env.PLANTWORKS_BROKER_TOKEN?.trim() || undefined, host: opts.host, port: Number(opts.port), publicUrl: opts.publicUrl ?? (process.env.PLANTWORKS_BROKER_PUBLIC_URL?.trim() || undefined), onListen: ({ store, emit }) => {
           let reconciling = false;
           const run = createReconciler(store, daemon, emit, (line) => console.error(line));
           const timer = setInterval(async () => {
