@@ -10,7 +10,8 @@ upstream_remote=${UPSTREAM_REMOTE:-upstream}
 git fetch --no-tags "$upstream_remote" main
 target=$(git rev-parse "refs/remotes/$upstream_remote/main")
 
-if git fetch --no-tags "$fork_remote" upstream-main 2>/dev/null; then
+if git ls-remote --exit-code --heads "$fork_remote" upstream-main >/dev/null; then
+  git fetch --no-tags "$fork_remote" upstream-main
   current=$(git rev-parse "refs/remotes/$fork_remote/upstream-main")
   if [ "$current" = "$target" ]; then
     echo "upstream-main already at $target"

@@ -13,7 +13,7 @@ remotes.
 | `main` | The fork | Pull requests. Upstream changes arrive only as **merge commits** from `upstream-main`. Never rebase `main`: published commit IDs stay pinned. |
 
 `upstream-main` makes the question "what did upstream change?" a plain diff
-(`git diff upstream-main main`), and it gives the nightly test-merge a fixed base.
+(`git diff upstream-main main`), and it gives upstream test-merges a fixed base (a nightly job for that is planned).
 
 ## Remotes
 
