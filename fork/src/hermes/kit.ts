@@ -8,12 +8,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { validateEnvelope } from "../contract/job.ts";
+import { parseJobId, validateEnvelope } from "../contract/job.ts";
 
 /** Result text per job_inspect call, about 4K tokens (README "Result retrieval limits"). */
 export const RESULT_PAGE_CHARS = 16_000;
 /** The most of a failed or cancelled job's message that is passed on. */
 export const MESSAGE_CHARS = 2_000;
+/** What job_inspect says about a held job: nothing in this kit or in Hermes can approve it. */
+export const HELD_NOTE = "Waiting for an approval decision from outside this kit. Neither this kit nor Hermes can approve or deny it; without an external decision it expires or stays held.";
 /** An MCP request body: a largest envelope (65,536-character prompt) is well under this. */
 export const MAX_BODY_BYTES = 512 * 1024;
 const BROKER_TIMEOUT_MS = 10_000;
@@ -75,6 +77,8 @@ export function createKit(opts: KitOptions): McpServer {
 
   /** Reads one of this team's jobs: the record, or a not_found that says nothing about any other team. */
   async function own(jobId: string): Promise<Record<string, unknown> | ToolResult> {
+    // A malformed jobId names no job; never send it on, or an odd path reads as a broker fault.
+    if (!parseJobId(jobId)) return notFound(jobId);
     const r = await broker("GET", `/jobs/${encodeURIComponent(jobId)}`);
     if (!isReply(r)) return r;
     if (r.status === 404 || (r.status === 200 && !ours(r.body))) return notFound(jobId);
@@ -129,6 +133,7 @@ export function createKit(opts: KitOptions): McpServer {
     const detail = { ...(record.detail as Record<string, unknown> ?? {}) };
     if (typeof detail.message === "string") detail.message = detail.message.slice(0, MESSAGE_CHARS);
     const out: Record<string, unknown> = { jobId, state: record.state, class: record.class, detail, updatedAt: record.updatedAt };
+    if (record.state === "held") out.note = HELD_NOTE;
     const result = record.result as { text: string | null; artifacts?: Array<Record<string, unknown>> } | null;
     if (result) {
       const all = result.text ?? "";

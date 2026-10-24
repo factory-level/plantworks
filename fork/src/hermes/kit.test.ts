@@ -9,7 +9,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { createKit, serveHttp, RESULT_PAGE_CHARS, MESSAGE_CHARS } from "./kit.ts";
+import { createKit, serveHttp, HELD_NOTE, RESULT_PAGE_CHARS, MESSAGE_CHARS } from "./kit.ts";
 import { kitOptions } from "./command.ts";
 
 const TEAM = "social-media";
@@ -113,6 +113,12 @@ test("isolation: nothing of another team's job comes back through submit, inspec
   const inspect = await call("job_inspect", { jobId: foreign });
   const unknown = await call("job_inspect", { jobId: "kb-x-t_1-a1" });
   assert.equal(inspect.data.code, "not_found");
+  for (const odd of ["..", "x/../y", "../jobs"]) {
+    const before = broker.calls.length;
+    assert.equal((await call("job_inspect", { jobId: odd })).data.code, "not_found", odd);
+    assert.equal((await call("job_cancel", { jobId: odd })).data.code, "not_found", odd);
+    assert.equal(broker.calls.length, before, "a malformed jobId never reaches the broker");
+  }
   assert.equal(inspect.data.message.replace(foreign, "ID"), unknown.data.message.replace("kb-x-t_1-a1", "ID"), "another team's job reads exactly like an unknown one");
   assert.equal(leaks(inspect.text), false);
 
@@ -235,7 +241,8 @@ test("the kit calls only the three jobs routes, never an approval decision URL",
   const { call } = await connect(broker.url);
   broker.put("kb-b-t_1-a1", TEAM, { state: "held", detail: { decisionUrl: `${broker.url}/plantworks/v1/approvals/x` } });
   await call("job_submit", submitArgs());
-  await call("job_inspect", { jobId: "kb-b-t_1-a1" });
+  const held = await call("job_inspect", { jobId: "kb-b-t_1-a1" });
+  assert.equal(held.data.note, HELD_NOTE, "a held job says approval is outside the kit");
   await call("job_cancel", { jobId: "kb-b-t_1-a1" });
   await call("job_cancel", { jobId: "kb-social-media-t_3fa9c01e-a1" });
   const routes = broker.calls.map((c) => `${c.method} ${c.path.replace(/^\/jobs\/[^/]+/, "/jobs/{id}")}`);

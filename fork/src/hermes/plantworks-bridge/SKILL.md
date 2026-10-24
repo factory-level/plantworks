@@ -35,7 +35,9 @@ Do not use it for questions you can answer yourself in the conversation.
    least 60 seconds apart, until the state is `done`, `failed` or `cancelled`. If the budget
    runs out first, stop and tell the person the job is **pending**, with its `jobId` and last
    state; check again only when asked or on a later scheduled turn. Never poll in an
-   open-ended loop. A `held` job waits for an approval, not for time: say so and stop.
+   open-ended loop. A `held` job waits for an approval decision from outside this kit, not
+   for time. You cannot approve or deny it, and nothing here can: tell the person it is
+   pending an external decision (or will expire), and stop.
    Nothing pushes job events to you; you learn the state only by inspecting.
 4. **Report.**
    - `done` with outcome `succeeded`: summarise `result.text` for the person. If
@@ -48,8 +50,8 @@ Do not use it for questions you can answer yourself in the conversation.
      the SRE agent. Do not contact it yourself.
    - `failed`: report the reason. Retry only if the person or the card asks for it, by
      submitting the same card with `attempt` plus 1.
-   - `cancelled`: report the reason. It is terminal whoever cancelled it. Close any approval
-     prompt you opened for this job: cancelling a held job sends no approval result.
+   - `cancelled`: report the reason. It is terminal whoever cancelled it; any approval it was
+     waiting for no longer applies.
 5. **Cancel.** `job_cancel` works only before the job starts (`queued` or `held`). For a
    running job it returns `not_cancellable`. Say so; the job will end on its own timeout.
 

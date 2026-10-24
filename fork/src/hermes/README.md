@@ -204,13 +204,16 @@ Hermes pulls with `job_inspect` instead, on a **bounded budget per request**:
 - if the job is still not terminal after that, Hermes stops and tells the caller the job is
   **pending**, with its `jobId` and last state. It inspects again only when asked again or on
   a later scheduled turn, never in an open-ended loop;
-- a `held` job ends the budget at once: it waits on an approval, not on time.
+- a `held` job ends the budget at once: it waits on an approval, not on time. `job_inspect`
+  adds a `note` saying the decision must come from outside the kit.
 
 The tools never block or wait server-side. Each call returns at once.
 
 ## Out of scope
 
-- Approval decisions (PW-23). The kit shows `held` but does not approve or deny. The server
+- Approval decisions (PW-23). The kit shows `held` but does not approve or deny, and no
+  integrated decider exists: a held job needs a trusted decision call from outside, or it
+  expires or stays held. The server
   holds the broker token, so it must never act as a decider: it calls only the three jobs
   routes above and never a `decisionUrl` (the tests check every path it calls).
 - Registering the profile on the shared Hermes and deploying the HTTP server. Both belong
