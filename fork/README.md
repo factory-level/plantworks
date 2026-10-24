@@ -13,6 +13,8 @@ The directory name is brand-neutral on purpose: renaming the product changes no 
 |---|---|
 | `NOTICE` | Attribution for the fork and for upstream OpenRig |
 | `UPSTREAM.md` | Branches, remotes and how upstream changes come in |
+| `PATCHES.md` | The seam ledger: every upstream file the fork modifies, and files it adds outside `fork/` |
+| `CONTRIBUTING-fork.md` | How to change the fork: additive first |
 | `package.json` | The fork's own package. Its lockfile, once it has dependencies, is `fork/package-lock.json` |
 | `scripts/` | Fork tooling: upstream sync, header and seam checks |
 | `src/<area>/` | Fork code, one directory per area (for example `src/contract/`) |
