@@ -18,14 +18,16 @@ dispatch, not on jobs. See [Rejected alternatives](#rejected-alternatives).
 
 ### How a job ends with a handoff
 
-The handoff is the seat's own authenticated closure, under the same rule as the other outcomes
+The handoff is the seat's own closure, under the same rule as the other outcomes
 (`fork/src/broker/reconcile.ts` `seatOutcome`). The seat closes its qitem `done` with closure
 reason `escalation` and closure target `handoff-sre`.
 
 Upstream already has `escalation` with a required target (`hot-potato-enforcer.ts`). The target
 text is this fork's convention, as with `denied` / `rejected-by-checks`. As today, only the exact
 qitem's latest `done` transition counts, made by its destination with `transport:v1` identity.
-Administrative or foreign closures prove nothing, and the job stays in flight.
+Administrative or foreign closures prove nothing, and the job stays in flight. `transport:v1` is how
+the daemon got the closer's name (the `X-OpenRig-Session` header), not authentication, so this is
+the seat's recorded closure rather than a proven one (broker README, "What a seat's closure proves").
 
 The job's transition is then `done` with `{outcome, closure: "handoff-sre"}`. The contract
 already allows this (`fork/src/contract/job.ts`).
@@ -103,7 +105,7 @@ The broker validates the artifact when it finalises the `done`:
 | Valid, known `targetAgent` | `done {outcome, closure: handoff-sre}` | the artifact, with `targetAgent` and the mapped `slackApp` reference name |
 | Missing, timed out (W4-A bound), invalid, or `targetAgent` not in the spec | `done {outcome: rejected-by-checks, closure: handoff-sre}` | `{"unavailable": "<timeout \| missing \| invalid: <first error> \| unknown-target: <name>>"}`, with **no** `targetAgent` |
 
-The seat's authenticated closure is the logical fact, so the `done` is never lost or blocked (the
+The seat's recorded closure is the logical fact, so the `done` is never lost or blocked (the
 W4-A rule). The broker **never routes to a guessed or default agent**. An unusable artifact still
 reaches a person, because the card is blocked ("a person brings in the SRE agent"), and the event
 says why the details are missing.
