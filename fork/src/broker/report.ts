@@ -2,13 +2,13 @@
 // W4-A, the worker's side of the broker-path job report (fork/docs/design/broker-report.md): what a
 // worker records when it takes a job, and the report it sends once the seat has closed the job.
 // Everything here is worker-asserted data; the broker stores it as such and never lets it decide `done`.
-import { accessSync, constants, existsSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { snapshotWork, takeBaseline, type Artifacts } from "../job/artifacts.ts";
 import { PROJECT_PROMPT_FILES } from "../job/run.ts";
 import type { Usage } from "../llm/governor.ts";
 import { seatLiveness } from "../seat/liveness.ts";
-import { readHandoffFile, type HandoffReport } from "./handoff.ts";
+import { HANDOFF_FILE, readHandoffFile, type HandoffReport } from "./handoff.ts";
 
 export type ReportArtifacts = Artifacts & { observedBy: "worker" };
 
@@ -43,9 +43,20 @@ export type Take = {
   snapshot?: string;
   /** W4-E: the workspace passed verification at take-up, so its handoff file may be read. */
   workspaceVerified?: boolean;
-  /** W4-E: the hash of a handoff file already there at take-up, so a stale one never counts. */
+  /** W4-E: the hash of a valid handoff file already there at take-up, so a stale one never counts. */
   handoffBase?: string;
+  /**
+   * W4-E (r1): whatever was at the handoff path at take-up, valid or not (a non-JSON file, an oversize
+   * one, a symlink, a directory), as an lstat fingerprint. Still the same at report time means the job
+   * didn't write a handoff: `missing`, never `invalid`.
+   */
+  handoffPresent?: string;
 };
+
+/** The lstat fingerprint of the handoff path, or undefined when nothing is there. */
+function handoffFingerprint(workspace: string): string | undefined {
+  try { const st = lstatSync(join(workspace, HANDOFF_FILE)); return `${st.dev}:${st.ino}:${st.mode}:${st.size}:${st.mtimeMs}`; } catch { return undefined; }
+}
 
 /**
  * Is `workspace` a tree this worker can vouch for? Absolute, present, readable, a git work tree, and
@@ -84,7 +95,8 @@ export function take(jobId: string, usageNow: Usage | undefined, opts: { recover
   let baseline: Take["baseline"];
   try { baseline = takeBaseline(opts.workspace); } catch (e) { baseline = { skipped: `baseline unreadable: ${(e as Error).message.split("\n")[0]}` }; }
   const before = readHandoffFile(opts.workspace);
-  return { jobId, usageBase, baseline, workspaceVerified: true, ...("hash" in before ? { handoffBase: before.hash } : {}) };
+  const present = handoffFingerprint(opts.workspace);
+  return { jobId, usageBase, baseline, workspaceVerified: true, ...("hash" in before ? { handoffBase: before.hash } : {}), ...(present ? { handoffPresent: present } : {}) };
 }
 
 /** W4-E: the job's handoff, as the wire's `{artifact}` or a bare `{unavailable}` category, and the detail for the log. */
@@ -92,6 +104,8 @@ export function handoffOf(t: Take, workspace: string | undefined): { handoff: Ha
   if (!workspace) return { handoff: { unavailable: "missing" }, detail: "no workspace" };
   if (t.usageBase === null) return { handoff: { unavailable: "missing" }, detail: "baseline lost (worker restarted)" };
   if (!t.workspaceVerified) return { handoff: { unavailable: "missing" }, detail: "skipped" in t.baseline ? t.baseline.skipped : "workspace unverifiable" };
+  // Untouched since take-up, whatever it is: the job wrote no handoff.
+  if (t.handoffPresent && handoffFingerprint(workspace) === t.handoffPresent) return { handoff: { unavailable: "missing" }, detail: "unchanged since take-up" };
   const read = readHandoffFile(workspace, t.handoffBase);
   if ("artifact" in read) return { handoff: { artifact: read.artifact } };
   if (read.unavailable === "missing") return { handoff: { unavailable: "missing" }, detail: t.handoffBase ? "unchanged since take-up" : "no handoff file" };

@@ -7,6 +7,7 @@ import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import * as fsSync from "node:fs";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -248,6 +249,7 @@ test("W4-A: a report stays within the broker's limits: too many files become a s
 });
 
 // --- W4-E: the handoff member ---------------------------------------------------------------------
+const require_fs = () => fsSync;
 const sre = { agents: { "platform-sre": { slackApp: "${PLANTWORKS_SRE_SLACK_PLATFORM}" } } };
 const validHandoff = { targetAgent: "platform-sre", summary: "disk pressure on the build host", suggestedAction: "expand the volume", evidence: [{ kind: "log", uri: "https://logs.invalid/1" }] };
 
@@ -295,6 +297,25 @@ test("W4-E: the handoff on the wire is {artifact} or exactly 'missing'/'invalid'
   mkdirSync(join(stale, ".plantworks"));
   writeFileSync(join(stale, ".plantworks", "handoff.json"), JSON.stringify(validHandoff));
   assert.deepEqual(handoffOf(taken(stale), stale), { handoff: { unavailable: "missing" }, detail: "unchanged since take-up" });
+  // A stale INVALID file (r1): not JSON, oversize, a directory, a symlink. Untouched since take-up, so missing too.
+  for (const [what, make] of [
+    ["not JSON", (d: string) => writeFileSync(join(d, "handoff.json"), "not json at all")],
+    ["oversize", (d: string) => writeFileSync(join(d, "handoff.json"), "x".repeat(20_000))],
+    ["a directory", (d: string) => mkdirSync(join(d, "handoff.json"))],
+    ["a symlink", (d: string) => { const o = join(mkdtempSync(join(tmpdir(), "pw-o-")), "h"); writeFileSync(o, "{}"); require_fs().symlinkSync(o, join(d, "handoff.json")); }],
+  ] as const) {
+    const ws = workspaceRepo();
+    mkdirSync(join(ws, ".plantworks"));
+    make(join(ws, ".plantworks"));
+    assert.deepEqual(handoffOf(taken(ws), ws), { handoff: { unavailable: "missing" }, detail: "unchanged since take-up" }, `stale ${what}`);
+  }
+  // And one rewritten during the job is judged afresh: a stale non-JSON file replaced by a valid one is the artifact.
+  const rewritten = workspaceRepo();
+  mkdirSync(join(rewritten, ".plantworks"));
+  writeFileSync(join(rewritten, ".plantworks", "handoff.json"), "not json");
+  const t0 = taken(rewritten);
+  writeFileSync(join(rewritten, ".plantworks", "handoff.json"), JSON.stringify(validHandoff));
+  assert.deepEqual(handoffOf(t0, rewritten), { handoff: { artifact: validHandoff } });
   // A symlink, and an oversize file: invalid, exactly, with the reason only in the detail.
   const linked = workspaceRepo();
   const t1 = taken(linked);
