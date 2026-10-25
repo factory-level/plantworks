@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // A front-door-shaped consumer of plantworks.job.state, for contract tests (PW-10). It does what
 // the events README asks of a consumer, and nothing it doesn't:
-// - accepts only structured CloudEvents of type plantworks.job.state, with the configured bearer;
+// - accepts only structured CloudEvents of type plantworks.job.state (and plantworks.handoff.requested,
+//   PW-34, recorded once per id), with the configured bearer;
 // - deduplicates on the event id, <jobId>:<transitionSeq>;
 // - applies an event only when its transitionSeq is above the last one it applied for that job,
 //   so a replay or a stale redelivery is a no-op, and gaps (seqs are not dense) are expected.
@@ -38,6 +39,7 @@ export async function frontDoor(opts: { token?: string; fail?: (n: number, body:
   const seen = new Set<string>();
   const last = new Map<string, number>();
   const applied: Applied[] = [];
+  const handoffs: any[] = [];
   const rejected: { status: number; why: string }[] = [];
   let n = 0;
   const server = createServer((req, res) => {
@@ -50,6 +52,15 @@ export async function frontDoor(opts: { token?: string; fail?: (n: number, body:
       received.push(event);
       const failWith = opts.fail?.(++n, event);
       if (failWith) return refuse(failWith, "planned failure");
+      // PW-34: a handoff request rides the same callback after its done job.state. Deduped on id; the card
+      // is already blocked by that job.state, so it changes nothing here (the consumer posts it to the SRE agent).
+      const h = /^(.+):([1-9][0-9]*):handoff\.requested$/.exec(event.id ?? "");
+      if (event.type === "plantworks.handoff.requested") {
+        if (event.specversion !== "1.0" || !h || h[1] !== event.subject || event.data?.jobId !== event.subject) return refuse(400, `malformed event ${event.id}`);
+        res.writeHead(opts.dropAck?.(n, event) ? 503 : 204).end();
+        if (!seen.has(event.id)) { seen.add(event.id); handoffs.push(event); }
+        return;
+      }
       const m = /^(.+):([1-9][0-9]*)$/.exec(event.id ?? "");
       if (event.specversion !== "1.0" || event.type !== "plantworks.job.state" || !m || m[1] !== event.subject || event.data?.jobId !== event.subject) return refuse(400, `malformed event ${event.id}`);
       const { jobId, state, team: _t, attempt: _a, qitemId: _q, seat: _s, summary: _m, artifacts: _r, evidence: _e, usage: _u, ...detail } = event.data;
@@ -68,7 +79,7 @@ export async function frontDoor(opts: { token?: string; fail?: (n: number, body:
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   return {
     url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/events`,
-    received, applied, rejected,
+    received, applied, rejected, handoffs,
     /** Per job, the states in the order the front door applied them. */
     timeline: (jobId: string) => applied.filter((a) => a.jobId === jobId).map((a) => a.state),
     /** Per job, the cards the front door moved it through, in order. */

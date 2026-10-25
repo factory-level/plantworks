@@ -104,6 +104,8 @@ export interface ClaimNextOptions {
   slotCaps?: SlotCaps;
   newQitemId?: () => string;
   log?: (line: string) => void;
+  /** PW-34: while paused (an SRE agent waking), claim-next starts no new work. */
+  dispatch?: { paused(): boolean };
 }
 
 /**
@@ -128,6 +130,9 @@ export function claimNextRoutes(opts: ClaimNextOptions): BrokerRoutes {
       const cls = body.class ?? spec.defaultClass;
       if (!spec.classes[cls]) return c.json({ error: "unknown_class", message: `team ${team} has no class ${cls}` }, 400);
       const seat = body.seat;
+      // PW-34: a wake pause stops new work only. Workers already read 204 as "try later"; reservations in
+      // flight, recovery and running jobs are untouched.
+      if (opts.dispatch?.paused()) return c.body(null, 204, { "Plantworks-Dispatch": "paused" });
 
       const qitemId = mint();
       // Count and reserve in one immediate transaction: a concurrent claim (or another broker on the

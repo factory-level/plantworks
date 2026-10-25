@@ -117,7 +117,7 @@ will do the work, for example `dev-worker@team`. No `class` means the team's `de
 | Response | When |
 |---|---|
 | `200 {job, qitemId, seat, envelope}` | The next queued job of that class (lowest effective priority, then oldest) is now `claimed` by the seat. Its upstream qitem `qitemId` is addressed to the seat and claimed for it |
-| `204` | Nothing claimable in that class |
+| `204` | Nothing claimable in that class. With the header `Plantworks-Dispatch: paused`, dispatch is paused while an SRE agent wakes (PW-34, below); workers treat it like any `204` |
 | `400` | `invalid_claim`, `unknown_team`, `unknown_class` |
 | `429 slot_cap_reached` | The team's `slotBudgetKey` already has its cap of jobs in flight (PW-19). The body has `{slotBudgetKey, cap, inFlight}`. Ask again later |
 | `429 class_slots_reached` | The class already has its `slots` of jobs in flight, counted like the cap. The body has `{class, slots, inFlight}`. Ask again later |
@@ -341,8 +341,9 @@ closes a job.
 | `GET /plantworks/v1/seats/{seat}/drain` | bearer | `{seat, draining, inFlight: [jobId]}` |
 | `POST /plantworks/v1/seats/{seat}/drain` | bearer | Marks the seat draining, so claim-next gives it nothing new (`409 seat_draining`). Returns the same view |
 | `DELETE /plantworks/v1/seats/{seat}/drain` | bearer | Resumes the seat |
+| `POST /plantworks/v1/sre/wake` | bearer | PW-34: an `sre.wake.requested` or `sre.wake.ready` CloudEvent, at most 4 KiB, with `data.wakeId` (1..200 of `[A-Za-z0-9._:-]`) and optional `data.agent`. `202`, or `400 invalid_wake`. See "SRE handoff and wake pause" |
 
-**Stats.** `{active, teams: {<team>: {active, held, queued, reserved, claimed, running, classes: {<class>: {...}}}}, slots: {<slotBudgetKey>: {inFlight, cap}}, drainingSeats}`:
+**Stats.** `{active, teams: {<team>: {active, held, queued, reserved, claimed, running, classes: {<class>: {...}}}}, slots: {<slotBudgetKey>: {inFlight, cap}}, drainingSeats, dispatch: {paused, wakes: [{wakeId, agent, until}]}}`:
 - `active` = `queued + claimed + running`: the work a worker pool exists for. This is the chart's
   KEDA target, for example `teams.<team>.active`.
 - `queued` includes `reserved`, which is a queued job mid-handoff to a seat.
@@ -380,6 +381,39 @@ kept in the broker's SQLite file (`seat_drains`), so it survives a broker restar
   not overlap.
 - A drain row stays until something resumes the seat. An operator clears a stale one, for example
   for a pod name that never comes back, with `DELETE /plantworks/v1/seats/{seat}/drain`.
+
+## SRE handoff and wake pause (PW-34, `handoff.ts`, `wake.ts`)
+
+Design: [`../../docs/design/sre-handoff.md`](../../docs/design/sre-handoff.md). Every shape is
+fork-defined, pending the HarnessHG ack. The fork has no Slack or Eve code.
+
+- **Handoff out.** A seat closes its qitem `done` with closure reason `escalation` and target
+  `handoff-sre`, by the same authenticated-closure rule as the other outcomes. The job ends
+  `done {outcome, closure: "handoff-sre"}`. The outcome comes from the handoff artifact and
+  defaults to `rejected-by-checks`.
+- **The artifact.** The worker reads `.plantworks/handoff.json` from the class workspace
+  (`readHandoffFile`), and the broker checks it against the team spec's `sre.agents`
+  (`resolveHandoff`). Anything short of a valid artifact naming a mapped agent is
+  `{unavailable: "<missing | timeout | invalid: … | unknown-target: …>"}`, with no `targetAgent`.
+- **The report path isn't on main yet (W4-A).** Until it lands, every handoff finalises as
+  `unavailable: missing` with `rejected-by-checks`. The card is still blocked, so a person still
+  brings in the SRE agent.
+- **The event.** `plantworks.handoff.requested`, id `<jobId>:<transitionId>:handoff.requested`,
+  is delivered by the durable outbox right after that transition's `job.state`. The handoff is
+  resolved once, when the job finalises, and stored in the transition's result, so a redelivery
+  is byte-identical.
+- **One transition, one pair.** The cursor advances only after both events are delivered. A
+  transient failure of either retries both with unchanged ids. A permanent failure of either
+  parks the transition, as today.
+- **`slackApp`.** The event carries the reference's name (for example
+  `PLANTWORKS_SRE_SLACK_PLATFORM`), never a value. Hermes resolves it.
+- **Wake pause in.** `POST /sre/wake` keeps an in-memory map per broker process. A
+  `requested` with a new `wakeId` pauses claim-next for at most 120 s, and a replay never
+  extends it. `ready` ends the pause. A `ready` for an unknown id, and an expired id, are
+  remembered for 10 minutes, so a late or replayed `requested` doesn't pause.
+- **What the pause stops.** Only new claims. Reservations in flight, recovery, running jobs,
+  reconciliation, submit, decisions, cancel and event delivery are untouched. A broker restart
+  clears the pause: it fails toward dispatch, by design.
 
 ## For other cards
 

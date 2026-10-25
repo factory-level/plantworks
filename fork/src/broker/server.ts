@@ -10,7 +10,7 @@ import { serve } from "@hono/node-server";
 import { isLoopbackBind } from "../../../packages/daemon/dist/middleware/auth-bearer-token.js";
 import { canTransition, JOB_PRIORITIES, validateEnvelope, type JobEnvelope, type JobState } from "../contract/job.ts";
 import { createEmitter, type CloudEvent } from "../events/job-state.ts";
-import { createJobStateOutbox, eventForTransition, transitionColumns } from "../events/outbox.ts";
+import { createJobStateOutbox, eventsForTransition, transitionColumns } from "../events/outbox.ts";
 import { SWEEP_MS, decisionRoute, requestApproval, sweepApprovals } from "./approvals.ts";
 import { PHASE_0_1, validateSpec, type Platform, type TeamSpec } from "../team/spec.ts";
 import type { JobRow, Store } from "./store.ts";
@@ -89,7 +89,7 @@ export function createBroker(opts: BrokerOptions): Hono & { sweepApprovals: () =
     const job = store.get(row.job_id);
     const transition = store.db.prepare("SELECT * FROM job_transitions WHERE job_id = ? ORDER BY id DESC LIMIT 1").get(row.job_id) as import("./store.ts").TransitionRow | undefined;
     if (!job || !transition || transition.to_state !== state) throw new Error(`missing persisted ${state} transition for ${row.job_id}`);
-    send(row.team, eventForTransition(job, transition, transitionColumns(store, transition)));
+    for (const event of eventsForTransition(job, transition, transitionColumns(store, transition))) send(row.team, event);
   });
   const decisionUrl = (jobId: string) => {
     if (!opts.publicUrl) throw new Error("no publicUrl for decision URLs");
@@ -197,7 +197,7 @@ export function startBroker(opts: BrokerOptions & { host: string; port: number }
     const job = opts.store.get(row.job_id);
     const transition = opts.store.db.prepare("SELECT * FROM job_transitions WHERE job_id = ? ORDER BY id DESC LIMIT 1").get(row.job_id) as import("./store.ts").TransitionRow | undefined;
     if (!job || !transition || transition.to_state !== state) throw new Error(`missing persisted ${state} transition for ${row.job_id}`);
-    send(row.team, eventForTransition(job, transition, transitionColumns(opts.store, transition)));
+    for (const event of eventsForTransition(job, transition, transitionColumns(opts.store, transition))) send(row.team, event);
   });
   const live = { ...opts, send, emitJobState: emit }; // publicUrl is filled in once the port is known; createBroker reads it per request
   const app = createBroker(live);

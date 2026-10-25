@@ -10,6 +10,7 @@ import { parseSlotCaps, slotCapProblems } from "./slots.ts";
 import { callCeilingsFromEnv } from "../llm/classes.ts";
 import { createReconciler } from "./reconcile.ts";
 import { runtimeRoutes } from "./runtime.ts";
+import { createWakePause } from "./wake.ts";
 
 /** The daemon's port is 7533 (PW-16); the broker sits next to it. */
 export const BROKER_DEFAULTS = { host: "127.0.0.1", port: 7534, daemonUrl: "http://127.0.0.1:7533", session: "plantworks-broker" } as const;
@@ -42,10 +43,11 @@ export function brokerVerb(pw: Command): void {
         // the daemon's own OPENRIG_AUTH_BEARER_TOKEN when it has one.
         const daemon = daemonQueue({ url: process.env.PLANTWORKS_DAEMON_URL?.trim() || BROKER_DEFAULTS.daemonUrl, token: process.env.OPENRIG_AUTH_BEARER_TOKEN?.trim() || undefined });
         const brokerSession = process.env.PLANTWORKS_BROKER_SESSION?.trim() || BROKER_DEFAULTS.session;
-        const routes = [claimNextRoutes({ daemon, slotCaps, brokerSession }), runtimeRoutes({ slotCaps })];
+        const dispatch = createWakePause(); // PW-34: in memory, per broker process
+        const routes = [claimNextRoutes({ daemon, slotCaps, brokerSession, dispatch }), runtimeRoutes({ slotCaps, dispatch }), dispatch.routes];
         const server = await startBroker({ store, teams, routes, token: process.env.PLANTWORKS_BROKER_TOKEN?.trim() || undefined, host: opts.host, port: Number(opts.port), publicUrl: opts.publicUrl ?? (process.env.PLANTWORKS_BROKER_PUBLIC_URL?.trim() || undefined), onListen: ({ store, emit }) => {
           let reconciling = false;
-          const run = createReconciler(store, daemon, emit, (line) => console.error(line), undefined, { brokerSession });
+          const run = createReconciler(store, daemon, emit, (line) => console.error(line), undefined, { brokerSession }, teams);
           const timer = setInterval(async () => {
             if (reconciling) return;
             reconciling = true;

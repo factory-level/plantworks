@@ -100,6 +100,26 @@
           }
         }
       }
+    },
+    "sre": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agents"],
+      "description": "PW-34: the SRE agents a job may hand off to (closure escalation/handoff-sre). Fork-defined, pending HarnessHG acknowledgement.",
+      "properties": {
+        "agents": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["slackApp"],
+            "properties": {
+              "slackApp": { "type": "string", "pattern": "^\\$\\{PLANTWORKS_SRE_SLACK_[A-Z0-9_]+\\}$", "description": "Exactly one operator reference that Hermes resolves. A literal is rejected, and the fork never reads the value." }
+            }
+          }
+        }
+      }
     }
   }
 }
