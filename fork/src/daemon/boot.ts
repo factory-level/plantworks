@@ -5,7 +5,7 @@
 // Everything here is environment the upstream CLI and daemon already read; nothing upstream changes.
 import { homedir } from "node:os";
 import { lstatSync, readlinkSync, realpathSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isLoopbackBind } from "../../../packages/daemon/dist/middleware/auth-bearer-token.js";
 
 /** Upstream's defaults are ~/.openrig, 7433 and a database-conflict warning. */
@@ -45,17 +45,31 @@ function dropInheritedDaemon(env: Env, home: string): string[] {
   for (const name of DAEMON_LOCATORS) {
     if (env[name] !== undefined) { delete env[name]; dropped.push(name); }
   }
-  const realHome = realPath(home);
+  const realHome = verified("cannot resolve PLANTWORKS_HOME", home);
+  const inside = (p: string) => { const rel = relative(realHome, p); return !!rel && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel); };
   for (const name of DAEMON_PATHS) {
     const path = env[name]?.trim();
     if (path === undefined) continue;
-    const rel = relative(realHome, realPath(path));
-    if (path && rel && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) continue; // inside the selected home, through any symlink
+    const why = `cannot verify ${name} is inside PLANTWORKS_HOME`;
+    // Both readings must be inside: SQLite opens the raw path (symlinks before `..`), while upstream's
+    // path.join/resolve normalises `..` lexically first. link/../../x can be inside one way and outside the other.
+    if (path && inside(verified(why, path)) && inside(verified(why, resolve(path)))) continue;
     delete env[name];
     dropped.push(name);
   }
   return dropped;
 }
+
+/** realPath, or one clear line: a path whose containment can't be established stops the boot (fail closed). */
+function verified(why: string, path: string): string {
+  try {
+    return realPath(path);
+  } catch (e) {
+    throw new BootPathError(`${why}: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`);
+  }
+}
+
+export class BootPathError extends Error {}
 
 /** Resolve missing tails AND dangling symlinks, without creating anything. Unverifiable paths fail closed. */
 function realPath(path: string, seen = new Set<string>()): string {

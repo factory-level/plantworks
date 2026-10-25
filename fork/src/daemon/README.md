@@ -35,8 +35,11 @@ PW-21).
   on the same database and the deliberate `--allow-db-conflict` escape.
 
 - Explicit-home containment resolves dangling symlinks too, so an inherited link cannot
-  redirect a newly created database or write directory outside the selected home. Cycles
-  and paths whose identity cannot be established fail before upstream initialization.
+  redirect a newly created database or write directory outside the selected home. A path
+  must be inside both as the filesystem reads it (symlinks before `..`) and after lexical
+  `..` normalisation, the way upstream's `path.join`/`resolve` reads it. Cycles and paths
+  whose identity cannot be established stop the binary before upstream initialization,
+  with one line naming the variable (exit 2).
   In-home overrides are retained; a deliberate external DB can still be selected through
   `daemon start --db` or the selected home's `db.path` config. Explicit ports use `--port`
   or that home's `daemon.port`. Without `PLANTWORKS_HOME`, the existing OpenRig environment
