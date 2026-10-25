@@ -58,6 +58,11 @@ closure.
      instead of restarting it.
    - Finalising writes **one** transition, `running -> done`, carrying the result, so D12 event ids
      stay one per transition.
+   - **It reads the stored report inside the same immediate transaction as that transition** (r1). A
+     report landing in between is either included, or answered `job_settled` because the fence sees
+     `done`. It is never stored silently on a `done` job.
+   - The bound is refused below 10 s, roughly two worker polls plus a snapshot. A smaller value would
+     defeat the report without anyone noticing. `0` remains the explicit "no report, immediate done".
 2. **The worker learns it is wanted.** `GET /plantworks/v1/jobs/{jobId}`, which the worker already
    polls every `--poll-ms`, gains `reportWanted: true` while the wait is open.
 3. **The worker reports.** `POST /plantworks/v1/jobs/{jobId}/report` with the bearer token and
@@ -67,6 +72,16 @@ closure.
    - `claimed_by = seat` and `qitem_id = qitemId`;
    - `report_wait_since` is set, meaning the seat has already closed: no snapshot is taken mid-work;
    - no report is stored yet.
+
+   **What the fence is, and isn't** (r1). It checks consistency, not identity: `{seat, qitemId}` is
+   asserted by the caller and authenticated only by the broker-wide bearer token. As PW-17 ruled, the
+   bearer is not per-seat authorisation. Any bearer holder who knows a running job's `qitemId` (it is
+   on the job record and the events) could report first. The report's contents, `usage` and
+   `artifacts` (`branch`, `commit`, `files`), are **worker-asserted**: the broker can't check a commit
+   in the seat's repository. So the stored result carries `reportProvenance: "worker-asserted"`, and
+   the event field descriptions say the same. Consumers must not treat `artifacts` as
+   broker-verified. That is acceptable for Phase 0-1, where every bearer holder is a trusted platform
+   component.
 
    **First write wins** (dev-build). Answers:
    - 200 when stored;
@@ -94,13 +109,16 @@ Restart and crash, which are the cases the tests cover:
 | Worker restarts and reports again | 409 `report_exists`: the first write wins, so there is no double report |
 | Report arrives after `done` | 409 `job_settled`, nothing changes |
 | Two brokers on one SQLite file | the immediate transaction plus the conditional UPDATE, as for claims (PW-19) |
+| The daemon is unreachable during the wait | `seatOutcome` can't be read, so the pass changes nothing and the job stays `running` (the existing fail-closed rule). The bound doesn't fire on its own; once the daemon answers, it counts from the original `report_wait_since` |
 
 ## The worker's side
 
 - **Per-job usage.** The governor's `usage()` is cumulative per seat, so the worker records it when it
   takes the job (claim, or start-up recovery) and reports the difference.
   - Whether a job's model calls are all inside that window is decided by the worker's
-    one-job-at-a-time rule (PW-21) and by #96's `setPriority` bracket.
+    one-job-at-a-time rule (PW-21) and by the hold described next.
+  - `governor.usage()` is `undefined` until a call reports (#90), so a baseline taken before any call
+    counts as 0, not as unknown.
   - After a worker restart the governor's count starts again at 0 and calls made before the restart
     are lost, so a recovered job reports `usage: null` with `report: "unavailable(worker restarted)"`
     rather than an undercount.
@@ -108,12 +126,33 @@ Restart and crash, which are the cases the tests cover:
   **Decision (lead):** `workspace` is the declared seat-host path the deployment must run the seat in.
   - The worker doesn't trust it. At take-up it checks that the path is absolute, exists, is a git work
     tree and is readable.
+  - **It also checks co-location with the seat** (r1). Those checks pass for any repository the worker
+    can see at that path. A worker in another container, or a remote seat (PW-32), could see a
+    different tree at the same path string. So the worker also requires two things:
+    - the seat's own state, `$OPENRIG_HOME/state/pi/<seat>/runner-state.json`, is visible and `live`
+      (`pw worker live`);
+    - the workspace is on the same filesystem as that state directory (`st_dev` matches, a cheap
+      shared-mount signal).
+
+    Otherwise it's `"workspace unverifiable: not co-located with the seat"`. Every artifact report
+    says `observedBy: "worker"`. That is a heuristic, not proof that Pi works in that tree: the
+    deployment contract (`workspace` = the seat's cwd) still carries the rest.
   - If any check fails, the artifacts are `{branch: null, skipped: "workspace unverifiable: <why>"}`.
     The job itself is unaffected (fail-closed for the data only).
   - If the checks pass, the worker runs #90's `snapshotWork` on it, with the same plumbing and the same refusals: nothing the
   job planted runs, `.gitignore` is honoured, an existing `pw/<jobId>` branch is never overwritten,
   and unborn, mid-operation and sparse trees are handled. No `workspace` gives
   `{branch: null, skipped: "no workspace"}`, which is the current behaviour.
+- **The baselines come before Pi can act** (r1).
+  - On the broker path the daemon wakes the seat when claim-next creates the qitem, which is before
+    the worker has the claim answer. Pi can change the tree only after a model reply.
+  - So, whenever a class has a `workspace`, the governor holds every completion until the worker arms
+    it. This uses #96's hold (`priorityKnown`), applied when a workspace is configured and not only
+    under `priorityHints`; without hints, no priority is written into the body.
+  - The worker records the usage baseline and the tree baseline first, then arms the governor
+    (`setPriority`), at take-up and at start-up recovery alike.
+  - So no reply, and so no edit, can come before the baselines. Calls a seat made before the worker
+    started at all can't be held, and that case is the start-up-recovery one: "baseline lost".
 - **A baseline per job.** A broker seat's workspace lives across jobs, and a job leaves its changes in
   the work tree, so a snapshot against HEAD would also show earlier jobs' changes.
   - At take-up, the worker records a baseline tree of the workspace with the same temp-index plumbing:
@@ -124,7 +163,8 @@ Restart and crash, which are the cases the tests cover:
     `{branch: null, skipped: "<why>"}`, never a snapshot against HEAD that would mix in earlier jobs'
     work. The cases:
     - a worker restart lost it: `"baseline lost (worker restarted)"`;
-    - it couldn't be written or read: `"baseline unreadable: <why>"`.
+    - it couldn't be written or read: `"baseline unreadable: <why>"`. The baseline is an unreferenced commit, so a
+      user's `git gc --prune=now` during the job removes it; that is expected, and lands here.
 
 ## Open points for the reviewers
 
@@ -134,12 +174,14 @@ Restart and crash, which are the cases the tests cover:
    verifies the directory but can't verify that Pi really works there: runner-state.json doesn't
    record a cwd, and the worker doesn't know Pi's PID. Making the worker launch Pi itself would be a
    different and much larger design.
-2. **The bound.** 30 s is the brief's default. The worker polls every 2 s and a snapshot is seconds,
-   so 30 s leaves margin. It delays `done`, and the slot's release, by up to that long when a worker
-   is gone.
-3. **`.pi/SYSTEM.md` in the workspace.** With a workspace known, the worker could also refuse, at
-   start, a workspace that ships `.pi/SYSTEM.md` or `APPEND_SYSTEM.md`. That is the broker half of
-   PW-12's `6adc1667`, which #73 left open. It is cheap, but it is a separate item: in or out?
+2. **The bound** (r1: fine as the default). It is 30 s. The worker polls every 2 s and a snapshot is
+   seconds, so that leaves margin. It delays `done`, and the slot's release, by up to that long when a
+   worker is gone. Drain sees the job as in flight during the wait, which is correct. Values under
+   10 s are refused (above).
+3. **`.pi/SYSTEM.md` in the workspace** (r1: in, as part of slice 3). At take-up the worker refuses
+   to claim for a workspace that ships `.pi/SYSTEM.md` or `APPEND_SYSTEM.md`. That is the broker half
+   of PW-12's `6adc1667`. It inherits the co-location caveat, since it inspects the tree the worker
+   sees, so it is worded "refused when seen".
 
 ## Slices and owners (proposal)
 
