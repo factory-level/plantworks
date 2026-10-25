@@ -158,7 +158,7 @@ export function createKit(opts: KitOptions): McpServer {
         totalChars: all.length,
         truncated: resultOffset + RESULT_PAGE_CHARS < all.length,
         // Metadata only: artifact bytes never come back through the kit.
-        artifacts: (result.artifacts ?? []).map(({ name, bytes, sha256 }) => ({ name, bytes, sha256 })),
+        artifacts: (result.artifacts ?? []).map(({ name, bytes, sha256, uri }) => ({ name, bytes, sha256, ...(uri === undefined ? {} : { uri }) })),
       };
     }
     return ok(out);

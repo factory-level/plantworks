@@ -145,7 +145,8 @@ test("the record has exactly the published schema's fields", () => {
   const store = openStore(":memory:");
   const { row } = store.insert(envelope() as any, "quick", "queued");
   assert.deepEqual(Object.keys(jobRecord(row)).sort(), [...schema.required].sort());
-  assert.deepEqual(Object.keys(schema.properties).sort(), [...schema.required].sort());
+  // reportWanted (W4-A) is the one optional field: present only while the broker waits for a report.
+  assert.deepEqual(Object.keys(schema.properties).sort(), [...schema.required, "reportWanted"].sort());
 });
 
 test("store: transitions are checked and atomic; reservations take the oldest job and are never taken over", () => {

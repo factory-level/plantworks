@@ -7,8 +7,10 @@ import type { Store } from "./store.ts";
 /**
  * Reconcile at most one batch from persisted qitem ids. Ambiguity always keeps the slot. With
  * `recovery`, a stuck claim-next handoff is first finished with its own qitem id (recoverHandoff).
+ * With `reportWaitMs` (W4-A), a job the seat has closed stays running until the worker's report is
+ * stored or that long has passed, counted from the persisted start of the wait; 0 finishes at once.
  */
-export function createReconciler(store: Store, daemon: DaemonQueue, emit: Emit, log: (line: string) => void = (line) => process.stderr.write(`${line}\n`), limit = 16, recovery?: { brokerSession: string; now?: () => number }) {
+export function createReconciler(store: Store, daemon: DaemonQueue, emit: Emit, log: (line: string) => void = (line) => process.stderr.write(`${line}\n`), limit = 16, recovery?: { brokerSession: string; now?: () => number }, reportWaitMs = 0) {
   let cursor = 0;
   const lastLogged = new Map<string, number>();
   return async () => {
@@ -40,16 +42,25 @@ export function createReconciler(store: Store, daemon: DaemonQueue, emit: Emit, 
         emit(running.row, "running", running.detail);
         continue;
       }
-      const outcome = seatOutcome(item);
-      if (!outcome) continue;
+      const closure = seatClosure(item);
+      if (!closure) {
+        // A reopen or handoff during the wait: the report would predate further work.
+        if (current.state === "running" && current.report_wait_since !== null) store.clearReportWait(current.job_id);
+        continue;
+      }
       if (current.state === "claimed") {
         const running = store.transition(current.job_id, "running");
         emit(running.row, "running", running.detail);
         current = running.row;
       }
       if (current.state !== "running") continue;
-      const { row: done, detail } = store.transition(current.job_id, "done", { outcome }, { result: JSON.stringify({ text: null, artifacts: [] }) });
-      emit(done, done.state, detail);
+      if (!reportWaitMs) {
+        const { row: done, detail } = store.transition(current.job_id, "done", { outcome: closure.outcome }, { result: JSON.stringify({ text: null, artifacts: [] }) });
+        emit(done, done.state, detail);
+        continue;
+      }
+      const settled = store.settleReport(current.job_id, closure.outcome, closure.closingId, reportWaitMs);
+      if (settled) emit(settled.row, settled.row.state, settled.detail);
     } catch (error) {
       const now = Date.now();
       if (now - (lastLogged.get(qitemId) ?? 0) >= 60_000) {
@@ -76,6 +87,11 @@ export function createReconciler(store: Store, daemon: DaemonQueue, emit: Emit, 
  * proves nothing. This is logical completion reported by the seat, not proof that Pi stopped.
  */
 export function seatOutcome(item: QueueObservation): DoneOutcome | null {
+  return seatClosure(item)?.outcome ?? null;
+}
+
+/** seatOutcome, with the transitionId of the closing transition it accepted (W4-A: the report belongs to that closure). */
+export function seatClosure(item: QueueObservation): { outcome: DoneOutcome; closingId: number } | null {
   if (item.state !== "done" || item.transitions.at(-1)?.state !== "done") return null;
   let first = item.transitions.length - 1;
   while (first > 0 && item.transitions[first - 1]!.state === "done") first--;
@@ -84,7 +100,7 @@ export function seatOutcome(item: QueueObservation): DoneOutcome | null {
   const reason = item.closureReason ?? null;
   const target = item.closureTarget ?? null;
   if (closing.closureReason !== reason || closing.closureTarget !== target) return null;
-  if (reason === "no-follow-on" && target === null) return "succeeded";
-  if (reason === "denied" && target === "rejected-by-checks") return "rejected-by-checks";
+  if (reason === "no-follow-on" && target === null) return { outcome: "succeeded", closingId: closing.transitionId };
+  if (reason === "denied" && target === "rejected-by-checks") return { outcome: "rejected-by-checks", closingId: closing.transitionId };
   return null;
 }
