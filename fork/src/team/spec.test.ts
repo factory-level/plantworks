@@ -123,11 +123,18 @@ test("the published fleet.schema.json names exactly the validator's fields", () 
   assert.deepEqual(keys(schema), Object.keys(s).sort());
   assert.deepEqual(schema.required.sort(), Object.keys(s).sort());
   const cls = schema.properties.classes.additionalProperties;
-  assert.deepEqual(keys(cls), ["approval", "approvalTtlSeconds", "context", "maxAttempts", "model", "perCall", "priority", "slots", "timeoutSeconds", "toolProfile"]);
+  assert.deepEqual(keys(cls), ["approval", "approvalTtlSeconds", "context", "maxAttempts", "model", "perCall", "priority", "slots", "timeoutSeconds", "toolProfile", "workspace"]);
   assert.deepEqual(keys(cls.properties.context), Object.keys(s.classes.quick.context).sort());
   assert.deepEqual(keys(cls.properties.perCall), Object.keys(s.classes.quick.perCall).sort());
   assert.equal(schema.properties.hermesProfile.properties.kanban.properties.max_in_progress_per_profile.type, "integer");
   for (const part of ["perTrain", "endpoint", "hermesProfile"]) assert.deepEqual(keys(schema.properties[part]), Object.keys(s[part]).sort(), part);
   assert.deepEqual(keys(schema.properties.events), [...Object.keys(s.events), "auth"].sort());
   assert.deepEqual(schema.properties.events.required, ["callbackDefault", "approvalConsumer"]);
+});
+
+test("W4-A: a class's optional workspace must be an absolute path", () => {
+  assert.deepEqual(problems((d) => { d.classes.quick.workspace = "/srv/seats/quick"; }), []);
+  for (const bad of ["relative/dir", "", 42, "~/repo"]) {
+    assert.ok(problems((d) => { d.classes.quick.workspace = bad; }).some((e) => e.includes("classes.quick.workspace must be an absolute path")), JSON.stringify(bad));
+  }
 });

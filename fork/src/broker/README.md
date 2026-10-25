@@ -298,6 +298,32 @@ broker record. It asks for another job only after the broker reports `done`. A b
 on each of those jobs first. While it can't read that answer it claims nothing. So a restart can't
 skip past held work.
 
+**The job report, worker side (W4-A, `report.ts`; design in `../../docs/design/broker-report.md`).**
+- **When it takes a job,** the worker records two baselines and only then arms the governor:
+  - **usage:** the governor's count so far;
+  - **tree:** for a class with a `workspace`, an unreferenced commit of the work tree.
+
+  With a workspace, the governor holds every completion until armed, so no model reply, and so no
+  edit, can come before the baselines.
+- **When the seat has closed the job,** the broker's job record shows
+  `reportWanted: {closingTransitionId, qitemId}`. The worker then sends the job's report once, to
+  `POST /jobs/{id}/report`:
+  - the usage delta;
+  - the snapshot against the baseline, using `pw/<jobId>` and `snapshotWork`;
+  - `observedBy: "worker"`.
+
+  A 409 is final. A 404 means a broker without the route, and the job finishes at the broker's
+  bound. Anything else is asked again.
+- **A job recovered at start-up** wasn't seen to start, so it reports `usage: null` and
+  `baseline lost (worker restarted)`.
+- **The workspace is verified, not trusted.** It must be absolute, present, readable and a git work
+  tree, and co-located with the seat: the seat's runner state is live, on the same filesystem.
+  Otherwise the artifacts are `workspace unverifiable: <why>`.
+- **Prompt files.** The worker won't claim for a workspace that ships `.pi/SYSTEM.md` or
+  `APPEND_SYSTEM.md`. It checks before every claim, never after one.
+- **The fork's own `.plantworks/`** never reaches a snapshot.
+- **Everything here is worker-asserted data,** and the broker never lets it decide `done`.
+
 **Timeout.** Each job's `timeoutSeconds` (the envelope's, else the class's) runs from when the
 worker learns of the job, so after a restart it comes late, never early. At the timeout the worker
 cuts the seat's model calls off at the governor: calls in flight are aborted and new ones get 403.

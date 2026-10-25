@@ -219,6 +219,32 @@ test("the governor totals the endpoint-reported tokens of successful completions
   assert.deepEqual(usageOf('{"usage":{"prompt_tokens":1,"completion_tokens":2}}'), { promptTokens: 1, completionTokens: 2 });
 });
 
+test("W4-A holdUntilArmed: completions wait until armed (hints off too); a held call whose client leaves is dropped; disarming holds again", async () => {
+  const s = await stub((_q, res) => res.writeHead(200, { "content-type": "application/json" }).end("{}"));
+  const g = await startGovernor({ endpoint: { url: s.url }, workerClass: CLASSES.quick, log: () => {}, holdUntilArmed: true });
+  const call = (signal?: AbortSignal) => fetch(`${g.url}/chat/completions`, { method: "POST", body: "{}", signal }).then((r) => r.status);
+  const first = call();
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(s.seen.length, 0, "held: nothing reached the endpoint before arming");
+  const gone = new AbortController();
+  const dropped = call(gone.signal).catch(() => "aborted");
+  await new Promise((r) => setTimeout(r, 100));
+  gone.abort();
+  assert.equal(await dropped, "aborted");
+  await new Promise((r) => setTimeout(r, 100)); // let the governor see the closed connection, as #96's test does
+  g.setArmed(true);
+  assert.equal(await first, 200);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(s.seen.length, 1, "the abandoned held call was never sent");
+  assert.equal((await (await fetch(`${g.url}/models`)).status), 200, "only completions are held");
+  g.setArmed(false);
+  const again = call();
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(s.seen.filter((x) => x.url.endsWith("/chat/completions")).length, 1, "held again after disarming");
+  g.setArmed(true);
+  assert.equal(await again, 200);
+});
+
 test("`plantworks pw llm preflight` checks the class model against the endpoint", async () => {
   const s = await stub(models(["qwen3.5:9b"]));
   try {
