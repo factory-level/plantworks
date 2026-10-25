@@ -14,10 +14,10 @@ Wave 3 established why it can't simply be added there (`wave3/report.md`, 00:26Z
 - **Only the seat can close the job.** The reconciler trusts only the Pi seat's own
   transport-authenticated `done` transition, the latest one (`seatOutcome`, reconcile.ts). The
   worker is a separate process and cannot author that closure: upstream derives the actor from the
-  transport header (`queue.ts:687-693`).
+  transport header (`queue.ts:702-708`).
 - **The worker has no ordering point.** The usage tally lives in the worker's governor. A worker
   write before Pi closes races the reconciler, and a write after the terminal state is refused
-  (`queue-repository.ts:1986-1990`).
+  (`queue-repository.ts:2033-2037`).
 - **Nobody knows the workspace.** On the broker path the worker doesn't launch Pi, and the team spec
   has no workspace field, so there is nothing to snapshot.
 
