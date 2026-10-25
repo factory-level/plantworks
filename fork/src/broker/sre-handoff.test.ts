@@ -198,10 +198,7 @@ test("4. artifact read (worker side): each fail-closed case, and a valid file wi
     assert.deepEqual(readHandoffFile(undefined), { unavailable: "missing" }, "no workspace");
     assert.deepEqual(readHandoffFile(ws), { unavailable: "missing" }, "file absent");
     writeFileSync(file, JSON.stringify(valid));
-    const ok = readHandoffFile(ws);
-    assert.ok("artifact" in ok && ok.hash.length === 64);
-    assert.deepEqual((ok as { artifact: unknown }).artifact, valid);
-    assert.deepEqual(readHandoffFile(ws, (ok as { hash: string }).hash), { unavailable: "missing" }, "a file unchanged since take-up is stale");
+    assert.deepEqual(readHandoffFile(ws), { artifact: valid });
     writeFileSync(file, "x".repeat(16 * 1024 + 1));
     assert.deepEqual(readHandoffFile(ws), { unavailable: "invalid: over 16 KiB" });
     writeFileSync(file, "{not json");

@@ -3,7 +3,6 @@
 // `escalation` / `handoff-sre`; the job ends `done {outcome, closure: handoff-sre}` and the outbox
 // emits `plantworks.handoff.requested` after that transition's job.state. Fork-defined, pending the
 // HarnessHG ack. No Slack or Eve code: Hermes resolves the slackApp reference and posts.
-import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { join, relative, isAbsolute, sep } from "node:path";
 import { DNS_NAME, parseJobId, type DoneOutcome } from "../contract/job.ts";
@@ -65,10 +64,10 @@ export function resolveHandoff(report: HandoffReport | undefined, spec: Pick<Tea
 
 /**
  * The worker side: `.plantworks/handoff.json` in the class workspace, read once when the report is built.
- * `baselineHash` is the file's hash at take-up (from an earlier call), so a stale file never counts.
+ * A stale file left from before the job is the caller's to rule out (report.ts compares an lstat fingerprint).
  * The workspace's co-location check is the report path's (#105), not this function's.
  */
-export function readHandoffFile(workspace: string | undefined, baselineHash?: string): ({ artifact: unknown; hash: string }) | { unavailable: string } {
+export function readHandoffFile(workspace: string | undefined): { artifact: unknown } | { unavailable: string } {
   if (!workspace) return { unavailable: "missing" };
   const path = join(workspace, HANDOFF_FILE);
   let stat;
@@ -88,11 +87,9 @@ export function readHandoffFile(workspace: string | undefined, baselineHash?: st
     return { unavailable: `invalid: ${(e as NodeJS.ErrnoException).code ?? "unreadable"}` };
   }
   if (bytes.length > MAX_FILE_BYTES) return { unavailable: "invalid: over 16 KiB" };
-  const hash = createHash("sha256").update(bytes).digest("hex");
-  if (hash === baselineHash) return { unavailable: "missing" };
   let artifact: unknown;
   try { artifact = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { return { unavailable: "invalid: not UTF-8 JSON" }; }
-  return { artifact, hash };
+  return { artifact };
 }
 
 /** The event for a handoff done transition: same envelope as its job.state, id suffixed so consumers dedupe on it. */
