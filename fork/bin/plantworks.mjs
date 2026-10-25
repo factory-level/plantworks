@@ -3,10 +3,17 @@
 // The `plantworks` and `pwctl` binaries. Needs the upstream CLI built (`npm run build` at the root).
 // ponytail: always loads the full upstream program (no lazy per-command fast path like `rig`'s
 // bin-wrapper); add one if startup time matters for seats calling this in a loop.
-import { applyDaemonDefaults, applyHomeDefaults } from "../src/daemon/boot.ts";
+import { applyDaemonDefaults, applyHomeDefaults, BootPathError } from "../src/daemon/boot.ts";
 
 // Upstream modules read OPENRIG_HOME when they load, so they are imported only after this.
-const dropped = applyHomeDefaults(process.env);
+let dropped;
+try {
+  dropped = applyHomeDefaults(process.env);
+} catch (e) {
+  if (!(e instanceof BootPathError)) throw e;
+  console.error(`plantworks: ${e.message}`);
+  process.exit(2);
+}
 if (dropped.length) console.error(`plantworks: PLANTWORKS_HOME is set, so the inherited ${dropped.join(", ")} (another daemon's) are ignored`);
 const { ConfigStore } = await import("../../packages/cli/dist/config-store.js");
 const store = new ConfigStore();
