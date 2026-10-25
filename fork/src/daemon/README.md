@@ -29,7 +29,15 @@ PW-21).
 
 - A database conflict stops a start by default. Upstream confirms a conflict only when `lsof`
   shows another process holding the file and that daemon's `daemon.json` and `/healthz` agree.
-  Without `lsof` the holder is unknown and nothing stops. The runtime image installs `lsof`
+  It reads a slow or failing probe (`lsof` over 1 s, `/healthz` over 500 ms) as "no holder" and
+  starts. So under `stop`, `plantworks daemon start` first runs the same probes itself
+  (`db-conflict.ts`, 2 s each), before upstream spawns its daemon. A confirmed other daemon, or a
+  probe that can't answer (a missing or hanging `lsof`, an unreadable `daemon.json`, a `/healthz`
+  that doesn't answer for a matching record), stops the start with one line and exit 2. A database
+  that doesn't exist yet skips the probes. `warn`, `--allow-db-conflict` and
+  `OPENRIG_ALLOW_DB_CONFLICT=1` skip the pre-check and keep upstream's behaviour. It is a
+  best-effort check for a confirmed holder, not an atomic lock: a daemon that opens the database
+  after the check isn't seen, and neither is a holder in another container. The runtime image installs `lsof`
   (`fork/container/Dockerfile`). Its smoke test runs the boot regressions as uid 10001 in
   a disposable container with no network or host mounts, including a refused second daemon
   on the same database and the deliberate `--allow-db-conflict` escape.
