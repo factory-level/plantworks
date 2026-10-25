@@ -270,8 +270,15 @@ test("at the job's timeout the seat's model calls are cut off, but the job and i
   const w = await runWorker(t, "worker-1@t", (req, res) => {
     if (req.method === "DELETE") return json(res, {});
     if (req.url!.endsWith("/drain")) return json(res, { inFlight: [] });
-    if (req.url === "/plantworks/v1/claim-next") return handed++ ? res.writeHead(204).end() : json(res, { job: { jobId: "job-t" }, qitemId: "q", envelope: { timeoutSeconds: 1 } });
+    if (req.url === "/plantworks/v1/claim-next") {
+      // One job; once it is done, a second (so the seat's calls are armed again: between jobs they're held, W4-A).
+      if (handed === 0) { handed++; return json(res, { job: { jobId: "job-t" }, qitemId: "q", envelope: { timeoutSeconds: 1 } }); }
+      if (state === "done" && handed === 1) { handed++; return json(res, { job: { jobId: "job-u" }, qitemId: "q2", envelope: {} }); }
+      handed++;
+      return res.writeHead(204).end();
+    }
     if (req.url === "/plantworks/v1/jobs/job-t") return json(res, { state });
+    if (req.url === "/plantworks/v1/jobs/job-u") return json(res, { state: "running" });
     res.writeHead(404).end();
   }, `http://127.0.0.1:${(llm.address() as { port: number }).port}/v1`);
   const baseUrl = () => (Object.values(JSON.parse(readFileSync(join(w.home, "state", "pi", "worker-1@t", "agent", "models.json"), "utf8")).providers)[0] as { baseUrl: string }).baseUrl;
@@ -285,8 +292,8 @@ test("at the job's timeout the seat's model calls are cut off, but the job and i
   assert.equal(handed, 1, "no next claim after a timeout");
   assert.ok(w.calls.every((c) => !c.startsWith("POST /plantworks/v1/jobs")), "the worker changes no job state");
   state = "done";
-  await until(() => handed >= 2);
-  assert.equal(await call(), 200, "once the broker records done, the seat's calls go through again");
+  await until(() => w.calls.includes("GET /plantworks/v1/jobs/job-u"));
+  assert.equal(await call(), 200, "once the broker records done, the cut-off is lifted: the next job's calls go through");
   await w.stop();
 });
 
