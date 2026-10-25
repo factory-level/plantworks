@@ -306,22 +306,30 @@ const alive = (pid: number) => {
 export function hostLockPath(env: NodeJS.ProcessEnv = process.env, base = "/tmp"): { path: string; source: string } {
   const uid = process.getuid!();
   const xdg = env.XDG_RUNTIME_DIR?.trim();
-  const [dir, source] = xdg && isAbsolute(xdg)
-    ? [join(xdg, "plantworks"), "the host default under $XDG_RUNTIME_DIR; PLANTWORKS_JOB_LOCK overrides it"]
-    : [join(base, `plantworks-${uid}`), `the host default ${join(base, `plantworks-${uid}`)} (no $XDG_RUNTIME_DIR); PLANTWORKS_JOB_LOCK overrides it`];
-  // Every directory above the lock's must be one nobody else can rename entries in: owned by this
-  // user or root, and not group- or world-writable unless sticky (like /tmp). Otherwise someone
-  // could move the checked directory away, and the next run would lock a fresh one alongside.
-  for (let up = realpathSync(dirname(dir)); ; up = dirname(up)) {
+  const [parent, leaf, source] = xdg && isAbsolute(xdg)
+    ? [xdg, "plantworks", "the host default under $XDG_RUNTIME_DIR; PLANTWORKS_JOB_LOCK overrides it"]
+    : [base, `plantworks-${uid}`, `the host default ${join(base, `plantworks-${uid}`)} (no $XDG_RUNTIME_DIR); PLANTWORKS_JOB_LOCK overrides it`];
+  // Resolve the parent once and use only the canonical path from here on (the checks, the mkdir and the
+  // lock), so a symlink in the way is never followed again after it was checked.
+  const canonical = realpathSync(parent);
+  // Owners that are as good as root: root, and the kernel's overflow uid, which a user namespace shows
+  // for an owner outside it (typically the host's root).
+  const trusted = new Set([uid, 0, overflowUid()]);
+  // Every directory above the lock's must be one nobody else can rename entries in: owned by a trusted
+  // owner, and not group- or world-writable unless sticky (like /tmp). Otherwise someone could move the
+  // checked directory away, and the next run would lock a fresh one alongside.
+  for (let up = canonical; ; up = dirname(up)) {
     const a = lstatSync(up);
     const unsafe = !a.isDirectory() ? "is not a directory"
-      : a.uid !== uid && a.uid !== 0 ? `is owned by uid ${a.uid}`
+      : !trusted.has(a.uid) ? `is owned by uid ${a.uid}`
       : a.mode & 0o022 && !(a.mode & 0o1000) ? `is group- or world-writable without the sticky bit (mode ${(a.mode & 0o7777).toString(8)})`
       : undefined;
     if (unsafe) throw new RejectedJob(`the job lock directory's parent ${JSON.stringify(up)} ${unsafe}, so another user could replace the lock directory; refusing to run. Fix that directory, or set PLANTWORKS_JOB_LOCK to a path under directories only you can change`);
     if (up === dirname(up)) break;
   }
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const dir = join(canonical, leaf);
+  // Only the leaf is created (the parent was checked above); one left by an earlier run is checked below.
+  try { mkdirSync(dir, { mode: 0o700 }); } catch (e) { if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e; }
   const st = lstatSync(dir);
   const problem = !st.isDirectory() ? "is not a directory (a symlink or a file)"
     : st.uid !== uid ? `is owned by uid ${st.uid}, not this user (${uid})`
@@ -329,6 +337,11 @@ export function hostLockPath(env: NodeJS.ProcessEnv = process.env, base = "/tmp"
     : undefined;
   if (problem) throw new RejectedJob(`the job lock directory ${JSON.stringify(dir)} ${problem}, so another user could hold or replace the lock; refusing to run. Fix its ownership and mode (700), or set PLANTWORKS_JOB_LOCK to a path you own`);
   return { path: join(dir, "job.lock"), source };
+}
+
+/** The kernel's overflow uid (65534 unless configured): the owner a user namespace shows for an unmapped uid. */
+function overflowUid(): number {
+  try { return Number(readFileSync("/proc/sys/kernel/overflowuid", "utf8").trim()) || 65534; } catch { return 65534; }
 }
 
 export function takeJobLock(path: string, now = () => new Date(), source = "given by the caller"): JobLock {

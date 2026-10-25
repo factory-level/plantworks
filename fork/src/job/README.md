@@ -44,8 +44,11 @@ The path is chosen in this order, and the refusal messages say which applied:
 
 For 2 and 3 the directory is created mode 700, then checked without following symlinks. It must be a
 real directory owned by this user with no group or world write. Every directory above it must be
-owned by this user or root, and not group- or world-writable unless sticky (as `/tmp` is), so nobody
-else can rename the lock directory away. Otherwise the job is refused, since another user could hold
+owned by this user or root (or the kernel's overflow uid, normally 65534, which a user namespace
+shows for an owner outside it, such as the host's root), and not group- or world-writable unless
+sticky (as `/tmp` is), so nobody else can rename the lock directory away. The parent is resolved once
+(`realpath`), and the checks, the directory and the lock all use that resolved path, so a symlink on
+the way is never followed again after it was checked. Otherwise the job is refused, since another user could hold
 or swap the lock. (`runJob()`, the library, takes an explicit `lockPath`;
 without one it uses `<home>/plantworks/job.lock`.)
 

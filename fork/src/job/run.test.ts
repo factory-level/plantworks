@@ -290,16 +290,16 @@ test("a stale lock (runner and Pi both gone) is replaced; an unreadable one is r
 });
 
 test("D14 host lock path: XDG_RUNTIME_DIR, else <base>/plantworks-<uid>; a directory others could write or swap is refused", async () => {
-  const { chmodSync, statSync, symlinkSync } = await import("node:fs");
+  const { chmodSync, realpathSync, statSync, symlinkSync } = await import("node:fs");
   const uid = process.getuid!();
   const runtime = mkdtempSync(join(tmpdir(), "pw-xdg-"));
-  assert.equal(hostLockPath({ XDG_RUNTIME_DIR: runtime }).path, join(runtime, "plantworks", "job.lock"));
+  assert.equal(hostLockPath({ XDG_RUNTIME_DIR: runtime }).path, join(realpathSync(runtime), "plantworks", "job.lock"));
   assert.equal(statSync(join(runtime, "plantworks")).mode & 0o777, 0o700, "created mode 700");
   // No (or a relative) XDG_RUNTIME_DIR: the per-uid fallback, here under a temp base instead of /tmp.
   const base = mkdtempSync(join(tmpdir(), "pw-tmpbase-"));
   for (const env of [{}, { XDG_RUNTIME_DIR: "relative/dir" }]) {
     const { path, source } = hostLockPath(env, base);
-    assert.equal(path, join(base, `plantworks-${uid}`, "job.lock"));
+    assert.equal(path, join(realpathSync(base), `plantworks-${uid}`, "job.lock"));
     assert.match(source, /no \$XDG_RUNTIME_DIR/);
   }
   const loose = mkdtempSync(join(tmpdir(), "pw-loose-"));
@@ -314,6 +314,19 @@ test("D14 host lock path: XDG_RUNTIME_DIR, else <base>/plantworks-<uid>; a direc
   assert.equal(existsSync(join(openParent, "plantworks")), false, "nothing was created under it");
   chmodSync(openParent, 0o1777);
   assert.equal(hostLockPath({ XDG_RUNTIME_DIR: openParent }).path, join(openParent, "plantworks", "job.lock"), "a sticky shared parent is fine");
+  // A symlinked XDG_RUNTIME_DIR (r2): the lock is placed under the resolved directory and that path's
+  // ancestors are what get checked, so the symlink is never followed again after the check.
+  const real = mkdtempSync(join(tmpdir(), "pw-realxdg-"));
+  const alias = join(mkdtempSync(join(tmpdir(), "pw-alias-")), "xdg");
+  symlinkSync(real, alias);
+  assert.equal(hostLockPath({ XDG_RUNTIME_DIR: alias }).path, join(realpathSync(real), "plantworks", "job.lock"), "the canonical path is used");
+  const unsafeReal = mkdtempSync(join(tmpdir(), "pw-unsafe-"));
+  chmodSync(unsafeReal, 0o777);
+  const unsafeAlias = join(mkdtempSync(join(tmpdir(), "pw-alias-")), "xdg");
+  symlinkSync(unsafeReal, unsafeAlias);
+  assert.throws(() => hostLockPath({ XDG_RUNTIME_DIR: unsafeAlias }), /parent .* is group- or world-writable without the sticky bit/, "a symlink to an unsafe directory is judged by its target");
+  hostLockPath({ XDG_RUNTIME_DIR: runtime });
+  assert.equal(hostLockPath({ XDG_RUNTIME_DIR: runtime }).path, join(realpathSync(runtime), "plantworks", "job.lock"), "an existing safe lock directory is reused");
   const swapped = mkdtempSync(join(tmpdir(), "pw-swap-"));
   symlinkSync(mkdtempSync(join(tmpdir(), "pw-elsewhere-")), join(swapped, `plantworks-${uid}`));
   assert.throws(() => hostLockPath({}, swapped), (e: Error) => e instanceof RejectedJob && /is not a directory \(a symlink or a file\)/.test(e.message));
