@@ -168,7 +168,8 @@ test("plantworks daemon start boots a no-kernel loopback daemon in the fork home
   }
 });
 
-test("PLANTWORKS_HOME with a seat's daemon variables never reaches that daemon or its database", { skip: !hasTmux && "tmux not installed", timeout: 120_000 }, async () => {
+for (const dbSelection of ["direct", "dangling-link"] as const) {
+test(`PLANTWORKS_HOME with a seat's daemon variables never reaches that daemon or its database (${dbSelection})`, { skip: !hasTmux && "tmux not installed", timeout: 120_000 }, async () => {
   const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
   const root = mkdtempSync(join(tmpdir(), "pw-home-"));
   const seat = mkdtempSync(join(tmpdir(), "pw-seat-")); // a seat's live home: must stay empty
@@ -180,9 +181,14 @@ test("PLANTWORKS_HOME with a seat's daemon variables never reaches that daemon o
   const home = join(root, "pw");
   const port = await freePort();
   mkdirSync(home);
+  const seatDb = join(seat, "openrig.sqlite");
+  const dbLink = join(home, "inherited.sqlite");
+  if (dbSelection === "dangling-link") symlinkSync(seatDb, dbLink);
   writeFileSync(join(home, "config.json"), JSON.stringify({ daemon: { port } }));
   const env = { PATH: `/usr/bin:/bin:${join(process.execPath, "..")}`, HOME: root, TMUX_TMPDIR: sock, PLANTWORKS_HOME: home,
-    OPENRIG_HOME: seat, OPENRIG_DB: join(seat, "openrig.sqlite"), OPENRIG_PORT: String(livePort), OPENRIG_URL: `http://127.0.0.1:${livePort}` };
+    OPENRIG_HOME: seat, OPENRIG_DB: dbSelection === "direct" ? seatDb : dbLink,
+    OPENRIG_TRANSCRIPTS_PATH: join(seat, "transcripts"), OPENRIG_SESSION_NAME: "test-seat@disposable",
+    OPENRIG_PORT: String(livePort), OPENRIG_URL: `http://127.0.0.1:${livePort}` };
   const pw = (...args: string[]) => promisify(execFile)(process.execPath, [bin, ...args], { env })
     .then((r) => ({ code: 0, ...r }), (e) => ({ code: e.code as number, stdout: e.stdout as string, stderr: e.stderr as string }));
   const started = await pw("daemon", "start");
@@ -190,8 +196,9 @@ test("PLANTWORKS_HOME with a seat's daemon variables never reaches that daemon o
     assert.equal(started.code, 0, started.stderr);
     assert.match(started.stderr, /PLANTWORKS_HOME is set, so the inherited .*OPENRIG_DB.* are ignored/);
     assert.equal((await (await fetch(`http://127.0.0.1:${port}/healthz`)).json()).status, "ok", "the daemon listens on the home's configured port");
-    assert.ok(readdirSync(home).some((f) => f.endsWith(".sqlite")), "its database is in the selected home");
+    assert.ok(readFileSync(join(home, "openrig.sqlite")).length > 0, "its database is in the selected home");
     assert.equal((await pw("config", "get", "daemon.port")).stdout.trim(), String(port));
+    assert.equal((await pw("ps")).code, 0, "non-start commands also use the isolated daemon");
   } finally {
     await pw("daemon", "stop");
     try { execFileSync("tmux", ["kill-server"], { env, stdio: "ignore" }); } catch { /* no server */ }
@@ -203,6 +210,7 @@ test("PLANTWORKS_HOME with a seat's daemon variables never reaches that daemon o
     rmSync(seat, { recursive: true, force: true });
   }
 });
+}
 
 test("home config resolves under PLANTWORKS_HOME, never the ambient OPENRIG_HOME, and a second daemon on the same database is refused", { skip: !hasTmux && "tmux not installed", timeout: 120_000 }, async () => {
   const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
@@ -233,9 +241,12 @@ test("home config resolves under PLANTWORKS_HOME, never the ambient OPENRIG_HOME
     const refused = await pw(second, "daemon", "start");
     assert.notEqual(refused.code, 0, "the second daemon must not start");
     assert.match(readFileSync(join(root, "c", "daemon.log"), "utf8"), /OPENRIG_DB_CONFLICT: .*daemon\.db_conflict=stop/);
-    const third = { ...second, OPENRIG_HOME: join(root, "d"), OPENRIG_PORT: String(portC) };
-    const escaped = await pw(third, "daemon", "start", "--allow-db-conflict");
+    // Explicit CLI selections remain intentional even with PLANTWORKS_HOME isolation enabled.
+    const third = { PLANTWORKS_HOME: join(root, "d") };
+    const escaped = await pw(third, "daemon", "start", "--db", db, "--port", String(portC), "--allow-db-conflict");
     assert.equal(escaped.code, 0, `upstream's one-boot escape still works: ${escaped.stderr}`);
+    assert.equal(JSON.parse(readFileSync(join(root, "d", "daemon.json"), "utf8")).db, db, "--db deliberately selects the external disposable database");
+    assert.equal((await (await fetch(`http://127.0.0.1:${portC}/healthz`)).json()).status, "ok", "--port deliberately selects the port");
     await pw(third, "daemon", "stop");
   } finally {
     await pw(first, "daemon", "stop");
