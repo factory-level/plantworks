@@ -43,12 +43,11 @@ export type Take = {
   snapshot?: string;
   /** W4-E: the workspace passed verification at take-up, so its handoff file may be read. */
   workspaceVerified?: boolean;
-  /** W4-E: the hash of a valid handoff file already there at take-up, so a stale one never counts. */
-  handoffBase?: string;
   /**
    * W4-E (r1): whatever was at the handoff path at take-up, valid or not (a non-JSON file, an oversize
    * one, a symlink, a directory), as an lstat fingerprint. Still the same at report time means the job
-   * didn't write a handoff: `missing`, never `invalid`.
+   * didn't write a handoff: `missing`, never `invalid`. Any change (a rewrite, even byte-identical,
+   * gets a new inode or mtime) means the job wrote one, and it is read as it now is.
    */
   handoffPresent?: string;
 };
@@ -94,9 +93,8 @@ export function take(jobId: string, usageNow: Usage | undefined, opts: { recover
   if (problem) return { jobId, usageBase, baseline: { skipped: problem } };
   let baseline: Take["baseline"];
   try { baseline = takeBaseline(opts.workspace); } catch (e) { baseline = { skipped: `baseline unreadable: ${(e as Error).message.split("\n")[0]}` }; }
-  const before = readHandoffFile(opts.workspace);
   const present = handoffFingerprint(opts.workspace);
-  return { jobId, usageBase, baseline, workspaceVerified: true, ...("hash" in before ? { handoffBase: before.hash } : {}), ...(present ? { handoffPresent: present } : {}) };
+  return { jobId, usageBase, baseline, workspaceVerified: true, ...(present ? { handoffPresent: present } : {}) };
 }
 
 /** W4-E: the job's handoff, as the wire's `{artifact}` or a bare `{unavailable}` category, and the detail for the log. */
@@ -106,9 +104,11 @@ export function handoffOf(t: Take, workspace: string | undefined): { handoff: Ha
   if (!t.workspaceVerified) return { handoff: { unavailable: "missing" }, detail: "skipped" in t.baseline ? t.baseline.skipped : "workspace unverifiable" };
   // Untouched since take-up, whatever it is: the job wrote no handoff.
   if (t.handoffPresent && handoffFingerprint(workspace) === t.handoffPresent) return { handoff: { unavailable: "missing" }, detail: "unchanged since take-up" };
-  const read = readHandoffFile(workspace, t.handoffBase);
+  // Changed or new: read as it now is. No content baseline: the fingerprint already says the job
+  // touched it, so even a byte-identical rewrite of an older handoff counts (r1).
+  const read = readHandoffFile(workspace);
   if ("artifact" in read) return { handoff: { artifact: read.artifact } };
-  if (read.unavailable === "missing") return { handoff: { unavailable: "missing" }, detail: t.handoffBase ? "unchanged since take-up" : "no handoff file" };
+  if (read.unavailable === "missing") return { handoff: { unavailable: "missing" }, detail: "no handoff file" };
   return { handoff: { unavailable: "invalid" }, detail: read.unavailable };
 }
 

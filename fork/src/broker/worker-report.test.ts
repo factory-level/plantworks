@@ -309,6 +309,14 @@ test("W4-E: the handoff on the wire is {artifact} or exactly 'missing'/'invalid'
     make(join(ws, ".plantworks"));
     assert.deepEqual(handoffOf(taken(ws), ws), { handoff: { unavailable: "missing" }, detail: "unchanged since take-up" }, `stale ${what}`);
   }
+  // A valid handoff already there, removed and rewritten byte-identical by the job (r1): the job raised it, so it counts.
+  const again = workspaceRepo();
+  mkdirSync(join(again, ".plantworks"));
+  writeFileSync(join(again, ".plantworks", "handoff.json"), JSON.stringify(validHandoff));
+  const tAgain = taken(again);
+  fsSync.rmSync(join(again, ".plantworks", "handoff.json"));
+  writeFileSync(join(again, ".plantworks", "handoff.json"), JSON.stringify(validHandoff));
+  assert.deepEqual(handoffOf(tAgain, again), { handoff: { artifact: validHandoff } }, "a byte-identical re-raise is a handoff");
   // And one rewritten during the job is judged afresh: a stale non-JSON file replaced by a valid one is the artifact.
   const rewritten = workspaceRepo();
   mkdirSync(join(rewritten, ".plantworks"));
