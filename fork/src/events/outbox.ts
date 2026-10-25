@@ -23,7 +23,8 @@ export function eventForTransition(job: JobRow, transition: TransitionRow, colum
     qitemId: typeof columns.qitem_id === "string" ? columns.qitem_id : undefined,
     seat: typeof columns.claimed_by === "string" ? columns.claimed_by : undefined,
     summary: summaryOf(envelope.task),
-    ...(Array.isArray(result?.artifacts) ? { artifacts: result.artifacts as { name: string; uri: string }[] } : {}),
+    // D11: artifacts only when there are some, as `pw job run` sends them (W4-A).
+    ...(Array.isArray(result?.artifacts) && result.artifacts.length ? { artifacts: result.artifacts as { name: string; uri: string }[] } : {}),
     ...(Array.isArray(result?.evidence) ? { evidence: result.evidence as { kind: string; uri: string }[] } : {}),
     ...(result?.usage && typeof result.usage === "object" ? { usage: result.usage as { promptTokens: number; completionTokens: number } } : {}),
   }, transition.to_state, JSON.parse(transition.detail), new Date(transition.at));
