@@ -45,8 +45,10 @@ plantworks pw broker serve --teams <dir> [--platform platform.json] [--db file] 
 | `POST /plantworks/v1/jobs/{jobId}/cancel` | `queued` or `held` becomes `cancelled` with reason `front-door`: `200` and the record. Already `cancelled`: `200` (idempotent). Any other state, or a job being handed to a seat (reserved): `409 not_cancellable`. Unknown job: `404 not_found` |
 
 The record is `fork/schema/job-record.schema.json`:
-`{jobId, team, class, state, detail, createdAt, updatedAt, result}`.
+`{jobId, team, class, state, detail, priority, createdAt, updatedAt, result}`.
 - `class` is the resolved class.
+- `priority` is the effective priority stored at submit (class priority + envelope offset), the
+  number claim-next orders by. It is additive and fork-defined, pending the HarnessHG ack (PW-29).
 - `detail` is the PW-09 detail for the current state.
 - `result` is `null` until reconciliation records an authenticated logical completion (PW-21).
 

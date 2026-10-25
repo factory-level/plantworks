@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { Command } from "commander";
+import { JOB_PRIORITIES, type JobPriority } from "../contract/job.ts";
 import { classFromSpec } from "../llm/classes.ts";
 import { readEndpoint } from "../llm/endpoint.ts";
 import { startGovernor, type Governor } from "../llm/governor.ts";
@@ -30,12 +31,14 @@ export async function governSeat(opts: { team: string; seat: string; class?: str
     endpoint: readEndpoint(opts.env ?? process.env),
     workerClass,
     port: opts.port,
+    // PW-29: opt-in, for a vLLM served with --scheduling-policy priority.
+    priorityHints: (opts.env ?? process.env).PLANTWORKS_LLM_PRIORITY === "1",
     // ponytail: reported only; the job's broker state is not changed from here (fail-closed, PW-19).
     onFail: (reason) => log(`plantworks worker: ${opts.seat} hit ${reason} (consecutive model calls cut at the ${workerClass.deadlineSeconds}s deadline); the broker job is left as it is`),
   });
   try {
     const agentDir = writeSeatFiles({ openrigHome: opts.openrigHome, session: opts.seat, className, governorUrl: governor.url, workerClass, toolProfile: spec.classes[className]!.toolProfile });
-    return { governor, agentDir, className, timeoutSeconds: spec.classes[className]!.timeoutSeconds };
+    return { governor, agentDir, className, timeoutSeconds: spec.classes[className]!.timeoutSeconds, classPriority: spec.classes[className]!.priority ?? 0 };
   } catch (e) {
     await governor.close();
     throw e;
@@ -61,7 +64,7 @@ export function workerVerb(pw: Command): void {
       if (!Number.isInteger(pollMs) || pollMs < 250 || pollMs > 60_000) throw new Error("--poll-ms must be 250..60000");
       const port = Number(opts.governorPort);
       if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new Error("--governor-port must be 0..65535");
-      const { governor, agentDir, className, timeoutSeconds } = await governSeat({ team: opts.team, seat: opts.seat, class: opts.class, teamsDir: opts.teams ?? process.env.PLANTWORKS_TEAMS_DIR, platform: opts.platform ?? process.env.PLANTWORKS_PLATFORM_FILE, port, openrigHome: process.env.OPENRIG_HOME });
+      const { governor, agentDir, className, timeoutSeconds, classPriority } = await governSeat({ team: opts.team, seat: opts.seat, class: opts.class, teamsDir: opts.teams ?? process.env.PLANTWORKS_TEAMS_DIR, platform: opts.platform ?? process.env.PLANTWORKS_PLATFORM_FILE, port, openrigHome: process.env.OPENRIG_HOME });
       process.stdout.write(`${opts.seat}: class ${className} governed at ${governor.url}; Pi files in ${agentDir}\n`);
       let stopping = false;
       process.once("SIGINT", () => { stopping = true; });
@@ -75,6 +78,20 @@ export function workerVerb(pw: Command): void {
        * timeout the governor cuts off the seat's model calls. That stops no tool or process, so the
        * job and its slot stay held and the wait goes on.
        */
+      /**
+       * A job's stored effective priority from the broker. A failed or unreadable answer is asked
+       * again (held calls stay held meanwhile); only a record without one, from a broker that
+       * predates the field, falls back to the class base.
+       */
+      const storedPriority = async (jobId: string): Promise<number> => {
+        while (!stopping) {
+          const res = await fetch(`${base}/plantworks/v1/jobs/${encodeURIComponent(jobId)}`, { headers, signal: AbortSignal.timeout(15_000) }).catch(() => null);
+          const record = res?.ok ? await res.json().catch(() => null) as { priority?: unknown } | null : null;
+          if (record && typeof record === "object") return typeof record.priority === "number" ? record.priority : classPriority;
+          await sleep();
+        }
+        return classPriority;
+      };
       const waitForDone = async (jobId: string, timeoutS: number) => {
         process.stdout.write(`waiting for broker completion of ${jobId}\n`);
         const timer = setTimeout(() => {
@@ -115,23 +132,35 @@ export function workerVerb(pw: Command): void {
           else { process.stderr.write(`plantworks worker: cannot read what ${opts.seat} holds (${view?.status ?? "no answer"}); not claiming\n`); await sleep(); }
         }
         // The timer starts now, not at the job's claim, so a cut-off after a restart comes late, never early.
-        for (const jobId of held ?? []) if (!stopping) await waitForDone(jobId, timeoutSeconds);
+        // PW-29: a held job's envelope isn't at hand; its stored priority comes from the broker.
+        for (const jobId of held ?? []) {
+          if (stopping) break;
+          governor.setPriority(await storedPriority(jobId));
+          await waitForDone(jobId, timeoutSeconds);
+          governor.setPriority(undefined);
+        }
         while (!stopping) {
           const claim = await fetch(`${base}/plantworks/v1/claim-next`, { method: "POST", headers, body: JSON.stringify({ team: opts.team, seat: opts.seat, ...(opts.class ? { class: opts.class } : {}) }), signal: AbortSignal.timeout(15_000) });
           let jobId: string;
           let timeoutS = timeoutSeconds;
           if (claim.status === 503 || claim.status === 409) {
             const body = await claim.json().catch(() => ({})) as { error?: string; jobId?: string };
-            if ((body.error === "handoff_unconfirmed" || body.error === "reservation_lost") && body.jobId) jobId = body.jobId;
+            if ((body.error === "handoff_unconfirmed" || body.error === "reservation_lost") && body.jobId) {
+              jobId = body.jobId;
+              governor.setPriority(await storedPriority(jobId)); // no envelope in this answer: ask the broker
+            }
             else { await sleep(); continue; }
           } else if (claim.status === 204 || claim.status === 429) { await sleep(); continue; }
           else if (!claim.ok) throw new Error(`claim-next returned ${claim.status}: ${(await claim.text()).slice(0, 300)}`);
           else {
-            const claimed = await claim.json() as { job: { jobId: string }; envelope?: { timeoutSeconds?: number } };
+            const claimed = await claim.json() as { job: { jobId: string; priority?: number }; envelope?: { timeoutSeconds?: number; priority?: JobPriority } };
             jobId = claimed.job.jobId;
             timeoutS = claimed.envelope?.timeoutSeconds ?? timeoutSeconds;
+            // PW-29: the same effective priority the broker ordered the claim by. The seat runs one job at a time.
+            governor.setPriority(typeof claimed.job.priority === "number" ? claimed.job.priority : classPriority + JOB_PRIORITIES[claimed.envelope?.priority ?? "normal"]);
           }
           await waitForDone(jobId, timeoutS);
+          governor.setPriority(undefined);
         }
       } finally {
         // Pi's model calls stop working with the governor: none goes to the endpoint ungoverned.

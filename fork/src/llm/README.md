@@ -63,3 +63,45 @@ governor side with the fork's fake Pi:
   `call-deadline`.
 
 A Pi upgrade can change these defaults. Re-run the gated tests against the new pin.
+
+## Per-job priority (PW-29)
+
+**Decision.** The seat's governor sets each request's `priority` to the effective priority of the
+job the seat runs now. That value is the class `priority` plus the envelope's offset, the same
+number the broker orders claims by. The card offered two options, and this rules out both:
+- re-rendering the seat's `models.json` before each job, which would race a running Pi;
+- one seat per priority band.
+
+Nothing about the seat changes per job. The decision is cheap to change: it is one setter on the
+governor and one line in `governBody`.
+
+- **Why it reaches the endpoint as `priority`:**
+  - Pi 1.4.0 sends a model's `compat.vllmPriority` as the body field `priority`
+    (`pi-ai` `dist/api/openai-completions.js:620-621`). The governor replaces that value, and the
+    seat files set none.
+  - vLLM reads `priority` as an integer where lower means earlier handling, with ties by arrival.
+    That is the broker's direction too: urgent is -3 and low is +2.
+- **Opt-in: `PLANTWORKS_LLM_PRIORITY=1`.** vLLM rejects a non-zero `priority` unless it runs with
+  `--scheduling-policy priority`. So by default no `priority` is sent at all, and on **Ollama**,
+  which has no priority scheduling, this is a **no-op**: leave it unset.
+- **One job at a time per governor.** A worker's claim loop waits for each job to be `done` before
+  it claims the next (`fork/src/broker/worker.ts`, `waitForDone`). So a per-seat value is per job.
+- **No call goes out before the job's priority is known.** claim-next creates the qitem, and the
+  daemon can wake Pi then, before the worker has the claim response. So with hints on, the
+  governor **holds** every completion call while no priority is set. The worker sets the value
+  before it waits on any job, and clears it again when the job is `done`:
+  - a claimed job gets class base + envelope offset;
+  - a job held after a restart, or one whose handoff is unconfirmed, gets the class base, because
+    its envelope isn't at hand.
+- **`pw job run`** passes the envelope offset at governor start; built-in classes have no base.
+- **Tests:**
+  - `priority.test.ts` covers the default off, setting and overriding Pi's value, switching
+    between jobs, and `pw job run`;
+  - `fork/src/broker/worker-priority.test.ts` covers the worker path:
+    - a call made while the claim answer is still held back waits, then carries base 2 + urgent,
+      which is -1;
+    - the next job gives base 2 + low, which is 4;
+    - nothing goes out between jobs.
+
+  None of them load a real vLLM; that check is gated.
+- The envelope `priority` field is fork-defined and still pending the HarnessHG ack (D11).

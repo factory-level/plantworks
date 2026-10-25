@@ -40,7 +40,7 @@ export function loadTeams(dir: string, platform: Platform = PHASE_0_1): Map<stri
 /** The job record the API returns (fork/schema/job-record.schema.json). */
 export function jobRecord(row: JobRow) {
   return {
-    jobId: row.job_id, team: row.team, class: row.class, state: row.state, detail: JSON.parse(row.detail),
+    jobId: row.job_id, team: row.team, class: row.class, state: row.state, detail: JSON.parse(row.detail), priority: row.priority,
     createdAt: row.created_at, updatedAt: row.updated_at, result: row.result === null ? null : JSON.parse(row.result),
   };
 }
