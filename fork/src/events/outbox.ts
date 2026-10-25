@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { JobRow, Store, TransitionRow } from "../broker/store.ts";
 import { DeliveryAborted, jobStateEvent, type CloudEvent } from "./job-state.ts";
+import { handoffEvent, type HandoffData } from "../broker/handoff.ts";
 
 const BATCH_SIZE = 100;
 const MAX_RETRY_DELAY_MS = 5 * 60_000;
@@ -28,6 +29,24 @@ export function eventForTransition(job: JobRow, transition: TransitionRow, colum
     ...(Array.isArray(result?.evidence) ? { evidence: result.evidence as { kind: string; uri: string }[] } : {}),
     ...(result?.usage && typeof result.usage === "object" ? { usage: result.usage as { promptTokens: number; completionTokens: number } } : {}),
   }, transition.to_state, JSON.parse(transition.detail), new Date(transition.at));
+}
+
+/**
+ * Every event one transition carries, in delivery order: its job.state and, for a handoff done (PW-34),
+ * then plantworks.handoff.requested. All are derived from the persisted row, so a redelivery is identical.
+ */
+export function eventsForTransition(job: JobRow, transition: TransitionRow, columns: Record<string, unknown> = JSON.parse(transition.columns)): CloudEvent[] {
+  const events = [eventForTransition(job, transition, columns)];
+  const detail = JSON.parse(transition.detail) as { closure?: unknown };
+  const result = typeof columns.result === "string" ? JSON.parse(columns.result) as { handoff?: HandoffData } : undefined;
+  if (transition.to_state === "done" && detail.closure === "handoff-sre" && result?.handoff) {
+    events.push(handoffEvent({
+      jobId: job.job_id, team: job.team, transitionId: transition.id, at: new Date(transition.at),
+      qitemId: typeof columns.qitem_id === "string" ? columns.qitem_id : undefined,
+      seat: typeof columns.claimed_by === "string" ? columns.claimed_by : undefined,
+    }, result.handoff));
+  }
+  return events;
 }
 
 export function transitionColumns(store: Store, transition: TransitionRow): Record<string, unknown> {
@@ -95,10 +114,13 @@ export function createJobStateOutbox(
           if (prior && prior.next_attempt_at > Date.now()) { blocked = true; break; }
           const job = store.get(transition.job_id);
           if (!job) throw new Error(`transition ${transition.id} has no job ${transition.job_id}`);
-          const event = eventForTransition(job, transition, transitionColumns(store, transition));
+          // One transition, one cursor step: a pair (job.state, handoff.requested) advances only after both.
+          // A failure of either is the transition's, and a retry redelivers both with unchanged ids.
+          const events = eventsForTransition(job, transition, transitionColumns(store, transition));
+          let event = events[0]!;
           if (stopping.signal.aborted) return;
           try {
-            await deliver(team, event, stopping.signal);
+            for (event of events) await deliver(team, event, stopping.signal);
             clearFailure.run(team, transition.id);
             if (advance.run(transition.id, team, currentCursor).changes !== 1) { blocked = true; break; }
             currentCursor = transition.id;

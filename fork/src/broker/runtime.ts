@@ -20,7 +20,7 @@ const zero = (): Counts => ({ active: 0, held: 0, queued: 0, reserved: 0, claime
  * chart's KEDA target). `queued` includes `reserved` (queued jobs mid-handoff to a seat). `held`
  * jobs wait for an approval decision and are not active: no worker can take them.
  */
-export function stats(ctx: BrokerContext, caps: SlotCaps) {
+export function stats(ctx: BrokerContext, caps: SlotCaps, dispatch?: { view(): unknown }) {
   const teams: Record<string, Counts & { classes: Record<string, Counts> }> = {};
   for (const name of ctx.teams.keys()) teams[name] = { ...zero(), classes: {} };
   let active = 0;
@@ -39,7 +39,7 @@ export function stats(ctx: BrokerContext, caps: SlotCaps) {
     const key = spec.endpoint.slotBudgetKey;
     slots[key] ??= { inFlight: inFlight(ctx.store, ctx.teams, key), cap: capFor(caps, key) };
   }
-  return { active, teams, slots, drainingSeats: ctx.store.drainingSeats() };
+  return { active, teams, slots, drainingSeats: ctx.store.drainingSeats(), ...(dispatch ? { dispatch: dispatch.view() } : {}) };
 }
 
 const seatView = (ctx: BrokerContext, seat: string) => {
@@ -48,7 +48,7 @@ const seatView = (ctx: BrokerContext, seat: string) => {
 };
 
 /** The runtime routes. `slotCaps` must be the same caps claim-next enforces. */
-export function runtimeRoutes(opts: { slotCaps: SlotCaps }): BrokerRoutes {
+export function runtimeRoutes(opts: { slotCaps: SlotCaps; dispatch?: { view(): unknown } }): BrokerRoutes {
   return (app: Hono, ctx: BrokerContext) => {
     app.get("/healthz", (c) => {
       try {
@@ -59,7 +59,7 @@ export function runtimeRoutes(opts: { slotCaps: SlotCaps }): BrokerRoutes {
       }
     });
 
-    app.get(`${API}/stats`, (c) => c.json(stats(ctx, opts.slotCaps)));
+    app.get(`${API}/stats`, (c) => c.json(stats(ctx, opts.slotCaps, opts.dispatch)));
 
     const bad = (seat: string) => (SEAT.test(seat) ? null : Response.json({ error: "invalid_seat", message: "seat is an OpenRig session name" }, { status: 400 }));
     app.get(`${API}/seats/:seat/drain`, (c) => bad(c.req.param("seat")) ?? c.json(seatView(ctx, c.req.param("seat"))));

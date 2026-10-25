@@ -5,12 +5,16 @@ import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { transition as checkTransition, type DoneOutcome, type JobEnvelope, type JobState, type TransitionDetail } from "../contract/job.ts";
+import type { TeamSpec } from "../team/spec.ts";
+import { resolveHandoff, type HandoffReport } from "./handoff.ts";
 
 /** W4-A: what a worker reports for one job (validated by the report route before it is stored). */
 export interface Report {
   usage: { promptTokens: number; completionTokens: number } | null;
   usageStatus?: string;
   artifacts: { branch: string; commit: string; files: { path: string; sha256: string }[]; observedBy: "worker" } | { branch: null; skipped: string; observedBy: "worker" };
+  /** PW-34: `.plantworks/handoff.json` as the worker read it, for a handoff-sre closure. Checked when the job finishes. */
+  handoff?: HandoffReport;
 }
 
 /**
@@ -238,7 +242,7 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
      * concurrently is either in the result or refused as `job_settled`. Returns the transition, or
      * null while waiting.
      */
-    settleReport(jobId: string, outcome: DoneOutcome, closingId: number, waitMs: number): { row: JobRow; detail: TransitionDetail } | null {
+    settleReport(jobId: string, outcome: DoneOutcome | "handoff-sre", closingId: number, waitMs: number, handoff?: Pick<TeamSpec, "sre">): { row: JobRow; detail: TransitionDetail } | null {
       return tx(() => {
         const row = get(jobId);
         if (!row || row.state !== "running") return null;
@@ -247,8 +251,10 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
           return null;
         }
         let result: Record<string, unknown>;
+        let handoffReport: HandoffReport | undefined;
         if (row.report !== null) {
           const report = JSON.parse(row.report) as Report;
+          handoffReport = report.handoff; // a report without one: `missing`
           const a = report.artifacts;
           result = {
             text: null, usage: report.usage, ...(report.usageStatus ? { usageStatus: report.usageStatus } : {}),
@@ -257,7 +263,13 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
           };
         } else if (now().getTime() - Date.parse(row.report_wait_since) >= waitMs) {
           result = { text: null, usage: null, artifacts: [], report: "unavailable(timeout)" };
+          handoffReport = { unavailable: "timeout" };
         } else return null;
+        // PW-34: the seat's handoff-sre closure takes its outcome from the artifact (rejected-by-checks unless it says otherwise).
+        if (outcome === "handoff-sre") {
+          const resolved = resolveHandoff(handoffReport, handoff);
+          return apply(jobId, "done", { outcome: resolved.outcome, closure: "handoff-sre" }, { result: JSON.stringify({ ...result, handoff: resolved.data }) });
+        }
         return apply(jobId, "done", { outcome }, { result: JSON.stringify(result) });
       });
     },
