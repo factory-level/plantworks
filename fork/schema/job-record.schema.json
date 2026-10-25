@@ -15,6 +15,13 @@
     "detail": { "type": "object", "description": "The PW-09 transition detail for the current state, for example {\"reason\": \"front-door\"} when cancelled. {} for states without detail." },
     "createdAt": { "type": "string", "format": "date-time" },
     "updatedAt": { "type": "string", "format": "date-time" },
+    "reportWanted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["closingTransitionId", "qitemId"],
+      "description": "W4-A, fork-defined: present while the seat has closed a running job and the broker waits for the worker's report on that closure (POST .../report); absent otherwise.",
+      "properties": { "closingTransitionId": { "type": "integer" }, "qitemId": { "type": "string" } }
+    },
     "result": {
       "description": "null until a worker reports a terminal result (PW-21).",
       "oneOf": [
@@ -28,15 +35,56 @@
             "artifacts": {
               "type": "array",
               "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["name", "bytes", "sha256"],
-                "properties": {
-                  "name": { "type": "string" },
-                  "bytes": { "type": "integer", "minimum": 0 },
-                  "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
-                }
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["name", "bytes", "sha256"],
+                    "properties": {
+                      "name": { "type": "string" },
+                      "bytes": { "type": "integer", "minimum": 0 },
+                      "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["name", "uri"],
+                    "description": "W4-A: a file the worker's report lists, as the D11 event carries it (git:<commit>:<path>).",
+                    "properties": { "name": { "type": "string" }, "uri": { "type": "string", "pattern": "^git:[0-9a-f]+:" } }
+                  }
+                ]
               }
+            },
+            "usage": {
+              "description": "W4-A: worker-reported token usage, or null when unknown.",
+              "oneOf": [
+                { "type": "null" },
+                { "type": "object", "additionalProperties": false, "required": ["promptTokens", "completionTokens"], "properties": { "promptTokens": { "type": "integer", "minimum": 0 }, "completionTokens": { "type": "integer", "minimum": 0 } } }
+              ]
+            },
+            "usageStatus": { "const": "unavailable(worker restarted)" },
+            "snapshot": { "type": "object", "description": "W4-A: the worker's artifacts report as sent: {branch, commit, files, observedBy} or {branch: null, skipped, observedBy}." },
+            "reportProvenance": { "const": "worker-asserted", "description": "W4-A: usage and artifacts are the worker's word; the broker can't check a commit in the seat's repository." },
+            "report": { "enum": ["ok", "unavailable(timeout)"], "description": "W4-A: the worker's report was stored before done, or the wait ran out without one." },
+            "handoff": {
+              "description": "PW-34, fork-defined: for a done with closure handoff-sre, what plantworks.handoff.requested carries. The artifact with the mapped agent's slackApp reference name, or why there is none.",
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["targetAgent", "slackApp", "summary", "suggestedAction", "evidence", "outcome"],
+                  "properties": {
+                    "targetAgent": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" },
+                    "slackApp": { "type": "string", "pattern": "^PLANTWORKS_SRE_SLACK_[A-Z0-9_]+$" },
+                    "summary": { "type": "string", "minLength": 1, "maxLength": 2000 },
+                    "suggestedAction": { "type": "string", "minLength": 1, "maxLength": 1000 },
+                    "evidence": { "type": "array", "maxItems": 20, "items": { "type": "object", "additionalProperties": false, "required": ["kind", "uri"], "properties": { "kind": { "type": "string" }, "uri": { "type": "string" } } } },
+                    "outcome": { "enum": ["succeeded", "rejected-by-checks"] }
+                  }
+                },
+                { "type": "object", "additionalProperties": false, "required": ["unavailable"], "properties": { "unavailable": { "type": "string", "minLength": 1 } } }
+              ]
             }
           }
         }

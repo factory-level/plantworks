@@ -15,6 +15,7 @@ import { fleetFor, renderFleet, seatNames } from "./render.ts";
 import { TRIMMED_SYSTEM_MD, TRIMMED_TOOLS } from "../seat/pi-seat-files.ts";
 import { API, createBroker, loadTeams } from "../broker/server.ts";
 import { openStore } from "../broker/store.ts";
+import { sealedEnv } from "../test-support/sealed-env.ts";
 
 const cls = (o: Record<string, unknown>) => ({ model: "qwen3.5:9b", context: { maxContextTokens: 16384, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1536, deadlineSeconds: 60 }, approval: "never", timeoutSeconds: 900, maxAttempts: 1, ...o });
 const definition = (team: string) => ({
@@ -98,10 +99,8 @@ test("plantworks pw team render works end to end through the CLI", async () => {
   const dir = teamsDir("social-media");
   const pf = join(mkdtempSync(join(tmpdir(), "pw-render-pf-")), "platform.json");
   writeFileSync(pf, JSON.stringify(platform("social-media")));
-  const childEnv: Record<string, string | undefined> = { ...process.env, OPENRIG_HOME: mkdtempSync(join(tmpdir(), "pw-render-cli-home-")) };
-  delete childEnv.OPENRIG_DB;
-  delete childEnv.OPENRIG_AUTH_BEARER_TOKEN;
-  const run = (args: string[]) => promisify(execFile)(process.execPath, [bin, "pw", "team", "render", ...args], { env: childEnv as NodeJS.ProcessEnv })
+  const childEnv = sealedEnv({ OPENRIG_HOME: mkdtempSync(join(tmpdir(), "pw-render-cli-home-")) });
+  const run = (args: string[]) => promisify(execFile)(process.execPath, [bin, "pw", "team", "render", ...args], { env: childEnv })
     .then((r) => ({ code: 0, ...r }), (e) => ({ code: e.code as number, stdout: e.stdout as string, stderr: e.stderr as string }));
   const out = fresh();
   const ok = await run(["--teams", dir, "--platform", pf, "--out", out, "--governor-url", GOVERNOR]);

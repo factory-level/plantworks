@@ -42,6 +42,7 @@ plantworks pw broker serve --teams <dir> [--platform platform.json] [--db file] 
 | `POST /plantworks/v1/jobs` with the PW-09 envelope (at most 512 KiB) | `201` and the record for a new job. `200` and the existing record when the same envelope is posted again (key order doesn't matter). `409 job_conflict` when the jobId exists with a different envelope |
 | `GET /plantworks/v1/jobs/{jobId}` | `200` and the record, or `404 not_found` |
 | `POST /plantworks/v1/jobs/{jobId}/decision` with `{decision: "approve" \| "deny", by?, reason?}` | For a `held` job, see Approvals below: `200` and the record. The same decision again is `200`. `409 already_decided` (the other decision was made), `409 approval_expired`, `409 not_held` (never held, or cancelled by the front door), `404 not_found`, `400 invalid_decision` |
+| `POST /plantworks/v1/jobs/{jobId}/report` with `{seat, qitemId, closingTransitionId, usage, usageStatus?, artifacts}` (at most 1 MiB) | The worker's report, wanted only after the seat has closed the job (W4-A, see Job report below): `200` and the record. `409 report_exists` (first write wins), `409 report_stale` (another closure), `409 report_fence` (seat or qitem doesn't match the claim), `409 report_not_wanted` (not closed yet), `409 job_settled` (past `running`), `404 not_found`, `400 invalid_report` |
 | `POST /plantworks/v1/jobs/{jobId}/cancel` | `queued` or `held` becomes `cancelled` with reason `front-door`: `200` and the record. Already `cancelled`: `200` (idempotent). Any other state, or a job being handed to a seat (reserved): `409 not_cancellable`. Unknown job: `404 not_found` |
 
 The record is `fork/schema/job-record.schema.json`:
@@ -51,15 +52,17 @@ The record is `fork/schema/job-record.schema.json`:
   number claim-next orders by. It is additive and fork-defined, pending the HarnessHG ack (PW-29).
 - `detail` is the PW-09 detail for the current state.
 - `result` is `null` until reconciliation records an authenticated logical completion (PW-21).
+- `reportWanted: {closingTransitionId, qitemId}` is present only while the broker waits for the
+  worker's report on that closure (W4-A).
 
 Errors are `{error, message}`, plus `errors` for an invalid envelope and `job` for a conflict:
 
 | Status | `error` |
 |---|---|
-| 400 | `invalid_envelope`, `unknown_team`, `unknown_class`, `timeout_over_ceiling`, `context_over_ceiling`, `class_disabled`, `invalid_decision` |
+| 400 | `invalid_envelope`, `unknown_team`, `unknown_class`, `timeout_over_ceiling`, `context_over_ceiling`, `class_disabled`, `invalid_decision`, `invalid_report` |
 | 401 | `unauthorized` |
 | 404 | `not_found` |
-| 409 | `job_conflict`, `not_cancellable`, `already_decided`, `approval_expired`, `not_held` |
+| 409 | `job_conflict`, `not_cancellable`, `already_decided`, `approval_expired`, `not_held`, `report_exists`, `report_stale`, `report_fence`, `report_not_wanted`, `job_settled` |
 | 413 | `too_large` |
 
 Submit checks, in order:
@@ -71,6 +74,31 @@ Submit checks, in order:
 
 Submit never creates an upstream queue item and limits no concurrency. Claiming and the slot
 cap belong to claim-next (PW-18, PW-19).
+
+## Job report (W4-A, `fork/docs/design/broker-report.md`)
+
+The seat's own authenticated closure stays the only thing that finishes a job. The report only
+adds what the worker saw, and a missing report never holds `done` for longer than the bound.
+
+- **The wait.** When reconciliation first sees the seat's closure of a `running` job, it stores
+  `report_wait_since` and the closing `transitionId` (`report_closing_id`). It emits nothing, and
+  the job keeps its slot.
+  - On a later pass, a stored report finishes the job as `done`, with result
+    `{text: null, usage, usageStatus?, artifacts, snapshot, reportProvenance: "worker-asserted", report: "ok"}`.
+  - No report by `report_wait_since` + `PLANTWORKS_REPORT_WAIT_S` finishes it with
+    `{text: null, usage: null, artifacts: [], report: "unavailable(timeout)"}`.
+  - There is one `done` transition either way. The report is read in the same immediate transaction.
+- **The bound.** `PLANTWORKS_REPORT_WAIT_S` defaults to 30 s, and `0` gives the old immediate `done`
+  with no report. Between 0 and 10 s, `serve` refuses to start. The wait is a comparison on each
+  reconciliation pass, with no sleep, so a broker restart resumes it from the stored start.
+- **Another closure.** A closure with a different `transitionId` (the qitem was reopened and closed
+  again between two polls) restarts the wait and drops any report. A reopen that reconciliation
+  sees clears both, and the job stays `running`.
+- **The daemon unreadable:** nothing changes, past the bound or not.
+- **`artifacts` on the result and the event** are the D11 `{name, uri: "git:<commit>:<path>"}` list,
+  present only when the snapshot has a branch. `snapshot` keeps the worker's report as sent.
+- **The fence checks consistency, not identity.** `seat` and `qitemId` are caller-asserted under
+  the broker-wide bearer, and `usage` and `artifacts` are the worker's word (`reportProvenance`).
 
 ## Approvals (PW-23)
 
@@ -395,9 +423,13 @@ fork-defined, pending the HarnessHG ack. The fork has no Slack or Eve code.
   (`readHandoffFile`), and the broker checks it against the team spec's `sre.agents`
   (`resolveHandoff`). Anything short of a valid artifact naming a mapped agent is
   `{unavailable: "<missing | timeout | invalid: … | unknown-target: …>"}`, with no `targetAgent`.
-- **The report path isn't on main yet (W4-A).** Until it lands, every handoff finalises as
-  `unavailable: missing` with `rejected-by-checks`. The card is still blocked, so a person still
-  brings in the SRE agent.
+- **Through the report wait (W4-A).** The worker's report may carry an optional `handoff`
+  member, `{artifact}` or `{unavailable}`. `settleReport` resolves it when the job finishes. A
+  report without the member is `missing`, the wait running out is `timeout`, and with
+  `PLANTWORKS_REPORT_WAIT_S=0` it is `missing`. All of these give `rejected-by-checks`.
+- **The worker doesn't send `handoff` yet.** That wiring is a follow-on after #111 (worker.ts).
+  Until then every handoff is `unavailable: missing`. The card is still blocked, so a person
+  still brings in the SRE agent.
 - **The event.** `plantworks.handoff.requested`, id `<jobId>:<transitionId>:handoff.requested`,
   is delivered by the durable outbox right after that transition's `job.state`. The handoff is
   resolved once, when the job finalises, and stored in the transition's result, so a redelivery
@@ -470,9 +502,9 @@ fork-defined, pending the HarnessHG ack. The fork has no Slack or Eve code.
   the daemon.
 - Job-state event delivery uses a durable per-team outbox and resumes after broker restart.
   Approval events remain in memory and can be lost if the broker stops while they are retrying.
-- Worker reconciliation does not capture the worker's output; until that reporting path exists, it
-  stores `{text: null, artifacts: []}` after authenticated logical completion. It does not infer
-  process exit.
+- Worker reconciliation does not capture Pi's text output: `text` stays `null`. Usage and artifacts
+  come only from the worker's report (W4-A), and without one the result says
+  `unavailable(timeout)`. It does not infer process exit.
 - A held job cancelled through `/cancel` gets `plantworks.job.state cancelled` (reason
   `front-door`) but no `approval.resolved`. Any token holder can cancel, not only the front door.
   **Consumer rule:** close any open approval prompt on `job.state cancelled`, whatever the

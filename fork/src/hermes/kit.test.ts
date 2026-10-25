@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
+import { sealedEnv } from "../test-support/sealed-env.ts";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -239,7 +240,7 @@ test("`plantworks pw mcp serve` over stdio needs a team and serves the four tool
   await client.connect(new StdioClientTransport({
     command: process.execPath,
     args: [bin, "pw", "mcp", "serve"],
-    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PLANTWORKS_TEAM: TEAM, PLANTWORKS_BROKER_URL: broker.url },
+    env: sealedEnv({ PLANTWORKS_TEAM: TEAM, PLANTWORKS_BROKER_URL: broker.url }) as Record<string, string>,
     stderr: "ignore",
   }));
   assert.deepEqual((await client.listTools()).tools.map((t) => t.name).sort(), ["job_cancel", "job_inspect", "job_stats", "job_submit"]);

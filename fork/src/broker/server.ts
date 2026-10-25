@@ -13,7 +13,8 @@ import { createEmitter, type CloudEvent } from "../events/job-state.ts";
 import { createJobStateOutbox, eventsForTransition, transitionColumns } from "../events/outbox.ts";
 import { SWEEP_MS, decisionRoute, requestApproval, sweepApprovals } from "./approvals.ts";
 import { PHASE_0_1, validateSpec, type Platform, type TeamSpec } from "../team/spec.ts";
-import type { JobRow, Store } from "./store.ts";
+import type { JobRow, Report, Store } from "./store.ts";
+import type { HandoffReport } from "./handoff.ts";
 
 export const API = "/plantworks/v1";
 /** A largest-possible envelope (65,536-character prompt, 200-character title) is well under this. */
@@ -42,7 +43,55 @@ export function jobRecord(row: JobRow) {
   return {
     jobId: row.job_id, team: row.team, class: row.class, state: row.state, detail: JSON.parse(row.detail), priority: row.priority,
     createdAt: row.created_at, updatedAt: row.updated_at, result: row.result === null ? null : JSON.parse(row.result),
+    // W4-A: the seat has closed and the broker waits for the worker's report on this closure.
+    ...(row.state === "running" && row.report_wait_since !== null && row.report === null && row.report_closing_id !== null && row.qitem_id !== null
+      ? { reportWanted: { closingTransitionId: row.report_closing_id, qitemId: row.qitem_id } } : {}),
   };
+}
+
+/** W4-A report limits: a snapshot lists at most this many files, each path at most this long. */
+export const REPORT_LIMITS = { files: 256, pathBytes: 2048, skippedChars: 512, bodyBytes: 1024 * 1024 };
+
+/** Checks a worker's report body (POST /jobs/{id}/report): the fence fields and the Report shape. */
+export function validateReport(body: unknown, jobId: string): { ok: true; fence: { seat: string; qitemId: string; closingTransitionId: number }; report: Report } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const b = (body ?? {}) as Record<string, any>;
+  const str = (v: unknown) => typeof v === "string" && v.length > 0;
+  const count = (v: unknown) => Number.isInteger(v) && (v as number) >= 0;
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return { ok: false, errors: ["the body must be a JSON object"] };
+  const known = ["seat", "qitemId", "closingTransitionId", "usage", "usageStatus", "artifacts", "handoff"];
+  for (const k of Object.keys(b)) if (!known.includes(k)) errors.push(`unknown field ${k}`);
+  if (!str(b.seat)) errors.push("seat must be a non-empty string");
+  if (!str(b.qitemId)) errors.push("qitemId must be a non-empty string");
+  if (!Number.isInteger(b.closingTransitionId)) errors.push("closingTransitionId must be an integer");
+  if (b.usage !== null && !(typeof b.usage === "object" && count(b.usage?.promptTokens) && count(b.usage?.completionTokens) && Object.keys(b.usage).length === 2)) {
+    errors.push("usage must be null or {promptTokens, completionTokens}, both integers >= 0");
+  }
+  if (b.usageStatus !== undefined && !(b.usage === null && b.usageStatus === "unavailable(worker restarted)")) errors.push("usageStatus is only 'unavailable(worker restarted)', with usage null");
+  const a = b.artifacts as Record<string, any> | undefined;
+  if (typeof a !== "object" || a === null || a.observedBy !== "worker") errors.push("artifacts must be an object with observedBy 'worker'");
+  else if (a.branch === null) {
+    if (!(typeof a.skipped === "string" && a.skipped.length > 0 && a.skipped.length <= REPORT_LIMITS.skippedChars) || Object.keys(a).length !== 3) errors.push(`artifacts without a branch carry exactly skipped (1-${REPORT_LIMITS.skippedChars} characters) and observedBy`);
+  } else {
+    if (a.branch !== `pw/${jobId}`) errors.push(`artifacts.branch must be pw/${jobId}`);
+    if (typeof a.commit !== "string" || !/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(a.commit)) errors.push("artifacts.commit must be a 40- or 64-hex commit id");
+    if (Object.keys(a).length !== 4) errors.push("artifacts with a branch carry exactly branch, commit, files and observedBy");
+    if (!Array.isArray(a.files) || a.files.length === 0 || a.files.length > REPORT_LIMITS.files) errors.push(`artifacts.files must list 1-${REPORT_LIMITS.files} files`);
+    else for (const f of a.files) {
+      if (typeof f?.path !== "string" || !f.path || Buffer.byteLength(f.path) > REPORT_LIMITS.pathBytes || typeof f.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(f.sha256) || Object.keys(f).length !== 2) {
+        errors.push(`each file is {path (1-${REPORT_LIMITS.pathBytes} bytes), sha256 (64 hex)}`);
+        break;
+      }
+    }
+  }
+  // PW-34: optional, {artifact} (the parsed file, checked against the team's sre.agents when the job finishes) or {unavailable}.
+  const h = b.handoff as Record<string, unknown> | undefined;
+  if (h !== undefined && !(typeof h === "object" && h !== null && !Array.isArray(h) && Object.keys(h).length === 1
+    && ("artifact" in h || (typeof h.unavailable === "string" && h.unavailable.length > 0 && h.unavailable.length <= REPORT_LIMITS.skippedChars)))) {
+    errors.push(`handoff must be {artifact} or {unavailable} (1-${REPORT_LIMITS.skippedChars} characters)`);
+  }
+  if (errors.length) return { ok: false, errors };
+  return { ok: true, fence: { seat: b.seat, qitemId: b.qitemId, closingTransitionId: b.closingTransitionId }, report: { usage: b.usage, ...(b.usageStatus ? { usageStatus: b.usageStatus } : {}), artifacts: a as Report["artifacts"], ...(h ? { handoff: h as HandoffReport } : {}) } };
 }
 
 export type Emit = (row: Pick<JobRow, "job_id" | "team">, state: JobState, detail?: Record<string, unknown>) => void;
@@ -168,6 +217,32 @@ export function createBroker(opts: BrokerOptions): Hono & { sweepApprovals: () =
     const { row: next, detail } = moved;
     emit(next, "cancelled", detail);
     return c.json(jobRecord(next));
+  });
+
+  // W4-A: the worker's report for a job whose seat has closed it. Advisory: it never finishes a job.
+  const reportTooLarge = () => fail(413, "too_large", `the report is over ${REPORT_LIMITS.bodyBytes} bytes`);
+  app.post(`${API}/jobs/:jobId/report`, bodyLimit({ maxSize: REPORT_LIMITS.bodyBytes, onError: reportTooLarge }), async (c) => {
+    const jobId = c.req.param("jobId");
+    if (!store.get(jobId)) return fail(404, "not_found", `no job ${jobId}`);
+    let body: unknown;
+    try { body = await c.req.json(); } catch (e) {
+      return (e as Error).name === "BodyLimitError" ? reportTooLarge() : fail(400, "invalid_report", "body is not JSON");
+    }
+    const v = validateReport(body, jobId);
+    if (!v.ok) return fail(400, "invalid_report", v.errors.join("; "), { errors: v.errors });
+    const stored = store.storeReport(jobId, v.fence, v.report);
+    if (stored === "not_found") return fail(404, "not_found", `no job ${jobId}`);
+    if (stored !== "stored") {
+      const why = {
+        job_settled: "the job is past running; the report is not used",
+        report_not_wanted: "the seat has not closed this job yet, so no report is wanted",
+        report_fence: "seat or qitemId doesn't match the job's claim",
+        report_stale: "closingTransitionId is not the closure the broker is waiting on",
+        report_exists: "a report is already stored for this closure (first write wins)",
+      }[stored];
+      return fail(409, stored, why, { job: jobRecord(store.get(jobId)!) });
+    }
+    return c.json(jobRecord(store.get(jobId)!));
   });
 
   decisionRoute(API, fail, jobRecord)(app, ctx);

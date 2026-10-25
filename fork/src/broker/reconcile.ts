@@ -9,8 +9,11 @@ import type { Store } from "./store.ts";
 /**
  * Reconcile at most one batch from persisted qitem ids. Ambiguity always keeps the slot. With
  * `recovery`, a stuck claim-next handoff is first finished with its own qitem id (recoverHandoff).
+ * With `reportWaitMs` (W4-A), a job the seat has closed stays running until the worker's report is
+ * stored or that long has passed, counted from the persisted start of the wait; 0 finishes at once.
+ * `teams` gives a handoff-sre closure its team's `sre.agents` (PW-34).
  */
-export function createReconciler(store: Store, daemon: DaemonQueue, emit: Emit, log: (line: string) => void = (line) => process.stderr.write(`${line}\n`), limit = 16, recovery?: { brokerSession: string; now?: () => number }, teams?: Map<string, TeamSpec>) {
+export function createReconciler(store: Store, daemon: DaemonQueue, emit: Emit, log: (line: string) => void = (line) => process.stderr.write(`${line}\n`), limit = 16, recovery?: { brokerSession: string; now?: () => number }, reportWaitMs = 0, teams?: Map<string, TeamSpec>) {
   let cursor = 0;
   const lastLogged = new Map<string, number>();
   return async () => {
@@ -42,21 +45,31 @@ export function createReconciler(store: Store, daemon: DaemonQueue, emit: Emit, 
         emit(running.row, "running", running.detail);
         continue;
       }
-      const outcome = seatOutcome(item);
-      if (!outcome) continue;
+      const closure = seatClosure(item);
+      if (!closure) {
+        // A reopen or handoff during the wait: the report would predate further work.
+        if (current.state === "running" && current.report_wait_since !== null) store.clearReportWait(current.job_id);
+        continue;
+      }
       if (current.state === "claimed") {
         const running = store.transition(current.job_id, "running");
         emit(running.row, "running", running.detail);
         current = running.row;
       }
       if (current.state !== "running") continue;
-      // PW-34: the handoff is resolved once, here, and persisted, so its event is byte-identical on redelivery.
-      // ponytail: no report yet (W4-A), so every handoff is `unavailable: missing`; pass the report's handoff member here when it lands.
-      const handoff = outcome === "handoff-sre" ? resolveHandoff(undefined, teams?.get(current.team)) : undefined;
-      const { row: done, detail } = handoff
-        ? store.transition(current.job_id, "done", { outcome: handoff.outcome, closure: "handoff-sre" }, { result: JSON.stringify({ text: null, artifacts: [], handoff: handoff.data }) })
-        : store.transition(current.job_id, "done", { outcome: outcome as DoneOutcome }, { result: JSON.stringify({ text: null, artifacts: [] }) });
-      emit(done, done.state, detail);
+      // PW-34: a handoff is resolved against the team's sre.agents where the job finishes, and persisted.
+      const sre = closure.outcome === "handoff-sre" ? { sre: teams?.get(current.team)?.sre } : undefined;
+      if (!reportWaitMs) {
+        // No report is waited for, so the handoff is `unavailable: missing`, rejected-by-checks.
+        const handoff = sre && resolveHandoff(undefined, sre);
+        const { row: done, detail } = handoff
+          ? store.transition(current.job_id, "done", { outcome: handoff.outcome, closure: "handoff-sre" }, { result: JSON.stringify({ text: null, artifacts: [], handoff: handoff.data }) })
+          : store.transition(current.job_id, "done", { outcome: closure.outcome as DoneOutcome }, { result: JSON.stringify({ text: null, artifacts: [] }) });
+        emit(done, done.state, detail);
+        continue;
+      }
+      const settled = store.settleReport(current.job_id, closure.outcome, closure.closingId, reportWaitMs, sre);
+      if (settled) emit(settled.row, settled.row.state, settled.detail);
     } catch (error) {
       const now = Date.now();
       if (now - (lastLogged.get(qitemId) ?? 0) >= 60_000) {
@@ -85,6 +98,11 @@ export function createReconciler(store: Store, daemon: DaemonQueue, emit: Emit, 
  * proves nothing. This is logical completion reported by the seat, not proof that Pi stopped.
  */
 export function seatOutcome(item: QueueObservation): DoneOutcome | "handoff-sre" | null {
+  return seatClosure(item)?.outcome ?? null;
+}
+
+/** seatOutcome, with the transitionId of the closing transition it accepted (W4-A: the report belongs to that closure). */
+export function seatClosure(item: QueueObservation): { outcome: DoneOutcome | "handoff-sre"; closingId: number } | null {
   if (item.state !== "done" || item.transitions.at(-1)?.state !== "done") return null;
   let first = item.transitions.length - 1;
   while (first > 0 && item.transitions[first - 1]!.state === "done") first--;
@@ -93,8 +111,8 @@ export function seatOutcome(item: QueueObservation): DoneOutcome | "handoff-sre"
   const reason = item.closureReason ?? null;
   const target = item.closureTarget ?? null;
   if (closing.closureReason !== reason || closing.closureTarget !== target) return null;
-  if (reason === "no-follow-on" && target === null) return "succeeded";
-  if (reason === "denied" && target === "rejected-by-checks") return "rejected-by-checks";
-  if (reason === "escalation" && target === "handoff-sre") return "handoff-sre";
+  if (reason === "no-follow-on" && target === null) return { outcome: "succeeded", closingId: closing.transitionId };
+  if (reason === "denied" && target === "rejected-by-checks") return { outcome: "rejected-by-checks", closingId: closing.transitionId };
+  if (reason === "escalation" && target === "handoff-sre") return { outcome: "handoff-sre", closingId: closing.transitionId };
   return null;
 }

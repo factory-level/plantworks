@@ -14,6 +14,7 @@ import { buildSpec, validateSpec, PHASE_0_1, type TeamSpec } from "../team/spec.
 import type { QueueObservation } from "./claim.ts";
 import { HANDOFF_FILE, readHandoffFile, resolveHandoff } from "./handoff.ts";
 import { createReconciler, seatOutcome } from "./reconcile.ts";
+import { validateReport } from "./server.ts";
 import { openStore, type Store, type TransitionRow } from "./store.ts";
 
 const SEAT = "long-01@t";
@@ -53,7 +54,7 @@ test("1. reconcile: only the seat's own escalation/handoff-sre closure ends the 
     let item = closed("escalation", "handoff-sre", { actor: "someone-else@t" });
     const daemon = { create: async () => {}, claim: async () => {}, inspect: async () => item };
     const emitted: string[] = [];
-    const reconcile = createReconciler(store, daemon as never, (r, s) => emitted.push(s), () => {}, 16, undefined, new Map([["t", { sre } as TeamSpec]]));
+    const reconcile = createReconciler(store, daemon as never, (r, s) => emitted.push(s), () => {}, 16, undefined, 0, new Map([["t", { sre } as TeamSpec]]));
     await reconcile();
     assert.equal(store.get(JOB)!.state, "running", "a foreign closure proves nothing");
     item = { ...closed("escalation", "handoff-sre"), qitemId: `q-${JOB}` };
@@ -257,5 +258,68 @@ test("7. boundary: fork/src imports no Slack or Eve client, and the handoff code
   assert.deepEqual(offending, []);
   for (const f of ["broker/handoff.ts", "broker/wake.ts", "broker/reconcile.ts", "broker/claim.ts", "broker/worker.ts"]) {
     assert.doesNotMatch(readFileSync(join(src, f), "utf8"), /["'](social-media|harness-hg|platform-sre)["']/, `${f} has no team-specific branch`);
+  }
+});
+
+test("W4-A integration: through the report wait, the report's handoff decides the event; no handoff member is missing, the bound is timeout", async () => {
+  const spec = new Map([["t", { sre } as TeamSpec]]);
+  const report = (handoff?: unknown) => ({ usage: null, artifacts: { branch: null, skipped: "no workspace", observedBy: "worker" }, ...(handoff ? { handoff } : {}) }) as never;
+  // Through the reconciler: the seat's escalation/handoff-sre closure opens the wait; the stored report finishes it.
+  const store = openStore(":memory:");
+  try {
+    runningJob(store);
+    const item = { ...closed("escalation", "handoff-sre"), qitemId: `q-${JOB}` };
+    const daemon = { create: async () => {}, claim: async () => {}, inspect: async () => item };
+    const reconcile = createReconciler(store, daemon as never, () => {}, () => {}, 16, undefined, 30_000, spec);
+    await reconcile();
+    assert.equal(store.get(JOB)!.state, "running", "the closure opens the report wait");
+    assert.equal(store.storeReport(JOB, { seat: SEAT, qitemId: `q-${JOB}`, closingTransitionId: 7 }, report({ artifact: { ...valid, outcome: "succeeded" } })), "stored");
+    await reconcile();
+    assert.deepEqual(JSON.parse(lastTransition(store).detail), { outcome: "succeeded", closure: "handoff-sre" }, "the artifact's outcome");
+    const [, handoff] = eventsOf(store);
+    assert.equal(handoff!.data.targetAgent, "platform-sre");
+    assert.equal(handoff!.data.slackApp, "PLANTWORKS_SRE_SLACK_PLATFORM");
+    assert.equal(JSON.parse(store.get(JOB)!.result!).reportProvenance, "worker-asserted");
+  } finally { store.close(); }
+
+  // At the store: a report without a handoff member, an invalid one, and the bound.
+  for (const [why, r, expect] of [
+    ["no handoff member", report(), "missing"],
+    ["the worker says unavailable", report({ unavailable: "invalid: symlink" }), "invalid: symlink"],
+    ["an invalid artifact", report({ artifact: { targetAgent: "platform-sre" } }), "invalid: summary must be 1..2000 characters"],
+    ["the wait runs out", undefined, "timeout"],
+  ] as const) {
+    let clock = 0;
+    const s = openStore(":memory:", () => new Date(clock));
+    try {
+      runningJob(s);
+      assert.equal(s.settleReport(JOB, "handoff-sre", 7, 30_000, { sre }), null, `${why}: the wait opens`);
+      if (r) assert.equal(s.storeReport(JOB, { seat: SEAT, qitemId: `q-${JOB}`, closingTransitionId: 7 }, r), "stored");
+      else clock = 30_000;
+      const settled = s.settleReport(JOB, "handoff-sre", 7, 30_000, { sre });
+      assert.deepEqual(settled?.detail, { outcome: "rejected-by-checks", closure: "handoff-sre" }, why);
+      assert.deepEqual(JSON.parse(s.get(JOB)!.result!).handoff, { unavailable: expect }, why);
+    } finally { s.close(); }
+  }
+  // A non-handoff closure is unchanged by the extra argument.
+  const plain = openStore(":memory:");
+  try {
+    runningJob(plain);
+    plain.settleReport(JOB, "succeeded", 7, 30_000, undefined);
+    plain.storeReport(JOB, { seat: SEAT, qitemId: `q-${JOB}`, closingTransitionId: 7 }, report());
+    assert.deepEqual(plain.settleReport(JOB, "succeeded", 7, 30_000, undefined)?.detail, { outcome: "succeeded" });
+    assert.equal("handoff" in JSON.parse(plain.get(JOB)!.result!), false);
+  } finally { plain.close(); }
+});
+
+test("W4-A integration: the report route accepts an optional handoff of {artifact} or {unavailable} only", () => {
+  const body = { seat: SEAT, qitemId: "q", closingTransitionId: 7, usage: null, artifacts: { branch: null, skipped: "no workspace", observedBy: "worker" } };
+  assert.equal(validateReport(body, JOB).ok, true, "no handoff member");
+  const ok = validateReport({ ...body, handoff: { artifact: valid } }, JOB);
+  assert.ok(ok.ok && ok.report.handoff && "artifact" in ok.report.handoff, "the artifact is kept as sent, checked when the job finishes");
+  assert.equal(validateReport({ ...body, handoff: { unavailable: "missing" } }, JOB).ok, true);
+  for (const h of [null, [], "x", {}, { artifact: valid, unavailable: "missing" }, { unavailable: "" }, { unavailable: "x".repeat(513) }, { other: 1 }]) {
+    const v = validateReport({ ...body, handoff: h }, JOB);
+    assert.ok(!v.ok && v.errors.some((e) => /^handoff must be/.test(e)), JSON.stringify(h));
   }
 });
