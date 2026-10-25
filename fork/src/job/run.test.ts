@@ -306,6 +306,14 @@ test("D14 host lock path: XDG_RUNTIME_DIR, else <base>/plantworks-<uid>; a direc
   mkdirSync(join(loose, `plantworks-${uid}`), { mode: 0o700 });
   chmodSync(join(loose, `plantworks-${uid}`), 0o777);
   assert.throws(() => hostLockPath({}, loose), (e: Error) => e instanceof RejectedJob && /is group- or world-writable \(mode 777\)/.test(e.message));
+  // An unsafe parent (r2): world-writable without the sticky bit lets anyone rename the checked
+  // directory away and make the next run lock a fresh one. Refused; with the sticky bit, as /tmp has, accepted.
+  const openParent = mkdtempSync(join(tmpdir(), "pw-openparent-"));
+  chmodSync(openParent, 0o777);
+  assert.throws(() => hostLockPath({ XDG_RUNTIME_DIR: openParent }), (e: Error) => e instanceof RejectedJob && /parent .* is group- or world-writable without the sticky bit \(mode 777\)/.test(e.message));
+  assert.equal(existsSync(join(openParent, "plantworks")), false, "nothing was created under it");
+  chmodSync(openParent, 0o1777);
+  assert.equal(hostLockPath({ XDG_RUNTIME_DIR: openParent }).path, join(openParent, "plantworks", "job.lock"), "a sticky shared parent is fine");
   const swapped = mkdtempSync(join(tmpdir(), "pw-swap-"));
   symlinkSync(mkdtempSync(join(tmpdir(), "pw-elsewhere-")), join(swapped, `plantworks-${uid}`));
   assert.throws(() => hostLockPath({}, swapped), (e: Error) => e instanceof RejectedJob && /is not a directory \(a symlink or a file\)/.test(e.message));

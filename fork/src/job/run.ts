@@ -4,7 +4,7 @@
 // OpenRig daemon and no broker: the runner plays the broker's part for exactly one job.
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, closeSync } from "node:fs";
+import { existsSync, linkSync, lstatSync, mkdirSync, realpathSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, closeSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { DEFAULT_CLASS, classByName, type WorkerClass } from "../llm/classes.ts";
 import { readEndpoint } from "../llm/endpoint.ts";
@@ -309,6 +309,18 @@ export function hostLockPath(env: NodeJS.ProcessEnv = process.env, base = "/tmp"
   const [dir, source] = xdg && isAbsolute(xdg)
     ? [join(xdg, "plantworks"), "the host default under $XDG_RUNTIME_DIR; PLANTWORKS_JOB_LOCK overrides it"]
     : [join(base, `plantworks-${uid}`), `the host default ${join(base, `plantworks-${uid}`)} (no $XDG_RUNTIME_DIR); PLANTWORKS_JOB_LOCK overrides it`];
+  // Every directory above the lock's must be one nobody else can rename entries in: owned by this
+  // user or root, and not group- or world-writable unless sticky (like /tmp). Otherwise someone
+  // could move the checked directory away, and the next run would lock a fresh one alongside.
+  for (let up = realpathSync(dirname(dir)); ; up = dirname(up)) {
+    const a = lstatSync(up);
+    const unsafe = !a.isDirectory() ? "is not a directory"
+      : a.uid !== uid && a.uid !== 0 ? `is owned by uid ${a.uid}`
+      : a.mode & 0o022 && !(a.mode & 0o1000) ? `is group- or world-writable without the sticky bit (mode ${(a.mode & 0o7777).toString(8)})`
+      : undefined;
+    if (unsafe) throw new RejectedJob(`the job lock directory's parent ${JSON.stringify(up)} ${unsafe}, so another user could replace the lock directory; refusing to run. Fix that directory, or set PLANTWORKS_JOB_LOCK to a path under directories only you can change`);
+    if (up === dirname(up)) break;
+  }
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const st = lstatSync(dir);
   const problem = !st.isDirectory() ? "is not a directory (a symlink or a file)"
