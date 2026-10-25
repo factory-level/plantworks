@@ -5,12 +5,24 @@
 import { isLoopbackBind } from "../../../packages/daemon/dist/middleware/auth-bearer-token.js";
 import type { Endpoint } from "./endpoint.ts";
 
-/** One model call: append `add` prompt tokens, ask for `maxTokens`, then (compaction) keep only `keep` tokens of history. */
-export type Step = { add: number; maxTokens: number; keep?: number };
+/**
+ * One model call: append `add` prompt tokens (a tool result when the previous call asked for a tool,
+ * else a user message), ask for `maxTokens`, then record the reply: a tool call when `tool` is set,
+ * else text. A compaction call then keeps only `keep` tokens of history.
+ */
+export type Step = { add: number; maxTokens: number; tool?: boolean; keep?: number };
 export type Profile = { name: string; steps: (window: number) => Step[] };
 
-/** The system prompt plus tool definitions every Pi call starts with, shared across sessions (prefix-cacheable). */
+/** The system prompt every Pi call starts with, shared across sessions (prefix-cacheable). */
 export const SYSTEM_TOKENS = 3000;
+
+/** Pi's default tools, sent with every call as Pi does: their definitions are part of each prefill. */
+const param = (name: string) => ({ type: "object", properties: { [name]: { type: "string" } }, required: [name] });
+export const TOOLS = [
+  { type: "function", function: { name: "read", description: "Read a file", parameters: param("path") } },
+  { type: "function", function: { name: "edit", description: "Replace text in a file", parameters: param("path") } },
+  { type: "function", function: { name: "bash", description: "Run a shell command", parameters: param("command") } },
+];
 
 /**
  * SYNTHETIC profiles, derived from the PW-30 card text ("prefill-heavy, tool-call turns, compaction"),
@@ -18,16 +30,19 @@ export const SYSTEM_TOKENS = 3000;
  * Compaction follows the worker's Pi settings: a quarter of the window reserved, three eighths kept.
  */
 export const PROFILES: Profile[] = [
-  { name: "prefill-heavy", steps: () => [{ add: 9000, maxTokens: 300 }, { add: 200, maxTokens: 300 }] },
-  { name: "tool-calls", steps: () => [{ add: 300, maxTokens: 150 }, ...Array.from({ length: 7 }, () => ({ add: 700, maxTokens: 150 }))] },
+  // Ask, read a large file (its contents come back as a tool result), answer.
+  { name: "prefill-heavy", steps: () => [{ add: 200, maxTokens: 100, tool: true }, { add: 9000, maxTokens: 300 }] },
+  // Seven short tool calls, each answered by a tool result, then the answer.
+  { name: "tool-calls", steps: () => [{ add: 300, maxTokens: 150, tool: true }, ...Array.from({ length: 6 }, () => ({ add: 700, maxTokens: 150, tool: true })), { add: 700, maxTokens: 150 }] },
   {
     name: "compaction",
     steps: (window) => {
-      const steps: Step[] = [];
-      let context = SYSTEM_TOKENS;
-      while (context + 2200 <= window * 0.75) { steps.push({ add: 2000, maxTokens: 200 }); context += 2200; }
-      steps.push({ add: 0, maxTokens: 1000, keep: Math.floor(window * 3 / 8) });
-      steps.push({ add: 2000, maxTokens: 200 }, { add: 2000, maxTokens: 200 });
+      const steps: Step[] = [{ add: 300, maxTokens: 200, tool: true }];
+      let context = SYSTEM_TOKENS + 500;
+      while (context + 2200 <= window * 0.75) { steps.push({ add: 2000, maxTokens: 200, tool: true }); context += 2200; }
+      // The last tool result arrives and the context is summarised, then work goes on from the summary.
+      steps.push({ add: 2000, maxTokens: 1000, keep: Math.floor(window * 3 / 8) });
+      steps.push({ add: 300, maxTokens: 200, tool: true }, { add: 2000, maxTokens: 200 });
       return steps;
     },
   },
@@ -54,22 +69,34 @@ export type LevelResult = {
   jobsPerHourEstimated: number;
 };
 
+type Message = { role: string; content: string | null; tool_call_id?: string; tool_calls?: unknown[] };
+
 async function session(endpoint: Endpoint, model: string, profile: Profile, window: number, seed: string, timeoutMs: number, calls: Call[]) {
-  const messages: { role: string; content: string }[] = [{ role: "system", content: filler(SYSTEM_TOKENS, "system") }];
+  const messages: Message[] = [{ role: "system", content: filler(SYSTEM_TOKENS, "system") }];
+  let pendingTool: string | undefined;
   for (const [i, step] of profile.steps(window).entries()) {
-    if (step.add) messages.push({ role: "user", content: filler(step.add, `${seed}-${i}`) });
+    const content = filler(step.add, `${seed}-${i}`);
+    messages.push(pendingTool ? { role: "tool", tool_call_id: pendingTool, content } : { role: "user", content });
+    pendingTool = undefined;
     const started = performance.now();
     const res = await fetch(`${endpoint.url}/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json", ...(endpoint.apiKey ? { authorization: `Bearer ${endpoint.apiKey}` } : {}) },
-      body: JSON.stringify({ model, messages, max_tokens: step.maxTokens, stream: false }),
+      body: JSON.stringify({ model, messages, tools: TOOLS, max_tokens: step.maxTokens, stream: false }),
+      // A redirect could carry the load somewhere checkBenchTarget never saw: refuse it.
+      redirect: "error",
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) throw new Error(`POST /chat/completions returned ${res.status}`);
     const body = (await res.json()) as { usage?: { prompt_tokens?: number; completion_tokens?: number } };
     if (typeof body.usage?.completion_tokens !== "number") throw new Error("the endpoint reported no usage; tokens/s would be a guess");
     calls.push({ ms: performance.now() - started, promptTokens: body.usage.prompt_tokens ?? 0, completionTokens: body.usage.completion_tokens });
-    messages.push({ role: "assistant", content: filler(step.maxTokens, `${seed}-${i}-reply`) });
+    // The history is the profile's, not the model's reply, so every run sends the same traffic.
+    const reply = filler(step.maxTokens, `${seed}-${i}-reply`);
+    if (step.tool) {
+      pendingTool = `call-${seed}-${i}`;
+      messages.push({ role: "assistant", content: null, tool_calls: [{ id: pendingTool, type: "function", function: { name: "read", arguments: JSON.stringify({ path: reply }) } }] });
+    } else messages.push({ role: "assistant", content: reply });
     if (step.keep !== undefined) messages.splice(1, messages.length - 1, { role: "user", content: filler(step.keep, `${seed}-summary`) });
   }
 }
@@ -89,7 +116,8 @@ export async function benchLevel(endpoint: Endpoint, model: string, concurrency:
         await session(endpoint, model, PROFILES[(w + s) % PROFILES.length], opts.window, `c${concurrency}-w${w}-s${s}`, opts.callTimeoutMs, calls);
         sessionSeconds.push((performance.now() - t) / 1000);
       } catch (e) {
-        errors.push((e as Error).message);
+        const cause = (e as Error).cause as Error | undefined;
+        errors.push(cause?.message ? `${(e as Error).message}: ${cause.message}` : (e as Error).message);
       }
     }
   }));

@@ -3,9 +3,11 @@
 // known in advance. No real endpoint, no inference.
 import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import { once } from "node:events";
 import { Command } from "commander";
 import { llmVerb } from "./command.ts";
-import { checkBenchTarget, findKnee, runBench, type LevelResult } from "./bench.ts";
+import { checkBenchTarget, findKnee, runBench, TOOLS, type LevelResult } from "./bench.ts";
 import { stubModel, stubServingModel } from "../job/fixtures/stubs.ts";
 
 const open = new Set<() => Promise<unknown>>();
@@ -76,4 +78,36 @@ test("bench counts failed sessions, exits 1, and treats a failing level as past 
   const level = (concurrency: number, outputTokensPerSecond: number, errors = 0) => ({ concurrency, outputTokensPerSecond, errors }) as LevelResult;
   assert.equal(findKnee([level(1, 10), level(2, 19), level(4, 40, 1)]), 2);
   assert.equal(findKnee([level(1, 10), level(2, 20), level(4, 40)]), null, "still scaling: no knee yet");
+});
+
+test("bench refuses a redirect: a loopback URL can't forward the load to an endpoint the target check never saw", async () => {
+  const elsewhere = await stubModel("x");
+  open.add(elsewhere.close);
+  const redirector = createServer((req, res) => { req.resume(); res.writeHead(307, { location: `${elsewhere.url}/chat/completions` }).end(); });
+  redirector.listen(0, "127.0.0.1");
+  await once(redirector, "listening");
+  open.add(() => new Promise((r) => redirector.close(r)));
+  const report = await runBench({ url: `http://127.0.0.1:${(redirector.address() as { port: number }).port}/v1` }, "qwen3.5:9b", { levels: [1], sessions: 1, window: 16384, callTimeoutMs: 5000, minGain: 0.1 });
+  assert.equal(report.levels[0].errors, 1);
+  assert.match(report.levels[0].firstError!, /redirect/);
+  assert.equal(elsewhere.requests.length, 0, "nothing reached the redirect's target");
+});
+
+test("bench traffic is Pi-shaped: tool definitions on every call, tool calls answered by tool results", async () => {
+  const model = await stubModel("x");
+  open.add(model.close);
+  await runBench({ url: model.url }, "qwen3.5:9b", { levels: [1], sessions: 3, window: 16384, callTimeoutMs: 5000, minGain: 0.1 });
+  const bodies = model.requests.map((r) => r.body);
+  assert.equal(bodies.length, 2 + 8 + 7);
+  for (const b of bodies) assert.deepEqual(b.tools, TOOLS);
+  // The tool-calls session (the worker's second, offset 1): 7 tool calls, each answered in the next call.
+  const last = bodies[2 + 8 - 1].messages as { role: string; tool_call_id?: string; tool_calls?: { id: string }[] }[];
+  const asked = last.flatMap((m) => m.tool_calls?.map((c) => c.id) ?? []);
+  const answered = last.filter((m) => m.role === "tool").map((m) => m.tool_call_id);
+  assert.equal(asked.length, 7);
+  assert.deepEqual(answered, asked, "every tool call is followed by its result");
+  // Compaction (calls 10-16 at 16K: a start, 3 growing tool turns, the summary, 2 more): the call
+  // after the summary carries only the system prompt, the summary and the new turn.
+  assert.deepEqual(bodies[15].messages.map((m: { role: string }) => m.role), ["system", "user", "user"]);
+  assert.ok(bodies[14].messages.length > 6, "the summary call itself sees the full history");
 });
