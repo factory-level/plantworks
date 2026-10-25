@@ -70,14 +70,15 @@ export function branchConflict(cwd: string, jobId: string): string | undefined {
   }
 }
 
+/** Paths a snapshot never takes: the fork's own working files (for example .plantworks/handoff.json). */
+const OWN = ".plantworks/";
+
 /**
- * After Pi has stopped: commits the work tree against HEAD to `pw/<jobId>`, or says why not.
- * Everything that can fail runs before the branch is written, so a failure leaves no branch.
+ * The work tree as a git tree object, built on a temporary index seeded from HEAD, with nothing the
+ * job could have planted run (see the header). Skip-worktree paths and the fork's own `.plantworks/`
+ * keep HEAD's entry, so `.plantworks/` never reaches a snapshot even when the job wrote there.
  */
-export async function snapshotWork(cwd: string, jobId: string, message: string): Promise<Artifacts> {
-  const repo = repoOf(cwd);
-  if ("skipped" in repo) return { branch: null, skipped: repo.skipped };
-  const { top } = repo;
+function workTree(top: string): string {
   const scratch = mkdtempSync(join(tmpdir(), "pw-index-"));
   try {
     const index = { GIT_INDEX_FILE: join(scratch, "index") };
@@ -86,11 +87,11 @@ export async function snapshotWork(cwd: string, jobId: string, message: string):
     // HEAD's paths (from the index, without touching the work tree) and untracked, not-ignored files.
     // Submodules keep HEAD's entry; a nested repository (a path ending in /) isn't descended into.
     const tracked = nul(git(top, ["ls-files", "-z", "-s"], index)).map((l) => ({ mode: l.slice(0, 6), path: l.slice(l.indexOf("\t") + 1) }));
-    const untracked = nul(git(top, ["ls-files", "-z", "--others", "--exclude-standard"], index)).filter((p) => !p.endsWith("/"));
+    const untracked = nul(git(top, ["ls-files", "-z", "--others", "--exclude-standard"], index)).filter((p) => !p.endsWith("/") && !p.startsWith(OWN));
     // Paths the user's own index marks skip-worktree (sparse checkout) aren't in the work tree on
     // purpose: they keep HEAD's entry rather than reading as deleted. The real index is only read.
     const sparse = new Set(nul(git(top, ["ls-files", "-z", "-t"])).filter((l) => l.startsWith("S ")).map((l) => l.slice(2)));
-    const paths = [...tracked.filter((e) => e.mode !== "160000" && !sparse.has(e.path)).map((e) => e.path), ...untracked];
+    const paths = [...tracked.filter((e) => e.mode !== "160000" && !sparse.has(e.path) && !e.path.startsWith(OWN)).map((e) => e.path), ...untracked];
     const zero = "0".repeat(git(top, ["rev-parse", "HEAD"]).length);
     const regular: string[] = [];
     const lines: string[] = [];
@@ -108,17 +109,45 @@ export async function snapshotWork(cwd: string, jobId: string, message: string):
     for (const path of regular) if (!ids.has(path)) ids.set(path, git(top, ["hash-object", "-w", "--no-filters", "--", path]));
     for (const path of regular) lines.push(`${lstatSync(join(top, path)).mode & 0o111 ? "100755" : "100644"} ${ids.get(path)}\t${path}`);
     if (lines.length) git(top, ["update-index", "-z", "--index-info"], index, lines.map((l) => `${l}\0`).join(""));
-    const tree = git(top, ["write-tree"], index);
-    if (tree === git(top, ["rev-parse", "HEAD^{tree}"])) return { branch: null, skipped: "the job changed nothing in the work tree" };
-    const changed = nul(git(top, ["diff-tree", "-r", "-z", "--no-renames", "--name-only", "--diff-filter=d", "HEAD", tree]));
-    const blobs = changed.map((path) => git(top, ["rev-parse", `${tree}:${path}`]));
-    const files: { path: string; sha256: string }[] = [];
-    for (let i = 0; i < changed.length; i++) files.push({ path: changed[i]!, sha256: await blobSha256(top, blobs[i]!) });
-    const commit = git(top, ["commit-tree", tree, "-p", "HEAD", "-m", message], IDENTITY);
-    // Last, and only now: the empty old value makes it fail rather than move a branch that appeared meanwhile.
-    git(top, ["update-ref", `refs/heads/${branchFor(jobId)}`, commit, ""]);
-    return { branch: branchFor(jobId), commit, files };
+    return git(top, ["write-tree"], index);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
+}
+
+/**
+ * W4-A: the work tree as it is now, before a broker job can change it, as an unreferenced commit on
+ * HEAD. The job's snapshot takes it as its parent, so `files` lists only that job's changes. Nothing
+ * refers to it, so `git gc --prune=now` may remove it; the snapshot then says so.
+ */
+export function takeBaseline(cwd: string): { commit: string } | { skipped: string } {
+  const repo = repoOf(cwd);
+  if ("skipped" in repo) return { skipped: repo.skipped };
+  return { commit: git(repo.top, ["commit-tree", workTree(repo.top), "-p", "HEAD", "-m", "Plantworks job baseline"], IDENTITY) };
+}
+
+/**
+ * After Pi has stopped: commits the work tree to `pw/<jobId>`, against `base` (a commit from
+ * takeBaseline; default HEAD), or says why not. `replace` is the job's own earlier snapshot commit,
+ * when the same job is snapshotted again (W4-A, a changed closure). Everything that can fail runs before the branch is
+ * written, so a failure leaves no branch.
+ */
+export async function snapshotWork(cwd: string, jobId: string, message: string, base = "HEAD", replace?: string): Promise<Artifacts> {
+  const repo = repoOf(cwd);
+  if ("skipped" in repo) return { branch: null, skipped: repo.skipped };
+  const { top } = repo;
+  try { git(top, ["rev-parse", "--verify", "--quiet", `${base}^{commit}`]); } catch { return { branch: null, skipped: `baseline unreadable: ${base} is not a commit here (pruned, or from another repository)` }; }
+  const nul = (s: string) => s.split("\0").filter(Boolean);
+  const tree = workTree(top);
+  if (tree === git(top, ["rev-parse", `${base}^{tree}`])) return { branch: null, skipped: "the job changed nothing in the work tree" };
+  const changed = nul(git(top, ["diff-tree", "-r", "-z", "--no-renames", "--name-only", "--diff-filter=d", base, tree]));
+  const blobs = changed.map((path) => git(top, ["rev-parse", `${tree}:${path}`]));
+  const files: { path: string; sha256: string }[] = [];
+  for (let i = 0; i < changed.length; i++) files.push({ path: changed[i]!, sha256: await blobSha256(top, blobs[i]!) });
+  const commit = git(top, ["commit-tree", tree, "-p", base, "-m", message], IDENTITY);
+  // Last, and only now. The old value makes it a compare-and-swap: empty (the branch must not exist yet)
+  // or, for a re-snapshot of the same job after its closure changed, exactly the commit this worker
+  // wrote before. Anything else there means someone else's branch, and it fails rather than move it.
+  git(top, ["update-ref", `refs/heads/${branchFor(jobId)}`, commit, replace ?? ""]);
+  return { branch: branchFor(jobId), commit, files };
 }

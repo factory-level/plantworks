@@ -8,6 +8,7 @@ import { writeSeatFiles } from "../seat/pi-seat-files.ts";
 import { loadPlatform } from "../team/command.ts";
 import { seatLiveness } from "../seat/liveness.ts";
 import { loadTeams } from "./server.ts";
+import { promptFileProblem, report, take, type Take } from "./report.ts";
 
 /** The seat's governor port: loopback, next to the broker (7534). Fixed, so a restarted worker keeps the seat's baseUrl valid. */
 export const GOVERNOR_PORT = 7535;
@@ -33,12 +34,17 @@ export async function governSeat(opts: { team: string; seat: string; class?: str
     port: opts.port,
     // PW-29: opt-in, for a vLLM served with --scheduling-policy priority.
     priorityHints: (opts.env ?? process.env).PLANTWORKS_LLM_PRIORITY === "1",
+    // W4-A: no model call goes out before the job's baselines are taken. Always on the worker path,
+    // since every broker job may be asked for a report and the daemon wakes Pi before the claim
+    // answer. Between jobs there should be no calls; one that comes then is held and counts toward
+    // the next job, since it can't be told apart from that job's own earliest calls.
+    holdUntilArmed: true,
     // ponytail: reported only; the job's broker state is not changed from here (fail-closed, PW-19).
     onFail: (reason) => log(`plantworks worker: ${opts.seat} hit ${reason} (consecutive model calls cut at the ${workerClass.deadlineSeconds}s deadline); the broker job is left as it is`),
   });
   try {
     const agentDir = writeSeatFiles({ openrigHome: opts.openrigHome, session: opts.seat, className, governorUrl: governor.url, workerClass, toolProfile: spec.classes[className]!.toolProfile });
-    return { governor, agentDir, className, timeoutSeconds: spec.classes[className]!.timeoutSeconds, classPriority: spec.classes[className]!.priority ?? 0 };
+    return { governor, agentDir, className, timeoutSeconds: spec.classes[className]!.timeoutSeconds, classPriority: spec.classes[className]!.priority ?? 0, workspace: spec.classes[className]!.workspace };
   } catch (e) {
     await governor.close();
     throw e;
@@ -64,7 +70,7 @@ export function workerVerb(pw: Command): void {
       if (!Number.isInteger(pollMs) || pollMs < 250 || pollMs > 60_000) throw new Error("--poll-ms must be 250..60000");
       const port = Number(opts.governorPort);
       if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new Error("--governor-port must be 0..65535");
-      const { governor, agentDir, className, timeoutSeconds, classPriority } = await governSeat({ team: opts.team, seat: opts.seat, class: opts.class, teamsDir: opts.teams ?? process.env.PLANTWORKS_TEAMS_DIR, platform: opts.platform ?? process.env.PLANTWORKS_PLATFORM_FILE, port, openrigHome: process.env.OPENRIG_HOME });
+      const { governor, agentDir, className, timeoutSeconds, classPriority, workspace } = await governSeat({ team: opts.team, seat: opts.seat, class: opts.class, teamsDir: opts.teams ?? process.env.PLANTWORKS_TEAMS_DIR, platform: opts.platform ?? process.env.PLANTWORKS_PLATFORM_FILE, port, openrigHome: process.env.OPENRIG_HOME });
       process.stdout.write(`${opts.seat}: class ${className} governed at ${governor.url}; Pi files in ${agentDir}\n`);
       let stopping = false;
       process.once("SIGINT", () => { stopping = true; });
@@ -92,8 +98,27 @@ export function workerVerb(pw: Command): void {
         }
         return classPriority;
       };
-      const waitForDone = async (jobId: string, timeoutS: number) => {
+      /**
+       * W4-A: once the seat has closed the job, the broker asks for the job's report (reportWanted on
+       * the record), once per closure. 200 stored; any 409 or 400 is final (the same body would get the
+       * same answer); a 404 means a broker without the route or the job, which still finishes at its
+       * bound; anything else is asked again.
+       */
+      const sendReport = async (t: Take, wanted: { closingTransitionId: number; qitemId: string }): Promise<boolean> => {
+        const body = { seat: opts.seat, qitemId: wanted.qitemId, closingTransitionId: wanted.closingTransitionId, ...(await report(t, governor.usage(), workspace)) };
+        const res = await fetch(`${base}/plantworks/v1/jobs/${encodeURIComponent(t.jobId)}/report`, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(15_000) }).catch(() => null);
+        if (!res) return false;
+        if (res.ok || res.status === 409) return true;
+        // The same body would be refused again (the report is kept within the limits, so this is a bug); say it once.
+        if (res.status === 400) { process.stderr.write(`plantworks worker: the broker refused ${t.jobId}'s report (400 ${(await res.text()).slice(0, 200)}); not retried\n`); return true; }
+        if (res.status === 404) { process.stderr.write(`plantworks worker: the broker has no report route; ${t.jobId} finishes without usage or artifacts\n`); return true; }
+        return false;
+      };
+      const waitForDone = async (jobId: string, timeoutS: number, t?: Take) => {
         process.stdout.write(`waiting for broker completion of ${jobId}\n`);
+        // Reported per closure, not per job: a qitem reopened and closed again gets a new closing id,
+        // and the broker then waits for a report on that one (with a fresh snapshot, same baseline).
+        let reportedFor: number | undefined;
         const timer = setTimeout(() => {
           governor.cutOff(`${jobId} passed its ${timeoutS}s timeout`);
           process.stderr.write(`plantworks worker: ${jobId} passed its ${timeoutS}s timeout; the seat's model calls are cut off. Pi and its tools may still be running, so the job and its slot stay held until the seat closes it\n`);
@@ -104,8 +129,12 @@ export function workerVerb(pw: Command): void {
             await sleep();
             const status = await fetch(`${base}/plantworks/v1/jobs/${encodeURIComponent(jobId)}`, { headers, signal: AbortSignal.timeout(15_000) }).catch(() => null);
             if (!status?.ok) continue; // broker/daemon uncertainty keeps this worker from taking another job
-            const record = await status.json() as { state: string };
+            const record = await status.json() as { state: string; reportWanted?: { closingTransitionId?: unknown; qitemId?: unknown } };
             if (record.state === "done") return;
+            const wanted = record.reportWanted;
+            if (t && wanted && Number.isInteger(wanted.closingTransitionId) && typeof wanted.qitemId === "string" && wanted.closingTransitionId !== reportedFor) {
+              if (await sendReport(t, wanted as { closingTransitionId: number; qitemId: string })) reportedFor = wanted.closingTransitionId as number;
+            }
             if (["failed", "cancelled", "retried"].includes(record.state) && noted !== record.state) {
               noted = record.state;
               process.stderr.write(`plantworks worker: ${jobId} is ${record.state} in the broker, which isn't the seat's completion; ${opts.seat} takes no next job\n`);
@@ -133,20 +162,31 @@ export function workerVerb(pw: Command): void {
         }
         // The timer starts now, not at the job's claim, so a cut-off after a restart comes late, never early.
         // PW-29: a held job's envelope isn't at hand; its stored priority comes from the broker.
+        // W4-A: baselines first, then the governor is armed (priority, then the workspace hold), so no
+        // model reply can come before them. A held job wasn't seen to start, so it has none.
+        const takeUp = (jobId: string, recovered: boolean) => take(jobId, governor.usage(), { recovered, workspace, openrigHome: process.env.OPENRIG_HOME!, seat: opts.seat });
+        const settle = () => { governor.setPriority(undefined); governor.setArmed(false); };
         for (const jobId of held ?? []) {
           if (stopping) break;
+          const t = takeUp(jobId, true);
           governor.setPriority(await storedPriority(jobId));
-          await waitForDone(jobId, timeoutSeconds);
-          governor.setPriority(undefined);
+          governor.setArmed(true);
+          await waitForDone(jobId, timeoutSeconds, t);
+          settle();
         }
         while (!stopping) {
+          // PW-12 (broker half): checked before every claim, never after one, since a claim wakes Pi.
+          const refused = workspace ? promptFileProblem(workspace) : undefined;
+          if (refused) { process.stderr.write(`plantworks worker: ${opts.seat}: ${refused}\n`); await sleep(); continue; }
           const claim = await fetch(`${base}/plantworks/v1/claim-next`, { method: "POST", headers, body: JSON.stringify({ team: opts.team, seat: opts.seat, ...(opts.class ? { class: opts.class } : {}) }), signal: AbortSignal.timeout(15_000) });
           let jobId: string;
           let timeoutS = timeoutSeconds;
+          let t: Take;
           if (claim.status === 503 || claim.status === 409) {
             const body = await claim.json().catch(() => ({})) as { error?: string; jobId?: string };
             if ((body.error === "handoff_unconfirmed" || body.error === "reservation_lost") && body.jobId) {
               jobId = body.jobId;
+              t = takeUp(jobId, false);
               governor.setPriority(await storedPriority(jobId)); // no envelope in this answer: ask the broker
             }
             else { await sleep(); continue; }
@@ -156,11 +196,13 @@ export function workerVerb(pw: Command): void {
             const claimed = await claim.json() as { job: { jobId: string; priority?: number }; envelope?: { timeoutSeconds?: number; priority?: JobPriority } };
             jobId = claimed.job.jobId;
             timeoutS = claimed.envelope?.timeoutSeconds ?? timeoutSeconds;
+            t = takeUp(jobId, false);
             // PW-29: the same effective priority the broker ordered the claim by. The seat runs one job at a time.
             governor.setPriority(typeof claimed.job.priority === "number" ? claimed.job.priority : classPriority + JOB_PRIORITIES[claimed.envelope?.priority ?? "normal"]);
           }
-          await waitForDone(jobId, timeoutS);
-          governor.setPriority(undefined);
+          governor.setArmed(true);
+          await waitForDone(jobId, timeoutS, t);
+          settle();
         }
       } finally {
         // Pi's model calls stop working with the governor: none goes to the endpoint ungoverned.

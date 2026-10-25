@@ -25,6 +25,12 @@ export interface QueueClass {
   maxAttempts: number;
   /** Base priority of the class's jobs, -100..100; lower is claimed first. Absent means 0. */
   priority?: number;
+  /**
+   * W4-A (D16): the absolute path, on the seat host, of the git work tree the deployment runs this
+   * class's Pi seats in. The worker verifies it and snapshots a job's changes there
+   * (fork/docs/design/broker-report.md). Absent: no artifacts on the broker path.
+   */
+  workspace?: string;
 }
 
 /**
@@ -138,7 +144,7 @@ export function validateSpec(spec: unknown, platform: Platform = PHASE_0_1): str
     const at = `classes.${name}`;
     if (!DNS_NAME.test(name)) errors.push(`${at}: class names must be DNS-safe`);
     if (!obj(c)) { errors.push(`${at} must be an object`); continue; }
-    unknownFields(errors, `${at}.`, c, ["slots", "model", "context", "perCall", "toolProfile", "approval", "approvalTtlSeconds", "timeoutSeconds", "maxAttempts", "priority"]);
+    unknownFields(errors, `${at}.`, c, ["slots", "model", "context", "perCall", "toolProfile", "approval", "approvalTtlSeconds", "timeoutSeconds", "maxAttempts", "priority", "workspace"]);
     const ctx = obj(c.context) ? c.context : {};
     const call = obj(c.perCall) ? c.perCall : {};
     unknownFields(errors, `${at}.context.`, ctx, ["maxContextTokens", "thinkingTokens"]);
@@ -168,6 +174,7 @@ export function validateSpec(spec: unknown, platform: Platform = PHASE_0_1): str
     if (!int(c.timeoutSeconds, 1)) errors.push(`${at}.timeoutSeconds must be a positive integer`);
     if (!int(c.maxAttempts, 1)) errors.push(`${at}.maxAttempts must be a positive integer`);
     if (c.priority !== undefined && !(int(c.priority, -100) && (c.priority as number) <= 100)) errors.push(`${at}.priority must be an integer from -100 to 100`);
+    if (c.workspace !== undefined && (typeof c.workspace !== "string" || !c.workspace.startsWith("/") || c.workspace.includes("\0"))) errors.push(`${at}.workspace must be an absolute path`);
     // Rule 4: there are at least as many worker seats as slots.
     const seats = perTrain && obj(perTrain.workers) && int(spec.trains, 1) ? (spec.trains as number) * (Number(perTrain.workers[name]) || 0) : 0;
     if (int(c.slots) && seats < (c.slots as number)) errors.push(`${at}: ${c.slots} slots but only ${seats} worker seats (trains × perTrain.workers.${name})`);

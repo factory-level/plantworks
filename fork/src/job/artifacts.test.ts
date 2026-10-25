@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RejectedJob, runJob, type RunOptions } from "./run.ts";
-import { snapshotWork } from "./artifacts.ts";
+import { snapshotWork, takeBaseline } from "./artifacts.ts";
 import { stubConsumer, stubModel } from "./fixtures/stubs.ts";
 
 const fakePi = [process.execPath, fileURLToPath(new URL("./fixtures/fake-pi.mjs", import.meta.url))];
@@ -161,4 +161,39 @@ test("under sparse checkout, files outside the cone keep HEAD's version instead 
   assert.ok(result.branch, JSON.stringify(result));
   assert.deepEqual(result.files.map((f) => f.path), ["keep/new.txt"]);
   assert.equal(git(dir, "cat-file", "blob", `${result.commit}:far/x.txt`), "far", "kept from HEAD");
+});
+
+test("W4-A: a baseline taken at take-up keeps an earlier job's changes out of this job's snapshot", async () => {
+  const dir = repo();
+  writeFileSync(join(dir, "earlier.txt"), "left by the previous job\n"); // uncommitted, as a job leaves it
+  const base = takeBaseline(dir);
+  assert.ok("commit" in base, JSON.stringify(base));
+  writeFileSync(join(dir, "mine.txt"), "this job's work\n");
+  const result = await snapshotWork(dir, jobId, "m", base.commit);
+  assert.ok(result.branch, JSON.stringify(result));
+  assert.deepEqual(result.files.map((f) => f.path), ["mine.txt"], "only this job's change is listed");
+  assert.equal(git(dir, "rev-parse", `${result.commit}^`), base.commit, "the snapshot's parent is the baseline");
+  assert.equal(git(dir, "rev-parse", `${base.commit}^`), git(dir, "rev-parse", "HEAD"), "and the baseline sits on HEAD");
+  assert.equal(git(dir, "for-each-ref", "--format=%(refname)", "refs/heads/"), `refs/heads/main\nrefs/heads/pw/${jobId}`, "the baseline itself is not a branch");
+  // A baseline that can't be read (pruned by gc, or from elsewhere) gives no snapshot, with the reason.
+  const other = repo();
+  writeFileSync(join(other, "x.txt"), "x\n");
+  assert.match((await snapshotWork(other, jobId, "m", base.commit) as { skipped: string }).skipped, /^baseline unreadable: /);
+  assert.equal(git(other, "branch", "--list", `pw/${jobId}`), "");
+});
+
+test("W4-A: the fork's own .plantworks/ never reaches a snapshot's tree, only the job's files do", async () => {
+  const dir = repo();
+  execFileSync("mkdir", ["-p", join(dir, ".plantworks")]);
+  writeFileSync(join(dir, ".plantworks", "handoff.json"), '{"secret":"not for the branch"}\n');
+  writeFileSync(join(dir, "work.txt"), "w\n");
+  const result = await snapshotWork(dir, jobId, "m");
+  assert.ok(result.branch, JSON.stringify(result));
+  assert.deepEqual(result.files.map((f) => f.path), ["work.txt"]);
+  assert.doesNotMatch(git(dir, "ls-tree", "-r", "--name-only", result.commit), /\.plantworks/, "not in the committed tree");
+  // Only .plantworks/ changed: nothing to snapshot.
+  const quiet = repo();
+  execFileSync("mkdir", ["-p", join(quiet, ".plantworks")]);
+  writeFileSync(join(quiet, ".plantworks", "handoff.json"), "{}\n");
+  assert.deepEqual(await snapshotWork(quiet, jobId, "m"), { branch: null, skipped: "the job changed nothing in the work tree" });
 });
