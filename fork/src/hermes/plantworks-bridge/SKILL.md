@@ -70,6 +70,7 @@ edit the board.
 | `done`, closure `handoff-sre` | blocked: needs a human to bring in the SRE agent |
 | `failed` | blocked, with the reason. A retry is a new attempt, and only on request |
 | `cancelled` | closed as cancelled, with the reason. Don't reopen it |
+| `retried` | leave it: the next attempt's job moves the card |
 
 When the budget runs out first, leave the card as it is and report the job as pending.
 
