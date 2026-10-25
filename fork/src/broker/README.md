@@ -453,9 +453,22 @@ fork-defined, pending the HarnessHG ack. The fork has no Slack or Eve code.
   member, `{artifact}` or `{unavailable}`. `settleReport` resolves it when the job finishes. A
   report without the member is `missing`, the wait running out is `timeout`, and with
   `PLANTWORKS_REPORT_WAIT_S=0` it is `missing`. All of these give `rejected-by-checks`.
-- **The worker doesn't send `handoff` yet.** That wiring is a follow-on after #111 (worker.ts).
-  Until then every handoff is `unavailable: missing`. The card is still blocked, so a person
-  still brings in the SRE agent.
+- **What the worker sends (W4-E, `report.ts`).** At take-up, for a verified workspace, the worker
+  records an lstat fingerprint of whatever is at `.plantworks/handoff.json`. At report time it
+  sends the `handoff` member:
+  - **`{artifact}`:** a file the job wrote or rewrote (any change to the path counts, even a
+    byte-identical rewrite of an older handoff);
+  - **exactly `{unavailable: "invalid"}`:** anything the job left at the path that isn't a readable,
+    regular, UTF-8 JSON file of 16 KiB or less inside the workspace. That covers a symlink, a
+    directory, an oversize file, a file outside the workspace, a read error, and a file that isn't
+    UTF-8 JSON;
+  - **exactly `{unavailable: "missing"}`:**
+    - nothing written;
+    - a path untouched since take-up, whatever is there, so a leftover never blames the job;
+    - no workspace, or an unverifiable one;
+    - a job recovered at worker start.
+
+  The detailed reason goes only to the worker's log, never on the wire.
 - **The event.** `plantworks.handoff.requested`, id `<jobId>:<transitionId>:handoff.requested`,
   is delivered by the durable outbox right after that transition's `job.state`. The handoff is
   resolved once, when the job finalises, and stored in the transition's result, so a redelivery

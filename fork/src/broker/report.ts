@@ -2,12 +2,13 @@
 // W4-A, the worker's side of the broker-path job report (fork/docs/design/broker-report.md): what a
 // worker records when it takes a job, and the report it sends once the seat has closed the job.
 // Everything here is worker-asserted data; the broker stores it as such and never lets it decide `done`.
-import { accessSync, constants, existsSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { snapshotWork, takeBaseline, type Artifacts } from "../job/artifacts.ts";
 import { PROJECT_PROMPT_FILES } from "../job/run.ts";
 import type { Usage } from "../llm/governor.ts";
 import { seatLiveness } from "../seat/liveness.ts";
+import { HANDOFF_FILE, readHandoffFile, type HandoffReport } from "./handoff.ts";
 
 export type ReportArtifacts = Artifacts & { observedBy: "worker" };
 
@@ -24,7 +25,12 @@ export function withinLimits(a: Artifacts): Artifacts {
   }
   return a;
 }
-export type JobReport = { usage: Usage | null; usageStatus?: string; artifacts: ReportArtifacts };
+/**
+ * W4-E: `.plantworks/handoff.json` as the report's optional `handoff` member. On the wire `unavailable`
+ * is exactly one category, `missing` or `invalid` (consumers match it, never parse it); the detail
+ * goes only to the worker's log.
+ */
+export type JobReport = { usage: Usage | null; usageStatus?: string; artifacts: ReportArtifacts; handoff: HandoffReport };
 
 /** What the worker holds for the job it runs: the baselines taken before the governor was armed. */
 export type Take = {
@@ -35,7 +41,21 @@ export type Take = {
   baseline: { commit: string } | { skipped: string };
   /** The job's last snapshot commit, if one was written: a later report for a new closure replaces exactly it. */
   snapshot?: string;
+  /** W4-E: the workspace passed verification at take-up, so its handoff file may be read. */
+  workspaceVerified?: boolean;
+  /**
+   * W4-E (r1): whatever was at the handoff path at take-up, valid or not (a non-JSON file, an oversize
+   * one, a symlink, a directory), as an lstat fingerprint. Still the same at report time means the job
+   * didn't write a handoff: `missing`, never `invalid`. Any change (a rewrite, even byte-identical,
+   * gets a new inode or mtime) means the job wrote one, and it is read as it now is.
+   */
+  handoffPresent?: string;
 };
+
+/** The lstat fingerprint of the handoff path, or undefined when nothing is there. */
+function handoffFingerprint(workspace: string): string | undefined {
+  try { const st = lstatSync(join(workspace, HANDOFF_FILE)); return `${st.dev}:${st.ino}:${st.mode}:${st.size}:${st.mtimeMs}`; } catch { return undefined; }
+}
 
 /**
  * Is `workspace` a tree this worker can vouch for? Absolute, present, readable, a git work tree, and
@@ -73,11 +93,27 @@ export function take(jobId: string, usageNow: Usage | undefined, opts: { recover
   if (problem) return { jobId, usageBase, baseline: { skipped: problem } };
   let baseline: Take["baseline"];
   try { baseline = takeBaseline(opts.workspace); } catch (e) { baseline = { skipped: `baseline unreadable: ${(e as Error).message.split("\n")[0]}` }; }
-  return { jobId, usageBase, baseline };
+  const present = handoffFingerprint(opts.workspace);
+  return { jobId, usageBase, baseline, workspaceVerified: true, ...(present ? { handoffPresent: present } : {}) };
 }
 
-/** After the seat has closed the job: the usage delta and the snapshot against the baseline. */
-export async function report(t: Take, usageNow: Usage | undefined, workspace: string | undefined): Promise<JobReport> {
+/** W4-E: the job's handoff, as the wire's `{artifact}` or a bare `{unavailable}` category, and the detail for the log. */
+export function handoffOf(t: Take, workspace: string | undefined): { handoff: HandoffReport; detail?: string } {
+  if (!workspace) return { handoff: { unavailable: "missing" }, detail: "no workspace" };
+  if (t.usageBase === null) return { handoff: { unavailable: "missing" }, detail: "baseline lost (worker restarted)" };
+  if (!t.workspaceVerified) return { handoff: { unavailable: "missing" }, detail: "skipped" in t.baseline ? t.baseline.skipped : "workspace unverifiable" };
+  // Untouched since take-up, whatever it is: the job wrote no handoff.
+  if (t.handoffPresent && handoffFingerprint(workspace) === t.handoffPresent) return { handoff: { unavailable: "missing" }, detail: "unchanged since take-up" };
+  // Changed or new: read as it now is. No content baseline: the fingerprint already says the job
+  // touched it, so even a byte-identical rewrite of an older handoff counts (r1).
+  const read = readHandoffFile(workspace);
+  if ("artifact" in read) return { handoff: { artifact: read.artifact } };
+  if (read.unavailable === "missing") return { handoff: { unavailable: "missing" }, detail: "no handoff file" };
+  return { handoff: { unavailable: "invalid" }, detail: read.unavailable };
+}
+
+/** After the seat has closed the job: the usage delta, the snapshot against the baseline, and the handoff. */
+export async function report(t: Take, usageNow: Usage | undefined, workspace: string | undefined, log: (line: string) => void = (l) => process.stderr.write(`${l}\n`)): Promise<JobReport> {
   const usage = t.usageBase && { promptTokens: (usageNow?.promptTokens ?? 0) - t.usageBase.promptTokens, completionTokens: (usageNow?.completionTokens ?? 0) - t.usageBase.completionTokens };
   let artifacts: Artifacts;
   if ("skipped" in t.baseline || !workspace) artifacts = { branch: null, skipped: "skipped" in t.baseline ? t.baseline.skipped : "no workspace" };
@@ -85,5 +121,8 @@ export async function report(t: Take, usageNow: Usage | undefined, workspace: st
     try { artifacts = await snapshotWork(workspace, t.jobId, `Plantworks job ${t.jobId}`, t.baseline.commit, t.snapshot); } catch (e) { artifacts = { branch: null, skipped: `the snapshot failed: ${(e as Error).message.split("\n")[0]}` }; }
     if (artifacts.branch) t.snapshot = artifacts.commit;
   }
-  return { usage, ...(usage ? {} : { usageStatus: "unavailable(worker restarted)" }), artifacts: { ...withinLimits(artifacts), observedBy: "worker" } };
+  const { handoff, detail } = handoffOf(t, workspace);
+  // The ordinary cases (no workspace, no file written) aren't worth a line; the rest are.
+  if (detail && "unavailable" in handoff && detail !== "no workspace" && detail !== "no handoff file") log(`plantworks worker: ${t.jobId} handoff ${handoff.unavailable} (${detail})`);
+  return { usage, ...(usage ? {} : { usageStatus: "unavailable(worker restarted)" }), artifacts: { ...withinLimits(artifacts), observedBy: "worker" }, handoff };
 }
