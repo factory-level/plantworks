@@ -15,6 +15,7 @@ import { runtimeRoutes } from "./runtime.ts";
 import { API, startBroker, loadTeams, type BrokerRoutes } from "./server.ts";
 import { openStore } from "./store.ts";
 import { parseSlotCaps } from "./slots.ts";
+import { sealedEnv } from "../test-support/sealed-env.ts";
 
 const seat = "worker-0@t";
 const first = "kb-t-card1-a1";
@@ -89,7 +90,7 @@ test("broker restart preserves drain; worker restart resumes the seat without sk
   const proxyUrl = `http://127.0.0.1:${(proxy.address() as { port: number }).port}`;
   const port = () => new URL(broker.url).port;
   const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
-  const workerEnv = { ...process.env, OPENRIG_HOME: home, PLANTWORKS_TEAMS_DIR: teamsDir, PLANTWORKS_PLATFORM_FILE: platform, PLANTWORKS_LLM_URL: "http://127.0.0.1:9/v1", PLANTWORKS_GOVERNOR_PORT: "0", PLANTWORKS_BROKER_URL: broker.url };
+  const workerEnv = sealedEnv({ OPENRIG_HOME: home, PLANTWORKS_TEAMS_DIR: teamsDir, PLANTWORKS_PLATFORM_FILE: platform, PLANTWORKS_LLM_URL: "http://127.0.0.1:9/v1", PLANTWORKS_GOVERNOR_PORT: "0", PLANTWORKS_BROKER_URL: broker.url });
   const drain = spawn(process.execPath, [bin, "pw", "worker", "drain", "--seat", seat, "--timeout-s", "0", "--poll-ms", "50"], { env: workerEnv, stdio: ["ignore", "pipe", "pipe"] });
   let drainErr = "";
   drain.stderr.setEncoding("utf8").on("data", (s) => drainErr += s);

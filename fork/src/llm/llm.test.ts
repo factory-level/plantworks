@@ -14,6 +14,7 @@ import { CLASSES, ceilingProblems } from "./classes.ts";
 import { preflight, readEndpoint } from "./endpoint.ts";
 import { governBody, startGovernor as startGovernorUntracked, usageOf, type CallRecord, type GovernorOptions } from "./governor.ts";
 import { emitTeam } from "../team/command.ts";
+import { sealedEnv } from "../test-support/sealed-env.ts";
 
 type Seen = { method: string; url: string; auth?: string; body: string };
 
@@ -223,7 +224,7 @@ test("`plantworks pw llm preflight` checks the class model against the endpoint"
   const s = await stub(models(["qwen3.5:9b"]));
   try {
     const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
-    const run = (env: object) => promisify(execFile)(process.execPath, [bin, "pw", "llm", "preflight", "--json"], { env: { ...process.env, ...env } });
+    const run = (env: object) => promisify(execFile)(process.execPath, [bin, "pw", "llm", "preflight", "--json"], { env: sealedEnv(env as Record<string, string>) });
     const ok = await run({ PLANTWORKS_LLM_URL: s.url });
     assert.equal(JSON.parse(ok.stdout).ok, true);
     await s.close();

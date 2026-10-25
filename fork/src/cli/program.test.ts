@@ -4,11 +4,12 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { sealedEnv } from "../test-support/sealed-env.ts";
 import { Command } from "commander";
 import { NAMES, PLANTWORKS_RELEASE, brandedVersion, createPlantworksProgram } from "./program.ts";
 
 const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
-const run = (...args: string[]) => execFileSync(process.execPath, [bin, ...args], { encoding: "utf8" });
+const run = (...args: string[]) => execFileSync(process.execPath, [bin, ...args], { env: sealedEnv(), encoding: "utf8" });
 
 test("adds the fork namespace on top of upstream and registers fork verbs under it", () => {
   const upstream = () => new Command("rig").addCommand(new Command("queue"));

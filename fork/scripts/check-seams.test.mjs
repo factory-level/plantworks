@@ -6,6 +6,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sealedEnv } from "../src/test-support/sealed-env.ts";
 import { checkSeams } from "./check-seams.mjs";
 
 const ledger = (seams = [], additions = []) => `# Seam ledger
@@ -64,7 +65,7 @@ test("flags every kind of unrecorded change", () => {
 });
 
 test("the CLI diffs from the merge-base with the upstream mirror", () => {
-  const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" };
+  const env = sealedEnv({ GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" });
   const repo = mkdtempSync(join(tmpdir(), "pw-seams-"));
   const git = (...args) => execFileSync("git", args, { cwd: repo, env, encoding: "utf8" });
   const write = (p, s) => { mkdirSync(join(repo, p, ".."), { recursive: true }); writeFileSync(join(repo, p), s); };
@@ -79,7 +80,7 @@ test("the CLI diffs from the merge-base with the upstream mirror", () => {
   git("switch", "-q", "main");
   write("fork/x.mjs", "x\n"); git("add", "-A"); git("commit", "-q", "-m", "fork");
   const script = fileURLToPath(new URL("./check-seams.mjs", import.meta.url));
-  const run = () => spawnSync(process.execPath, [script, "upstream-main"], { cwd: repo, encoding: "utf8" });
+  const run = () => spawnSync(process.execPath, [script, "upstream-main"], { cwd: repo, env, encoding: "utf8" });
   assert.equal(run().status, 0, run().stderr);
   write("src/a.ts", "changed by the fork\n"); git("commit", "-qam", "seam without a row");
   const failed = run();
