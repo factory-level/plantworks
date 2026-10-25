@@ -83,24 +83,26 @@ const governorUrl = (h: string) => (Object.values(JSON.parse(readFileSync(join(h
 const modelCall = (h: string) => fetch(`${governorUrl(h)}/chat/completions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "qwen3.5:9b", messages: [] }), signal: AbortSignal.timeout(10_000) });
 
 /** A stub broker: one job to claim (or one held at start), running until the seat "closes", then wanting a report. */
-function stubBroker(o: { held?: boolean; reportStatus?: () => number } = {}) {
-  const s = { claims: 0, closed: false, done: false, reports: [] as Record<string, unknown>[] };
+function stubBroker(o: { held?: boolean; reportStatus?: () => number; claimDelayMs?: number; finishOnReport?: boolean } = {}) {
+  const s = { claims: 0, closed: false, done: false, closingId: 7, reports: [] as Record<string, unknown>[] };
   const url = listen((req, res, body) => {
     const u = req.url!;
     if (req.method === "DELETE") return json(res, {});
     if (u.endsWith("/drain")) return json(res, { seat, draining: false, inFlight: o.held && !s.done ? [jobId] : [] });
     if (u === "/plantworks/v1/claim-next") {
       if (o.held || s.claims++) return res.writeHead(204).end();
-      return json(res, { job: { jobId, priority: 0 }, qitemId: "q1", seat, envelope: {} });
+      const answer = () => json(res, { job: { jobId, priority: 0 }, qitemId: "q1", seat, envelope: {} });
+      if (o.claimDelayMs) { setTimeout(answer, o.claimDelayMs); return; }
+      return answer();
     }
     if (u === `/plantworks/v1/jobs/${jobId}/report` && req.method === "POST") {
       s.reports.push(JSON.parse(body));
       const status = o.reportStatus?.() ?? 200;
-      if (status === 200) s.done = true;
+      if (status === 200 && o.finishOnReport !== false) s.done = true;
       return json(res, status === 200 ? { ok: true } : { error: status === 409 ? "report_exists" : "unavailable" }, status);
     }
     if (u === `/plantworks/v1/jobs/${jobId}`) {
-      return json(res, { jobId, state: s.done ? "done" : "running", priority: 0, ...(s.closed && !s.done ? { reportWanted: { closingTransitionId: 7, qitemId: "q1" } } : {}) });
+      return json(res, { jobId, state: s.done ? "done" : "running", priority: 0, ...(s.closed && !s.done ? { reportWanted: { closingTransitionId: s.closingId, qitemId: "q1" } } : {}) });
     }
     res.writeHead(404).end();
   });
@@ -192,4 +194,54 @@ test("W4-A: a 409 is final (one report); a 5xx is asked again", async () => {
     for (const close of [...open]) close();
     open.clear();
   }
+});
+
+test("W4-A: a new closure (the qitem reopened and closed again) gets its own report, with a fresh snapshot from the same baseline", async () => {
+  const ws = workspaceRepo();
+  const env = home(ws);
+  const { s, url } = stubBroker({ finishOnReport: false });
+  worker(env, await url, await llm());
+  await until(() => s.claims > 0);
+  assert.equal((await modelCall(env.h)).status, 200); // answered only once the worker took its baselines
+  writeFileSync(join(ws, "first.txt"), "1\n");
+  s.closed = true;
+  await until(() => s.reports.length === 1);
+  const first = s.reports[0] as { closingTransitionId: number; artifacts: { commit: string; files: { path: string }[] } };
+  assert.equal(first.closingTransitionId, 7);
+  // The seat reopens, works more and closes again: the broker resets its wait to the new closing id.
+  writeFileSync(join(ws, "second.txt"), "2\n");
+  s.closingId = 8;
+  await until(() => s.reports.length === 2);
+  const second = s.reports[1] as { closingTransitionId: number; artifacts: { branch: string; commit: string; files: { path: string }[] } };
+  assert.equal(second.closingTransitionId, 8, "the report answers the new closure");
+  assert.deepEqual(second.artifacts.files.map((f) => f.path).sort(), ["first.txt", "second.txt"], "all of the job's work, against the same take-up baseline");
+  assert.notEqual(second.artifacts.commit, first.artifacts.commit);
+  assert.equal(git(ws, "rev-parse", `pw/${jobId}`), second.artifacts.commit, "the job's branch moved from its own first snapshot to the new one");
+  assert.equal(git(ws, "rev-parse", `${second.artifacts.commit}^`), git(ws, "rev-parse", `${first.artifacts.commit}^`), "same baseline parent");
+  s.done = true;
+});
+
+test("W4-A: without a workspace and without priority hints, a call the seat makes before the claim answer is held, so the usage isn't undercounted", async () => {
+  const env = home();
+  const { s, url } = stubBroker({ claimDelayMs: 1500 });
+  worker(env, await url, await llm());
+  await until(() => { try { return governorUrl(env.h).length > 0; } catch { return false; } });
+  // The daemon woke Pi when the qitem was created; the worker hasn't the claim answer yet.
+  const early = modelCall(env.h);
+  await until(() => s.claims > 0);
+  assert.equal((await early).status, 200, "held until the worker took its baselines, then let through");
+  s.closed = true;
+  await until(() => s.reports.length > 0);
+  assert.deepEqual(s.reports[0]!.usage, { promptTokens: 10, completionTokens: 2 }, "the early call counts toward this job");
+  assert.deepEqual(s.reports[0]!.artifacts, { branch: null, skipped: "no workspace", observedBy: "worker" });
+});
+
+test("W4-A: a report stays within the broker's limits: too many files become a skipped reason, so the usage still arrives", async () => {
+  const { withinLimits, REPORT_LIMITS } = await import("./report.ts");
+  const files = Array.from({ length: 300 }, (_, i) => ({ path: `f${i}.txt`, sha256: "a".repeat(64) }));
+  assert.deepEqual(withinLimits({ branch: `pw/${jobId}`, commit: "c".repeat(40), files }), { branch: null, skipped: `too many files (300 > 256); the snapshot is on pw/${jobId} at ${"c".repeat(40)}, not listed` });
+  assert.match((withinLimits({ branch: `pw/${jobId}`, commit: "c".repeat(40), files: [{ path: "x".repeat(3000), sha256: "a".repeat(64) }] }) as { skipped: string }).skipped, /^a path over 2048 bytes/);
+  assert.equal((withinLimits({ branch: null, skipped: "y".repeat(2000) }) as { skipped: string }).skipped.length, REPORT_LIMITS.skippedChars);
+  const ok = { branch: `pw/${jobId}`, commit: "c".repeat(40), files: files.slice(0, 256) };
+  assert.equal(withinLimits(ok), ok, "within the limits it is unchanged");
 });

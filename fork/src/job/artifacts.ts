@@ -128,10 +128,11 @@ export function takeBaseline(cwd: string): { commit: string } | { skipped: strin
 
 /**
  * After Pi has stopped: commits the work tree to `pw/<jobId>`, against `base` (a commit from
- * takeBaseline; default HEAD), or says why not. Everything that can fail runs before the branch is
+ * takeBaseline; default HEAD), or says why not. `replace` is the job's own earlier snapshot commit,
+ * when the same job is snapshotted again (W4-A, a changed closure). Everything that can fail runs before the branch is
  * written, so a failure leaves no branch.
  */
-export async function snapshotWork(cwd: string, jobId: string, message: string, base = "HEAD"): Promise<Artifacts> {
+export async function snapshotWork(cwd: string, jobId: string, message: string, base = "HEAD", replace?: string): Promise<Artifacts> {
   const repo = repoOf(cwd);
   if ("skipped" in repo) return { branch: null, skipped: repo.skipped };
   const { top } = repo;
@@ -144,7 +145,9 @@ export async function snapshotWork(cwd: string, jobId: string, message: string, 
   const files: { path: string; sha256: string }[] = [];
   for (let i = 0; i < changed.length; i++) files.push({ path: changed[i]!, sha256: await blobSha256(top, blobs[i]!) });
   const commit = git(top, ["commit-tree", tree, "-p", base, "-m", message], IDENTITY);
-  // Last, and only now: the empty old value makes it fail rather than move a branch that appeared meanwhile.
-  git(top, ["update-ref", `refs/heads/${branchFor(jobId)}`, commit, ""]);
+  // Last, and only now. The old value makes it a compare-and-swap: empty (the branch must not exist yet)
+  // or, for a re-snapshot of the same job after its closure changed, exactly the commit this worker
+  // wrote before. Anything else there means someone else's branch, and it fails rather than move it.
+  git(top, ["update-ref", `refs/heads/${branchFor(jobId)}`, commit, replace ?? ""]);
   return { branch: branchFor(jobId), commit, files };
 }

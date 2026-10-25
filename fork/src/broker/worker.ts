@@ -34,8 +34,11 @@ export async function governSeat(opts: { team: string; seat: string; class?: str
     port: opts.port,
     // PW-29: opt-in, for a vLLM served with --scheduling-policy priority.
     priorityHints: (opts.env ?? process.env).PLANTWORKS_LLM_PRIORITY === "1",
-    // W4-A: with a workspace, no model call goes out before the job's baselines are taken.
-    holdUntilArmed: spec.classes[className]!.workspace !== undefined,
+    // W4-A: no model call goes out before the job's baselines are taken. Always on the worker path,
+    // since every broker job may be asked for a report and the daemon wakes Pi before the claim
+    // answer. Between jobs there should be no calls; one that comes then is held and counts toward
+    // the next job, since it can't be told apart from that job's own earliest calls.
+    holdUntilArmed: true,
     // ponytail: reported only; the job's broker state is not changed from here (fail-closed, PW-19).
     onFail: (reason) => log(`plantworks worker: ${opts.seat} hit ${reason} (consecutive model calls cut at the ${workerClass.deadlineSeconds}s deadline); the broker job is left as it is`),
   });
@@ -97,20 +100,25 @@ export function workerVerb(pw: Command): void {
       };
       /**
        * W4-A: once the seat has closed the job, the broker asks for the job's report (reportWanted on
-       * the record). It is sent once: 200 stored; any 409 is final; a 404 means a broker without the
-       * report route, which still finishes the job at its bound; anything else is asked again.
+       * the record), once per closure. 200 stored; any 409 or 400 is final (the same body would get the
+       * same answer); a 404 means a broker without the route or the job, which still finishes at its
+       * bound; anything else is asked again.
        */
       const sendReport = async (t: Take, wanted: { closingTransitionId: number; qitemId: string }): Promise<boolean> => {
         const body = { seat: opts.seat, qitemId: wanted.qitemId, closingTransitionId: wanted.closingTransitionId, ...(await report(t, governor.usage(), workspace)) };
         const res = await fetch(`${base}/plantworks/v1/jobs/${encodeURIComponent(t.jobId)}/report`, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(15_000) }).catch(() => null);
         if (!res) return false;
         if (res.ok || res.status === 409) return true;
+        // The same body would be refused again (the report is kept within the limits, so this is a bug); say it once.
+        if (res.status === 400) { process.stderr.write(`plantworks worker: the broker refused ${t.jobId}'s report (400 ${(await res.text()).slice(0, 200)}); not retried\n`); return true; }
         if (res.status === 404) { process.stderr.write(`plantworks worker: the broker has no report route; ${t.jobId} finishes without usage or artifacts\n`); return true; }
         return false;
       };
       const waitForDone = async (jobId: string, timeoutS: number, t?: Take) => {
         process.stdout.write(`waiting for broker completion of ${jobId}\n`);
-        let reported = false;
+        // Reported per closure, not per job: a qitem reopened and closed again gets a new closing id,
+        // and the broker then waits for a report on that one (with a fresh snapshot, same baseline).
+        let reportedFor: number | undefined;
         const timer = setTimeout(() => {
           governor.cutOff(`${jobId} passed its ${timeoutS}s timeout`);
           process.stderr.write(`plantworks worker: ${jobId} passed its ${timeoutS}s timeout; the seat's model calls are cut off. Pi and its tools may still be running, so the job and its slot stay held until the seat closes it\n`);
@@ -124,8 +132,8 @@ export function workerVerb(pw: Command): void {
             const record = await status.json() as { state: string; reportWanted?: { closingTransitionId?: unknown; qitemId?: unknown } };
             if (record.state === "done") return;
             const wanted = record.reportWanted;
-            if (t && !reported && wanted && Number.isInteger(wanted.closingTransitionId) && typeof wanted.qitemId === "string") {
-              reported = await sendReport(t, wanted as { closingTransitionId: number; qitemId: string });
+            if (t && wanted && Number.isInteger(wanted.closingTransitionId) && typeof wanted.qitemId === "string" && wanted.closingTransitionId !== reportedFor) {
+              if (await sendReport(t, wanted as { closingTransitionId: number; qitemId: string })) reportedFor = wanted.closingTransitionId as number;
             }
             if (["failed", "cancelled", "retried"].includes(record.state) && noted !== record.state) {
               noted = record.state;

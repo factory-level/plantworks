@@ -10,6 +10,20 @@ import type { Usage } from "../llm/governor.ts";
 import { seatLiveness } from "../seat/liveness.ts";
 
 export type ReportArtifacts = Artifacts & { observedBy: "worker" };
+
+/** The broker's report limits (#113): beyond them it answers 400, so the worker degrades instead. */
+export const REPORT_LIMITS = { files: 256, pathBytes: 2048, skippedChars: 512 };
+
+/** Keeps a report within the broker's limits: a too-big file list becomes a skipped reason, so the usage still arrives. */
+export function withinLimits(a: Artifacts): Artifacts {
+  if (a.branch === null) return { branch: null, skipped: a.skipped.slice(0, REPORT_LIMITS.skippedChars) };
+  const long = a.files.find((f) => Buffer.byteLength(f.path) > REPORT_LIMITS.pathBytes);
+  if (a.files.length > REPORT_LIMITS.files || long) {
+    const why = long ? `a path over ${REPORT_LIMITS.pathBytes} bytes` : `too many files (${a.files.length} > ${REPORT_LIMITS.files})`;
+    return { branch: null, skipped: `${why}; the snapshot is on ${a.branch} at ${a.commit}, not listed`.slice(0, REPORT_LIMITS.skippedChars) };
+  }
+  return a;
+}
 export type JobReport = { usage: Usage | null; usageStatus?: string; artifacts: ReportArtifacts };
 
 /** What the worker holds for the job it runs: the baselines taken before the governor was armed. */
@@ -19,6 +33,8 @@ export type Take = {
   usageBase: Usage | null;
   /** The tree baseline commit, or why there is none. */
   baseline: { commit: string } | { skipped: string };
+  /** The job's last snapshot commit, if one was written: a later report for a new closure replaces exactly it. */
+  snapshot?: string;
 };
 
 /**
@@ -66,7 +82,8 @@ export async function report(t: Take, usageNow: Usage | undefined, workspace: st
   let artifacts: Artifacts;
   if ("skipped" in t.baseline || !workspace) artifacts = { branch: null, skipped: "skipped" in t.baseline ? t.baseline.skipped : "no workspace" };
   else {
-    try { artifacts = await snapshotWork(workspace, t.jobId, `Plantworks job ${t.jobId}`, t.baseline.commit); } catch (e) { artifacts = { branch: null, skipped: `the snapshot failed: ${(e as Error).message.split("\n")[0]}` }; }
+    try { artifacts = await snapshotWork(workspace, t.jobId, `Plantworks job ${t.jobId}`, t.baseline.commit, t.snapshot); } catch (e) { artifacts = { branch: null, skipped: `the snapshot failed: ${(e as Error).message.split("\n")[0]}` }; }
+    if (artifacts.branch) t.snapshot = artifacts.commit;
   }
-  return { usage, ...(usage ? {} : { usageStatus: "unavailable(worker restarted)" }), artifacts: { ...artifacts, observedBy: "worker" } };
+  return { usage, ...(usage ? {} : { usageStatus: "unavailable(worker restarted)" }), artifacts: { ...withinLimits(artifacts), observedBy: "worker" } };
 }
