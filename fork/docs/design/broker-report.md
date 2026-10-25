@@ -16,7 +16,7 @@ Wave 3 established why it can't simply be added there (`wave3/report.md`, 00:26Z
   Upstream derives that actor from the transport header (`queue.ts:702-708`). The worker is a
   separate process and, by design, doesn't author that closure. That is the design's division of
   labour, not an enforced barrier: `transport:v1` isn't authentication, and a process that can reach
-  the daemon's API can send the seat's name (`require-sender-identity.ts:7`–`:9`; see the broker
+  the daemon can send the seat's name, with no token (`require-sender-identity.ts:7`–`:10`; see the broker
   README, "What a seat's closure proves").
 - **The worker has no ordering point.** The usage tally lives in the worker's governor. A worker
   write before Pi closes races the reconciler, and a write after the terminal state is refused

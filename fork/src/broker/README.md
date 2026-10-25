@@ -380,12 +380,13 @@ to the qitem destination and `identityProvenance: transport:v1`, and the closure
 **What a seat's closure proves.** `identityProvenance: transport:v1` says how the daemon got the
 closer's name: from the `X-OpenRig-Session` header on a direct request, which the CLI sets from the
 seat's `OPENRIG_SESSION_NAME`. Upstream is explicit that this **isn't authentication**: any process
-that can reach the daemon's API (with its bearer, when one is set) can send that header
-(`packages/daemon/src/routes/require-sender-identity.ts:7`–`:9`,
+that can reach the daemon can send that header, with no token, because the daemon's queue routes take
+no bearer (PW-16; `fork/container/README.md`)
+(`packages/daemon/src/routes/require-sender-identity.ts:7`–`:10`,
 `docs/as-built/architecture/coordination-primitive.md:432`–`:434`). So the rule above proves that the
 daemon recorded the closure as made by the destination seat over the transport, with no body-claimed,
 relayed or unknown-origin actor, and no reopen since. It does not prove which process sent it. The
-trust boundary is access to the daemon's API, the same as for every other queue write.
+trust boundary is network reachability of the daemon, the same as for every other queue write.
 
 It first confirms any matching queued reservation, then records broker `running` and `done`.
 Nothing maps to broker `failed`: the qitem state `failed` isn't a terminal closure upstream (only

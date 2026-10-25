@@ -143,13 +143,13 @@ qitem evidence (`fork/src/broker/README.md`, "Worker lifecycle").
   can switch, local or remote. A remote seat is refused a second time by its seat agent, whose
   allowlist has no `swap-pane` (`fork/src/remote/seat-agent.ts:14`; upstream's switch uses
   `swap-pane`, `packages/daemon/src/adapters/tmux.ts:714`). The switch fails closed and the seat
-  keeps its runtime. Moving a team to another runtime means changing the team spec, not the seat.
+  keeps its runtime. A Plantworks worker seat's runtime is fixed: it is always Pi.
 - **A seat's closure isn't authenticated.** The broker finishes a job only on the destination
   seat's latest `done` closure recorded with `transport:v1` provenance. Upstream states that
   `transport:v1` isn't authentication: the name comes from the `X-OpenRig-Session` header, and any
-  process that can reach the daemon's API can send it
-  (`packages/daemon/src/routes/require-sender-identity.ts:7`–`:9`). Access to the daemon's API is
-  the trust boundary (`fork/src/broker/README.md`, "What a seat's closure proves").
+  process that can reach the daemon can send it, with no token, since the queue routes take no
+  bearer (PW-16) (`packages/daemon/src/routes/require-sender-identity.ts:7`–`:10`). Network
+  reachability of the daemon is the trust boundary (`fork/src/broker/README.md`, "What a seat's closure proves").
 - **The broker path doesn't render seat files.** Only `pw job run` writes `agent/models.json`
   and `settings.json`, and starts the per-seat governor. Pi seats launched by the daemon use
   whatever their `PI_CODING_AGENT_DIR` holds, so the team's per-call limits are validated but not
