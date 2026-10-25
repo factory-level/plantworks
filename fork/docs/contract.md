@@ -55,7 +55,7 @@ fork-defined, pending HarnessHG acknowledgement, and comes from the PW-24 bridge
 | `held` | blocked: pending an approval decision |
 | `done`, outcome `succeeded` | done |
 | `done`, outcome `rejected-by-checks` | blocked, with the checks' reason |
-| `done`, closure `handoff-sre` (whatever the outcome) | blocked: a person brings in the SRE agent |
+| `done`, closure `handoff-sre` (whatever the outcome) | blocked: a person brings in the SRE agent. A `plantworks.handoff.requested` event follows this `job.state` (PW-34, [`../src/broker/README.md`](../src/broker/README.md#sre-handoff-and-wake-pause-pw-34-handoffts-wakets)); it changes no card, and consumers dedupe it on `id` |
 | `failed` | blocked, with the reason |
 | `cancelled` | closed |
 | `retried` | unchanged: the card follows the next attempt's job. A D15 addition (not in the PW-24 table), fork-defined pending HarnessHG acknowledgement |

@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { sealedEnv } from "../test-support/sealed-env.ts";
 import { promisify } from "node:util";
 import { emitTeam } from "./command.ts";
-import { PHASE_0_1, buildSpec, hermesProfileConfig, validateSpec, type TeamSpec } from "./spec.ts";
+import { PHASE_0_1, SRE_SLACK_REF, buildSpec, hermesProfileConfig, validateSpec, type TeamSpec } from "./spec.ts";
 
 // The ADR 0204 sample (Phase 0–1 values), as a team definition. The Hermes profile is derived.
 const definition = () => ({
@@ -121,14 +121,24 @@ test("the published fleet.schema.json names exactly the validator's fields", () 
   const schema = JSON.parse(readFileSync(new URL("../../schema/fleet.schema.json", import.meta.url), "utf8"));
   const keys = (o: any) => Object.keys(o.properties).sort();
   const s = spec();
-  assert.deepEqual(keys(schema), Object.keys(s).sort());
+  assert.deepEqual(keys(schema), [...Object.keys(s), "sre"].sort(), "sre is the one optional top-level member (PW-34)");
   assert.deepEqual(schema.required.sort(), Object.keys(s).sort());
   const cls = schema.properties.classes.additionalProperties;
-  assert.deepEqual(keys(cls), ["approval", "approvalTtlSeconds", "context", "maxAttempts", "model", "perCall", "priority", "slots", "timeoutSeconds", "toolProfile"]);
+  assert.deepEqual(keys(cls), ["approval", "approvalTtlSeconds", "context", "maxAttempts", "model", "perCall", "priority", "slots", "timeoutSeconds", "toolProfile", "workspace"]);
   assert.deepEqual(keys(cls.properties.context), Object.keys(s.classes.quick.context).sort());
   assert.deepEqual(keys(cls.properties.perCall), Object.keys(s.classes.quick.perCall).sort());
   assert.equal(schema.properties.hermesProfile.properties.kanban.properties.max_in_progress_per_profile.type, "integer");
   for (const part of ["perTrain", "endpoint", "hermesProfile"]) assert.deepEqual(keys(schema.properties[part]), Object.keys(s[part]).sort(), part);
   assert.deepEqual(keys(schema.properties.events), [...Object.keys(s.events), "auth"].sort());
   assert.deepEqual(schema.properties.events.required, ["callbackDefault", "approvalConsumer"]);
+  assert.deepEqual(keys(schema.properties.sre), ["agents"]);
+  assert.deepEqual(keys(schema.properties.sre.properties.agents.additionalProperties), ["slackApp"]);
+  assert.equal(schema.properties.sre.properties.agents.additionalProperties.properties.slackApp.pattern, SRE_SLACK_REF.source);
+});
+
+test("W4-A: a class's optional workspace must be an absolute path", () => {
+  assert.deepEqual(problems((d) => { d.classes.quick.workspace = "/srv/seats/quick"; }), []);
+  for (const bad of ["relative/dir", "", 42, "~/repo"]) {
+    assert.ok(problems((d) => { d.classes.quick.workspace = bad; }).some((e) => e.includes("classes.quick.workspace must be an absolute path")), JSON.stringify(bad));
+  }
 });

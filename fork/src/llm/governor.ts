@@ -30,6 +30,12 @@ export type GovernorOptions = {
    * `--scheduling-policy priority`, and Ollama has no priority, so nothing is sent unless enabled.
    */
   priorityHints?: boolean;
+  /**
+   * W4-A: hold every completion until `setArmed(true)`, whatever `priorityHints` says. A worker with a
+   * workspace arms the governor only after its usage and tree baselines are taken, so no model reply,
+   * and so no edit, can come before them.
+   */
+  holdUntilArmed?: boolean;
   /** The first job's effective priority, for a governor that serves one job (pw job run); setPriority changes it. */
   priority?: number;
 };
@@ -46,6 +52,8 @@ export type Governor = {
    * priority hints on, undefined holds model calls until a value is set, so no call goes out early.
    */
   setPriority: (priority: number | undefined) => void;
+  /** W4-A: with `holdUntilArmed`, completions wait until armed; `false` holds them again (after a job). */
+  setArmed: (armed: boolean) => void;
   /** PW-13: the tokens the endpoint reported so far, or undefined until a call reports usage. */
   usage: () => Usage | undefined;
 };
@@ -110,15 +118,20 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
   let reported = false;
   let priority: number | undefined = opts.priority;
   // With hints on, a model call waits until the seat's job priority is known: the daemon can wake
-  // Pi as soon as the qitem exists, before the worker has the claim response (PW-29).
-  // A held call whose client goes away is dropped, never sent later with another job's priority.
+  // Pi as soon as the qitem exists, before the worker has the claim response (PW-29). With
+  // holdUntilArmed (W4-A), it also waits until the worker arms the governor, a flag of its own, since
+  // without hints the priority stays undefined. A held call whose client goes away is dropped, never
+  // sent later for another job.
+  let armed = !opts.holdUntilArmed;
+  const ready = () => (!opts.priorityHints || priority !== undefined) && armed;
   const waiting = new Set<() => void>();
-  const priorityKnown = (signal: AbortSignal) => new Promise<void>((resolve) => {
-    if (priority !== undefined || signal.aborted) return resolve();
+  const released = (signal: AbortSignal) => new Promise<void>((resolve) => {
+    if (ready() || signal.aborted) return resolve();
     const release = () => { waiting.delete(release); signal.removeEventListener("abort", release); resolve(); };
     waiting.add(release);
     signal.addEventListener("abort", release, { once: true });
   });
+  const wake = () => { if (ready()) for (const release of [...waiting]) release(); };
   const inFlight = new Set<AbortController>();
 
   async function handle(req: IncomingMessage, res: ServerResponse) {
@@ -130,8 +143,8 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
     // Watch for the client going away from here on, including while the call is held below.
     const abort = new AbortController();
     res.on("close", () => abort.abort(new Error("client went away")));
-    if (completion && opts.priorityHints) {
-      await priorityKnown(abort.signal);
+    if (completion && (opts.priorityHints || opts.holdUntilArmed)) {
+      await released(abort.signal);
       if (abort.signal.aborted) return;
     }
     if (body && completion) body = governBody(body, c, opts.priorityHints ? priority : undefined);
@@ -226,7 +239,11 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
     usage: () => (reported ? { ...usage } : undefined),
     setPriority(n) {
       priority = n;
-      if (n !== undefined) for (const release of [...waiting]) release();
+      wake();
+    },
+    setArmed(on) {
+      armed = on;
+      wake();
     },
   };
 }

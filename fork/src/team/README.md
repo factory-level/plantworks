@@ -30,6 +30,12 @@ plantworks pw team validate out/<team>/team.json [--platform platform.json]
   in a comment, so it is a field here.
 - **`approvalTtlSeconds`** is the TTL that rule 6 requires for `approval: always`. The ADR
   doesn't name the field.
+- **`workspace`** (optional; W4-A, D16) is the absolute path, on the seat host, of the git work tree
+  the deployment runs this class's Pi seats in.
+  - The worker verifies it (absolute, present, a git work tree, co-located with the seat) and
+    snapshots each job's changes there as `pw/<jobId>`.
+  - The worker doesn't launch Pi, so running the seat in that tree is the deployment's contract.
+  - Absent: broker jobs carry no artifacts. See `../../docs/design/broker-report.md`.
 - **`priority`** (optional, -100..100, default 0) is a class's base job priority. The broker adds
   the job's own `priority` offset (urgent -3, high -1, normal 0, low +2) and claim-next takes the
   lowest first. claim-next serves one class per call, so today the class base is stored in the

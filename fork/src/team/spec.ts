@@ -9,6 +9,8 @@ import { ceilingProblems, type Ceilings } from "../llm/classes.ts";
 export const SPEC_VERSION = "plantworks/v1";
 /** ADR 0204: the default class has at most a 16K context. */
 export const DEFAULT_CLASS_CONTEXT = 16384;
+/** PW-34: a team spec's sre.agents slackApp, an operator reference; the event carries this name, never its value. */
+export const SRE_SLACK_REF = /^\$\{PLANTWORKS_SRE_SLACK_[A-Z0-9_]+\}$/;
 export const APPROVALS = ["never", "per-job", "always"] as const;
 export const TOOL_PROFILES = ["default", "trimmed"] as const;
 
@@ -25,6 +27,12 @@ export interface QueueClass {
   maxAttempts: number;
   /** Base priority of the class's jobs, -100..100; lower is claimed first. Absent means 0. */
   priority?: number;
+  /**
+   * W4-A (D16): the absolute path, on the seat host, of the git work tree the deployment runs this
+   * class's Pi seats in. The worker verifies it and snapshots a job's changes there
+   * (fork/docs/design/broker-report.md). Absent: no artifacts on the broker path.
+   */
+  workspace?: string;
 }
 
 /**
@@ -42,6 +50,8 @@ export interface TeamSpec {
   classes: Record<string, QueueClass>;
   events: { callbackDefault: string; approvalConsumer: string; auth?: { secretRef: string } };
   hermesProfile: { name: string; kanban: { max_in_progress_per_profile: number } };
+  /** PW-34: the SRE agents a job may hand off to. `slackApp` is an operator reference Hermes resolves; the fork never reads its value. */
+  sre?: { agents: Record<string, { slackApp: string }> };
 }
 
 /** What the platform allows. Phase 0–1 values; a platform file overrides any of them. */
@@ -83,7 +93,7 @@ export function buildSpec(definition: Record<string, unknown>): Record<string, u
 export function validateSpec(spec: unknown, platform: Platform = PHASE_0_1): string[] {
   const errors: string[] = [];
   if (!obj(spec)) return ["spec must be an object"];
-  unknownFields(errors, "", spec, ["specVersion", "team", "trains", "perTrain", "endpoint", "defaultClass", "classes", "events", "hermesProfile"]);
+  unknownFields(errors, "", spec, ["specVersion", "team", "trains", "perTrain", "endpoint", "defaultClass", "classes", "events", "hermesProfile", "sre"]);
   if (spec.specVersion !== SPEC_VERSION) errors.push(`specVersion must be ${SPEC_VERSION}`);
   // Rule 7: names are DNS-safe and unique (class names are unique as object keys).
   if (typeof spec.team !== "string" || !DNS_NAME.test(spec.team)) errors.push("team must be a DNS-safe name");
@@ -138,7 +148,7 @@ export function validateSpec(spec: unknown, platform: Platform = PHASE_0_1): str
     const at = `classes.${name}`;
     if (!DNS_NAME.test(name)) errors.push(`${at}: class names must be DNS-safe`);
     if (!obj(c)) { errors.push(`${at} must be an object`); continue; }
-    unknownFields(errors, `${at}.`, c, ["slots", "model", "context", "perCall", "toolProfile", "approval", "approvalTtlSeconds", "timeoutSeconds", "maxAttempts", "priority"]);
+    unknownFields(errors, `${at}.`, c, ["slots", "model", "context", "perCall", "toolProfile", "approval", "approvalTtlSeconds", "timeoutSeconds", "maxAttempts", "priority", "workspace"]);
     const ctx = obj(c.context) ? c.context : {};
     const call = obj(c.perCall) ? c.perCall : {};
     unknownFields(errors, `${at}.context.`, ctx, ["maxContextTokens", "thinkingTokens"]);
@@ -168,9 +178,24 @@ export function validateSpec(spec: unknown, platform: Platform = PHASE_0_1): str
     if (!int(c.timeoutSeconds, 1)) errors.push(`${at}.timeoutSeconds must be a positive integer`);
     if (!int(c.maxAttempts, 1)) errors.push(`${at}.maxAttempts must be a positive integer`);
     if (c.priority !== undefined && !(int(c.priority, -100) && (c.priority as number) <= 100)) errors.push(`${at}.priority must be an integer from -100 to 100`);
+    if (c.workspace !== undefined && (typeof c.workspace !== "string" || !c.workspace.startsWith("/") || c.workspace.includes("\0"))) errors.push(`${at}.workspace must be an absolute path`);
     // Rule 4: there are at least as many worker seats as slots.
     const seats = perTrain && obj(perTrain.workers) && int(spec.trains, 1) ? (spec.trains as number) * (Number(perTrain.workers[name]) || 0) : 0;
     if (int(c.slots) && seats < (c.slots as number)) errors.push(`${at}: ${c.slots} slots but only ${seats} worker seats (trains × perTrain.workers.${name})`);
+  }
+  // PW-34: SRE handoff targets. Each slackApp is exactly one ${PLANTWORKS_SRE_SLACK_*} reference, never a literal.
+  if (spec.sre !== undefined) {
+    if (!obj(spec.sre)) errors.push("sre must be an object");
+    else {
+      unknownFields(errors, "sre.", spec.sre, ["agents"]);
+      if (!obj(spec.sre.agents)) errors.push("sre.agents must map agent names to {slackApp}");
+      else for (const [name, a] of Object.entries(spec.sre.agents)) {
+        if (!DNS_NAME.test(name)) errors.push(`sre.agents.${name} must be a DNS-safe name`);
+        if (!obj(a)) { errors.push(`sre.agents.${name} must be an object`); continue; }
+        unknownFields(errors, `sre.agents.${name}.`, a, ["slackApp"]);
+        if (typeof a.slackApp !== "string" || !SRE_SLACK_REF.test(a.slackApp)) errors.push(`sre.agents.${name}.slackApp must be exactly one operator reference (\${PLANTWORKS_SRE_SLACK_NAME})`);
+      }
+    }
   }
 
   // Rule 1: the sum of slots fits the platform cap for the slot budget key. A missing cap is 0.
