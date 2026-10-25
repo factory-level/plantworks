@@ -30,7 +30,7 @@ Wave 3 established why it can't simply be added there (`wave3/report.md`, 00:26Z
 | Effect on `done` | delayed by at most the bound (default 30 s), **never blocked** | none |
 | Failure | the worker never reports: `done` at the bound, with `unavailable(timeout)` | the worker never reports: no `result`, and every consumer has to time out itself |
 
-(a) is smaller where it matters. It adds one route, two store columns and one wait in the reconciler,
+(a) is smaller where it matters. It adds one route, three store columns and one wait in the reconciler,
 and it keeps the consumer contract a single event. (b) moves the waiting into every consumer.
 
 **Fail-closed is kept.** The seat's own closure stays the only thing that finishes a job. The report
@@ -43,8 +43,15 @@ closure.
 
 1. **The reconciler sees the seat's closure** (`seatOutcome` returns an outcome, and the job is
    `running`).
-   - If the job has no report and no `report_wait_since`, it records `report_wait_since = now` and
-     emits nothing. The job stays `running` and keeps its slot.
+   - If the job has no `report_wait_since`, it records `report_wait_since = now` **and
+     `report_closing_id`, the `transitionId` of the seat's closing transition** that `seatOutcome`
+     accepted. It emits nothing. The job stays `running` and keeps its slot.
+   - **The wait belongs to that exact closure** (r2). On every pass, if the closure the reconciler
+     accepts now has a different `transitionId` from `report_closing_id`, it resets in one
+     transaction: a new `report_wait_since = now`, the new `report_closing_id`, and any stored report
+     dropped. This covers a qitem that was reopened and closed again between two polls, which the
+     reconciler never sees as reopened, so an older wait or a report taken before the extra work
+     can't attach to the later closure.
    - On later passes:
      - **report stored:** `done` with `result = {text: null, artifacts, usage, report: "ok"}`. The
        event carries the D11 fields.
@@ -64,13 +71,15 @@ closure.
    - The bound is refused below 10 s, roughly two worker polls plus a snapshot. A smaller value would
      defeat the report without anyone noticing. `0` remains the explicit "no report, immediate done".
 2. **The worker learns it is wanted.** `GET /plantworks/v1/jobs/{jobId}`, which the worker already
-   polls every `--poll-ms`, gains `reportWanted: true` while the wait is open.
+   polls every `--poll-ms`, gains `reportWanted: {closingTransitionId}` while the wait is open.
 3. **The worker reports.** `POST /plantworks/v1/jobs/{jobId}/report` with the bearer token and
-   `{seat, qitemId, usage, artifacts}`. The broker accepts it only if all of these hold, checked and
-   stored in one immediate transaction:
+   `{seat, qitemId, closingTransitionId, usage, artifacts}`. The broker accepts it only if all of these
+   hold, checked and stored in one immediate transaction:
    - the job is `running`;
    - `claimed_by = seat` and `qitem_id = qitemId`;
    - `report_wait_since` is set, meaning the seat has already closed: no snapshot is taken mid-work;
+   - `closingTransitionId = report_closing_id`, so the report answers this closure and not an
+     earlier one (409 `report_stale` otherwise);
    - no report is stored yet.
 
    **What the fence is, and isn't** (r1). It checks consistency, not identity: `{seat, qitemId}` is
@@ -93,8 +102,9 @@ closure.
 
    Sizes are capped: 256 files, 2 KB per path.
 4. **A reopened or handed-off qitem** during the wait (`seatOutcome` null again) clears
-   `report_wait_since` and any stored report, because the snapshot predates further work. The job
-   simply stays `running`, as today.
+   `report_wait_since`, `report_closing_id` and any stored report, because the snapshot predates
+   further work. The job simply stays `running`, as today. A reopen and re-close the reconciler didn't
+   see between polls is caught by the `report_closing_id` check in step 1.
 5. **A job that leaves `running` any other way during the wait** (dev-build): the stored report is
    dropped, and the wait never emits `done`. Today nothing but this path moves a broker job out of
    `running`.
@@ -107,6 +117,7 @@ Restart and crash, which are the cases the tests cover:
 | Worker dies before reporting | `done` at the bound, `unavailable(timeout)`: no lost `done` |
 | Worker dies after reporting | the report is stored, so `done` carries it |
 | Worker restarts and reports again | 409 `report_exists`: the first write wins, so there is no double report |
+| The qitem reopens and closes again between two polls | the new closing `transitionId` differs from `report_closing_id`, so the wait restarts and the old report is dropped. A worker report for the old closure gets 409 `report_stale` |
 | Report arrives after `done` | 409 `job_settled`, nothing changes |
 | Two brokers on one SQLite file | the immediate transaction plus the conditional UPDATE, as for claims (PW-19) |
 | The daemon is unreachable during the wait | `seatOutcome` can't be read, so the pass changes nothing and the job stays `running` (the existing fail-closed rule). The bound doesn't fire on its own; once the daemon answers, it counts from the original `report_wait_since` |
@@ -186,12 +197,14 @@ Restart and crash, which are the cases the tests cover:
 ## Slices and owners (proposal)
 
 1. **This doc** (build2), reviewed by r1 and r2.
-2. **Broker side** (store columns, the report route, the reconciler wait): dev-build, who has agreed
-   to it. Store and reconcile are its territory. Reviewer r1.
+2. **Broker side** (store columns `report`, `report_wait_since` and `report_closing_id`; the report
+   route; the reconciler wait): dev-build, who has agreed to it. Store and reconcile are its
+   territory. Reviewer r1.
 3. **Worker side** (the spec `workspace` field, the baseline, the usage delta, the report call):
    build2. Reviewer r1.
 
-Each slice is one PR. Tests are sealed (#75 containment) and cover the restart and crash table above.
+Each slice is one PR. Tests are sealed (#75 containment) and cover the restart and crash table
+above, including r2's inter-poll reopen and re-close case in slice 2.
 
 ## Out of scope
 
