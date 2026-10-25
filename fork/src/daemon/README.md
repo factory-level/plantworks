@@ -30,7 +30,17 @@ PW-21).
 - A database conflict stops a start by default. Upstream confirms a conflict only when `lsof`
   shows another process holding the file and that daemon's `daemon.json` and `/healthz` agree.
   Without `lsof` the holder is unknown and nothing stops. The runtime image installs `lsof`
-  (`fork/container/Dockerfile`), and its smoke test checks for it.
+  (`fork/container/Dockerfile`). Its smoke test runs the boot regressions as uid 10001 in
+  a disposable container with no network or host mounts, including a refused second daemon
+  on the same database and the deliberate `--allow-db-conflict` escape.
+
+- Explicit-home containment resolves dangling symlinks too, so an inherited link cannot
+  redirect a newly created database or write directory outside the selected home. Cycles
+  and paths whose identity cannot be established fail before upstream initialization.
+  In-home overrides are retained; a deliberate external DB can still be selected through
+  `daemon start --db` or the selected home's `db.path` config. Explicit ports use `--port`
+  or that home's `daemon.port`. Without `PLANTWORKS_HOME`, the existing OpenRig environment
+  overrides retain their original precedence.
 
 - The port is 7533, so the daemon can run next to an OpenRig daemon on 7433.
 - The kernel is always off. Plantworks never wants the operator or advisor seats.

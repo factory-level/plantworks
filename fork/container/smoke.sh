@@ -29,7 +29,19 @@ ok "plantworks --version is ${want}+plantworks.<n>"
 ok "runs as non-root uid 10001"
 # The daemon's database-conflict stop (fork/src/daemon/boot.ts) finds another holder of its database with lsof.
 docker run --rm --entrypoint sh "${img}" -c 'command -v lsof' >/dev/null || fail "lsof is not on PATH: the database-conflict check could not find a holder"
-ok "lsof is on PATH (the dependency the database-conflict check needs; the check itself is tested in source)"
+ok "lsof is on PATH"
+# Run the real isolation/conflict regressions as the image user, in one disposable container.
+# No host mounts or network: its daemons, SQLite files and tmux sockets all stay inside it.
+# env -i also removes the image's own OPENRIG_* defaults from the test runner.
+docker run --rm --network none --entrypoint sh "${img}" -c '
+  set -eu
+  command -v tmux >/dev/null
+  command -v lsof >/dev/null
+  scratch=$(mktemp -d)
+  cd /app/fork
+  env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$scratch" node --test src/daemon/boot.test.ts src/daemon/boot-paths.test.ts
+' || fail "isolated daemon boot or database-conflict regression failed in the image"
+ok "image refuses a second daemon on a shared database, honours the explicit escape, and isolates inherited seat paths"
 docker run --rm --entrypoint sh "${img}" -c 'npm ls -g --depth=0 2>/dev/null' | grep -q "@earendil-works/pi-coding-agent@1.4.0" || fail "Pi 1.4.0 is not the installed Pi"
 ok "Pi is the pinned @earendil-works/pi-coding-agent@1.4.0"
 docker inspect -f '{{json .Config.Healthcheck.Test}}' "${img}" | grep -q 'entrypoint.sh","health"' || fail "the image declares no role-aware HEALTHCHECK"

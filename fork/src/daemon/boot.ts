@@ -4,8 +4,8 @@
 // OpenRig install, and never on a non-loopback address without a bearer token.
 // Everything here is environment the upstream CLI and daemon already read; nothing upstream changes.
 import { homedir } from "node:os";
-import { existsSync, realpathSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { isLoopbackBind } from "../../../packages/daemon/dist/middleware/auth-bearer-token.js";
 
 /** Upstream's defaults are ~/.openrig, 7433 and a database-conflict warning. */
@@ -50,19 +50,39 @@ function dropInheritedDaemon(env: Env, home: string): string[] {
     const path = env[name]?.trim();
     if (path === undefined) continue;
     const rel = relative(realHome, realPath(path));
-    if (path && rel && !rel.startsWith("..") && !isAbsolute(rel)) continue; // inside the selected home, through any symlink
+    if (path && rel && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) continue; // inside the selected home, through any symlink
     delete env[name];
     dropped.push(name);
   }
   return dropped;
 }
 
-/** The path with every symlink in its longest existing prefix resolved; the rest is appended as written. */
-function realPath(path: string): string {
-  let head = resolve(path);
-  const tail: string[] = [];
-  while (!existsSync(head) && dirname(head) !== head) { tail.unshift(basename(head)); head = dirname(head); }
-  return join(existsSync(head) ? realpathSync(head) : head, ...tail);
+/** Resolve missing tails AND dangling symlinks, without creating anything. Unverifiable paths fail closed. */
+function realPath(path: string, seen = new Set<string>()): string {
+  // Preserve parent traversal until the filesystem has resolved symlinks: link/../db can
+  // name an outside file even when lexical path.resolve would place it inside the home.
+  const absolute = isAbsolute(path) ? path : `${process.cwd()}${sep}${path}`;
+  if (seen.has(absolute)) throw new Error(`symlink cycle while resolving ${path}`);
+  seen.add(absolute);
+  try {
+    return realpathSync.native(absolute);
+  } catch (realpathError) {
+    if ((realpathError as NodeJS.ErrnoException).code !== "ENOENT") throw realpathError;
+    let stat: ReturnType<typeof lstatSync>;
+    try {
+      stat = lstatSync(absolute);
+    } catch (lstatError) {
+      // Only ENOENT means an absent tail. EACCES, ENOTDIR and other errors cannot establish containment.
+      if ((lstatError as NodeJS.ErrnoException).code !== "ENOENT") throw realpathError;
+      const parent = dirname(absolute);
+      return parent === absolute ? absolute : join(realPath(parent, seen), basename(absolute));
+    }
+    if (stat.isSymbolicLink()) {
+      const target = readlinkSync(absolute);
+      return realPath(isAbsolute(target) ? target : `${dirname(absolute)}${sep}${target}`, seen);
+    }
+    throw realpathError;
+  }
 }
 
 /** Values the home's config file sets (`plantworks config set daemon.port ...`); they win over our defaults. */
