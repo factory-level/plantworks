@@ -104,8 +104,13 @@ Restart and crash, which are the cases the tests cover:
   - After a worker restart the governor's count starts again at 0 and calls made before the restart
     are lost, so a recovered job reports `usage: null` with `report: "unavailable(worker restarted)"`
     rather than an undercount.
-- **Artifacts.** D16 adds an optional per-class `workspace` to the team spec, an absolute path. The
-  worker runs #90's `snapshotWork` on it, with the same plumbing and the same refusals: nothing the
+- **Artifacts.** D16 adds an optional per-class `workspace` to the team spec, an absolute path.
+  **Decision (lead):** `workspace` is the declared seat-host path the deployment must run the seat in.
+  - The worker doesn't trust it. At take-up it checks that the path is absolute, exists, is a git work
+    tree and is readable.
+  - If any check fails, the artifacts are `{branch: null, skipped: "workspace unverifiable: <why>"}`.
+    The job itself is unaffected (fail-closed for the data only).
+  - If the checks pass, the worker runs #90's `snapshotWork` on it, with the same plumbing and the same refusals: nothing the
   job planted runs, `.gitignore` is honoured, an existing `pw/<jobId>` branch is never overwritten,
   and unborn, mid-operation and sparse trees are handled. No `workspace` gives
   `{branch: null, skipped: "no workspace"}`, which is the current behaviour.
@@ -115,18 +120,20 @@ Restart and crash, which are the cases the tests cover:
     `write-tree`, plus an unreferenced `commit-tree` on HEAD.
   - The job's commit takes that baseline as its parent, so `pw/<jobId>` = baseline + the job's
     changes, and `files` lists only what this job changed.
-  - After a worker restart the baseline is gone, so the snapshot falls back to HEAD and says so
-    (`baseline: "HEAD (worker restarted)"`).
+  - **Decision (lead):** when there is no usable baseline, no snapshot is taken. The artifacts are
+    `{branch: null, skipped: "<why>"}`, never a snapshot against HEAD that would mix in earlier jobs'
+    work. The cases:
+    - a worker restart lost it: `"baseline lost (worker restarted)"`;
+    - it couldn't be written or read: `"baseline unreadable: <why>"`.
 
 ## Open points for the reviewers
 
-1. **D16's "the worker launches Pi with that cwd".** On the broker path the daemon launches the Pi
-   seat in tmux, and the worker never starts Pi. So `workspace` can only name the directory the
-   deployment runs the seat in, and the worker snapshots it without being able to check that Pi
-   really works there: runner-state.json doesn't record a cwd, and the worker doesn't know Pi's PID.
-   - Proposal: document it as a deployment contract, `workspace` = the seat's cwd, and have the
-     worker refuse to start when the path is missing or not absolute.
-   - Making the worker launch Pi itself would be a different and much larger design.
+1. **D16's "the worker launches Pi with that cwd"** (decided above; the lead is flagging the wording to
+   the coordinator). On the broker path the daemon launches the Pi seat in tmux, and the worker never
+   starts Pi. So `workspace` names the directory the deployment must run the seat in. The worker
+   verifies the directory but can't verify that Pi really works there: runner-state.json doesn't
+   record a cwd, and the worker doesn't know Pi's PID. Making the worker launch Pi itself would be a
+   different and much larger design.
 2. **The bound.** 30 s is the brief's default. The worker polls every 2 s and a snapshot is seconds,
    so 30 s leaves margin. It delays `done`, and the slot's release, by up to that long when a worker
    is gone.
