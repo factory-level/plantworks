@@ -11,7 +11,7 @@ import { InboxHandler } from "../../../packages/daemon/dist/domain/inbox-handler
 import { OutboxHandler } from "../../../packages/daemon/dist/domain/outbox-handler.js";
 import { queueRoutes } from "../../../packages/daemon/dist/routes/queue.js";
 
-test("queue create/claim/unclaim wire contract (upstream packages/daemon/src/routes/queue.ts:533-643; require-sender-identity.ts:76-105)", async (t) => {
+test("queue create/claim/unclaim wire contract (upstream packages/daemon/src/routes/queue.ts:545-658; require-sender-identity.ts:78-107)", async (t) => {
   const db = createDb();
   t.after(() => db.close());
   migrate(db, ALL_MIGRATIONS);

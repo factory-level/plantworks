@@ -136,8 +136,8 @@ is the boundary, and it isn't built.
 - **Global reads stay local.** `show-options -g`, `show-environment -g` and the server options
   have no target, so they read the daemon's local server.
 - **Injecting `tmuxExec` changes two things in upstream.** Upstream prints attach commands in the
-  default-server form (`setDaemonTmuxServer([])`, `startup.ts:519`). Injecting `argvExec` turns
-  off tmux control mode (`OPENRIG_TMUX_CONTROL`, `startup.ts:514`). A daemon on a non-default
+  default-server form (`setDaemonTmuxServer([])`, `startup.ts:526`). Injecting `argvExec` turns
+  off tmux control mode (`OPENRIG_TMUX_CONTROL`, `startup.ts:521`). A daemon on a non-default
   tmux server isn't handled.
 - **Id learning skips pane text.** Ids are learned from tmux output, not from `capture-pane`.
   An id that first appears in some other place is treated as local.

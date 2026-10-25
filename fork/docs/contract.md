@@ -31,7 +31,7 @@ ID instead of deriving it:
   (`fork/src/broker/claim.ts:161`, `:194`–`:198`, `:231`).
 - Upstream absorbs a create with an existing ID and the same source and destination: no second
   row, event or wake. A different destination is `409 qitem_id_reuse`
-  (`packages/daemon/src/domain/queue-repository.ts:1730`–`:1757`). The fork pins this in
+  (`packages/daemon/src/domain/queue-repository.ts:1767`–`:1794`). The fork pins this in
   `fork/test/contract/upstream-queue-contract.test.mjs:52`–`:64`.
 - A crash after create and before claim, and a crash between reserve and create, each end with
   exactly one qitem claimed for the reserving seat
