@@ -15,12 +15,13 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { emitTeam } from "../team/command.ts";
 import { PHASE_0_1 } from "../team/spec.ts";
+import { sealedEnv } from "../test-support/sealed-env.ts";
 
 const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
 const seat = "worker-0@t";
 const jobId = "kb-t-t_00ff00ff-a1";
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
-const gitEnv = { PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" };
+const gitEnv = sealedEnv({ GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" });
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: gitEnv }).trim();
 const until = async (ok: () => boolean, ms = 15_000) => { const end = Date.now() + ms; while (!ok()) { if (Date.now() > end) throw new Error("timed out waiting"); await new Promise((r) => setTimeout(r, 25)); } };
 
@@ -69,7 +70,7 @@ const llm = () => listen((_req, res) => json(res, { choices: [{ message: { conte
 
 function worker(env: { h: string; teams: string; platform: string }, broker: string, llmUrl: string) {
   const child = spawn(process.execPath, [bin, "pw", "worker", "run", "--team", "t", "--seat", seat, "--poll-ms", "250"], {
-    env: { PATH: process.env.PATH, HOME: env.h, OPENRIG_HOME: env.h, PLANTWORKS_TEAMS_DIR: env.teams, PLANTWORKS_PLATFORM_FILE: env.platform, PLANTWORKS_BROKER_URL: broker, PLANTWORKS_LLM_URL: llmUrl, PLANTWORKS_GOVERNOR_PORT: "0" },
+    env: sealedEnv({ HOME: env.h, OPENRIG_HOME: env.h, PLANTWORKS_TEAMS_DIR: env.teams, PLANTWORKS_PLATFORM_FILE: env.platform, PLANTWORKS_BROKER_URL: broker, PLANTWORKS_LLM_URL: llmUrl, PLANTWORKS_GOVERNOR_PORT: "0" }),
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stderr = "";

@@ -6,9 +6,10 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sealedEnv } from "../src/test-support/sealed-env.ts";
 
 const script = fileURLToPath(new URL("./upstream-test-merge.sh", import.meta.url));
-const env = { ...process.env, SYNC_BRANCH: "sync/test", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" };
+const env = sealedEnv({ SYNC_BRANCH: "sync/test", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" });
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, env, encoding: "utf8" }).trim();
 
 // A fork remote with main (fork work on top of upstream) and upstream-main (the mirror).
@@ -23,7 +24,7 @@ function setup() {
   git(work, "push", "-q", "origin", "HEAD:main", "HEAD:upstream-main");
   const onBranch = (b, fn) => { git(work, "switch", "-q", "-C", b, `origin/${b}`); fn(); git(work, "push", "-q", "origin", `HEAD:${b}`); git(work, "fetch", "-q"); };
   const run = (extra = {}) => spawnSync("bash", [script], { cwd: work, env: { ...env, ...extra }, encoding: "utf8" });
-  const remoteRef = (ref) => spawnSync("git", ["--git-dir", remote, "rev-parse", "--verify", "-q", ref], { encoding: "utf8" }).stdout.trim();
+  const remoteRef = (ref) => spawnSync("git", ["--git-dir", remote, "rev-parse", "--verify", "-q", ref], { env, encoding: "utf8" }).stdout.trim();
   return { work, edit, onBranch, run, remoteRef };
 }
 

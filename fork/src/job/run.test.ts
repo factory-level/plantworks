@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RejectedJob, hostLockPath, runJob, sessionFor, takeJobLock, trustedOwners, type RunOptions } from "./run.ts";
 import { stubConsumer, stubModel } from "./fixtures/stubs.ts";
+import { sealedEnv } from "../test-support/sealed-env.ts";
 
 const fakePi = [process.execPath, fileURLToPath(new URL("./fixtures/fake-pi.mjs", import.meta.url))];
 const envelope = { jobId: "kb-social-media-t_3fa9c01e-a1", team: "social-media", task: { prompt: "Say hi" } };
@@ -29,7 +30,7 @@ async function setup(piMode = "ok") {
   const home = mkdtempSync(join(tmpdir(), "pw-run-"));
   const opts = (over: Partial<RunOptions> = {}): RunOptions => ({
     envelope, callbackUrl: consumer.url, openrigHome: home, cwd: home, piCommand: fakePi,
-    env: { ...process.env, PLANTWORKS_LLM_URL: model.url, PI_FAKE_MODE: piMode }, log: () => {}, ...over,
+    env: sealedEnv({ HOME: home, PLANTWORKS_LLM_URL: model.url, PI_FAKE_MODE: piMode }), log: () => {}, ...over,
   });
   let closed: Promise<unknown> | undefined;
   const close = () => (closed ??= Promise.all([model.close(), consumer.close()]));
@@ -95,8 +96,7 @@ test("pi exiting before the job settles fails it with reason error", async () =>
 
 test("a setup failure after claim goes claimed -> failed, never running", async () => {
   const t = await setup();
-  const env = { ...process.env };
-  delete env.PLANTWORKS_LLM_URL;
+  const env = sealedEnv({ HOME: t.home }); // no PLANTWORKS_LLM_URL
   const result = await runJob(t.opts({ env }));
   assert.equal(result.state, "failed");
   assert.match((result.detail as { message: string }).message, /PLANTWORKS_LLM_URL is not set/);
@@ -195,7 +195,7 @@ test("session names map Hermes task ids onto the seat name alphabet", () => {
 test("real Pi in RPC mode completes a job against the stub model", { skip: !process.env.PLANTWORKS_PI_BIN && "PLANTWORKS_PI_BIN not set" }, async () => {
   const t = await setup();
   const pi = process.env.PLANTWORKS_PI_BIN!;
-  const result = await runJob(t.opts({ piCommand: /\.m?js$/.test(pi) ? [process.execPath, pi] : [pi], env: { ...process.env, PLANTWORKS_LLM_URL: t.model.url, HOME: t.home }, log: (l) => process.stderr.write(`${l}\n`) }));
+  const result = await runJob(t.opts({ piCommand: /\.m?js$/.test(pi) ? [process.execPath, pi] : [pi], env: sealedEnv({ PLANTWORKS_LLM_URL: t.model.url, HOME: t.home }), log: (l) => process.stderr.write(`${l}\n`) }));
   assert.equal(result.state, "done", JSON.stringify(result));
   assert.match(result.text ?? "", /hello from the stub/);
   assert.deepEqual(t.consumer.states(), ["queued", "claimed", "running", "done"]);

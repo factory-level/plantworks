@@ -105,3 +105,30 @@ governor and one line in `governBody`.
 
   None of them load a real vLLM; that check is gated.
 - The envelope `priority` field is fork-defined and still pending the HarnessHG ack (D11).
+
+## Load test: `pw llm bench` (PW-30)
+
+`plantworks pw llm bench` is the card's `plantworks bench`. It lives under the fork namespace, as every fork verb does.
+It replays synthetic Pi-shaped sessions against the endpoint at each `--levels` concurrency (default `1,2,4,8`).
+At each level, every concurrent worker runs `--sessions` sessions (default 3), cycling three profiles:
+- **prefill-heavy:** a large file read, then a follow-up.
+- **tool-calls:** eight short tool-call turns, each adding a tool result.
+- **compaction:** the context grows to three quarters of `--context`, gets a summary call and is cut to three eighths, as the worker's Pi settings do.
+
+Every call carries the same 3000-token system prompt and Pi's tool definitions (read, edit, bash). A tool call in the history is answered by a `tool` message with its `tool_call_id`, and a session's history only grows until compaction, so prefix caching behaves as it does for Pi.
+
+The profiles are **synthetic**. They come from the card text, not from measured Pi traffic; replace the numbers in `PROFILES` (`bench.ts`) when real ones exist.
+
+For each level the report gives:
+- calls and errors;
+- output and total tokens/s, from the endpoint's own `usage` (an endpoint that reports none fails the session rather than having its numbers guessed);
+- p50/p95 call latency;
+- jobs/hour, both **measured** (sessions completed over wall time) and **estimated** (concurrency × 3600 / mean session time, the steady state).
+
+The **knee** is the last level whose next step adds less than `--knee-gain` (default 10%) output tokens/s, or whose next step has errors. A run where every step up still pays off reports no knee; run higher levels.
+
+Exit codes: 2 when the run is refused or the options are bad, 1 when any session failed, 0 otherwise.
+
+**It puts real load on what it points at.** A non-loopback URL is refused unless `--i-have-a-window` is passed, meaning an agreed quiet window on the shared endpoint. Redirects are refused too, so a loopback URL can't forward the load somewhere the check never saw.
+
+The fork's tests run it only against `stubServingModel` on 127.0.0.1 (in `job/fixtures/stubs.ts`). That stub serves `slots` calls at once and queues the rest, and charges prompt/prefill + output/decode seconds per call, so the knee sits at `slots`. Measuring the real endpoint and handing the numbers to HarnessHG for per-`slotBudgetKey` caps is gated work, and nothing here has done it.

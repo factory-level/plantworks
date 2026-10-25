@@ -6,6 +6,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sealedEnv } from "../test-support/sealed-env.ts";
 import { promisify } from "node:util";
 import { emitTeam } from "./command.ts";
 import { PHASE_0_1, buildSpec, hermesProfileConfig, validateSpec, type TeamSpec } from "./spec.ts";
@@ -109,7 +110,7 @@ test("`plantworks pw team emit` and `validate` work end to end with a platform f
   writeFileSync(join(dir, "def.json"), JSON.stringify(definition()));
   writeFileSync(join(dir, "platform.json"), JSON.stringify(platform));
   const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
-  const run = (...args: string[]) => promisify(execFile)(process.execPath, [bin, "pw", "team", ...args]);
+  const run = (...args: string[]) => promisify(execFile)(process.execPath, [bin, "pw", "team", ...args], { env: sealedEnv() });
   await run("emit", join(dir, "def.json"), "--out", join(dir, "out"), "--platform", join(dir, "platform.json"));
   assert.match((await run("validate", join(dir, "out", "social-media", "team.json"), "--platform", join(dir, "platform.json"))).stdout, /team spec ok/);
   // Without a platform file there are no slot caps, so a team that wants a slot is refused.
