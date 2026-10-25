@@ -24,6 +24,14 @@ export type GovernorOptions = {
   backoffMs?: { first: number; max: number };
   /** Loopback port; 0 (the default) picks a free one. A fixed port keeps the seat's baseUrl valid across restarts. */
   port?: number;
+  /**
+   * PW-29: send the current job's effective priority as the request's `priority` (vLLM priority
+   * scheduling, lower first). Off by default: vLLM refuses a non-zero priority unless it runs with
+   * `--scheduling-policy priority`, and Ollama has no priority, so nothing is sent unless enabled.
+   */
+  priorityHints?: boolean;
+  /** The first job's effective priority, for a governor that serves one job (pw job run); setPriority changes it. */
+  priority?: number;
 };
 
 /**
@@ -31,7 +39,16 @@ export type GovernorOptions = {
  * job passes its timeout; `restore` lets calls through again. A cut-off stops model calls only: it
  * doesn't stop Pi or the tools it runs.
  */
-export type Governor = { url: string; close: () => Promise<void>; cutOff: (why: string) => void; restore: () => void; usage: () => Usage | undefined };
+export type Governor = {
+  url: string; close: () => Promise<void>; cutOff: (why: string) => void; restore: () => void;
+  /**
+   * PW-29: the effective priority of the job this seat runs now. One job at a time per seat. With
+   * priority hints on, undefined holds model calls until a value is set, so no call goes out early.
+   */
+  setPriority: (priority: number | undefined) => void;
+  /** PW-13: the tokens the endpoint reported so far, or undefined until a call reports usage. */
+  usage: () => Usage | undefined;
+};
 
 /** Token totals the endpoint reported on the calls that went through (PW-13). Calls that reported none add nothing; `usage()` is undefined until one does. */
 export type Usage = { promptTokens: number; completionTokens: number };
@@ -56,8 +73,11 @@ const USAGE_WINDOW = 1 << 20;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "transfer-encoding", "content-length", "content-encoding", "host", "authorization"]);
 
-/** Rewrites a chat/completions request body to the class budget. Non-JSON bodies pass through. */
-export function governBody(body: Buffer, c: WorkerClass): Buffer {
+/**
+ * Rewrites a chat/completions request body to the class budget. Non-JSON bodies pass through.
+ * With `priority`, sets the body's `priority` to it, replacing whatever Pi sent.
+ */
+export function governBody(body: Buffer, c: WorkerClass, priority?: number): Buffer {
   let json: Record<string, unknown>;
   try {
     json = JSON.parse(body.toString("utf8"));
@@ -72,6 +92,7 @@ export function governBody(body: Buffer, c: WorkerClass): Buffer {
     if (typeof asked === "number" && asked < c.maxOutputTokens) continue;
     if (key === "max_tokens" || asked !== undefined) json[key] = c.maxOutputTokens;
   }
+  if (priority !== undefined) json.priority = priority;
   return Buffer.from(JSON.stringify(json));
 }
 
@@ -87,6 +108,17 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
   let cut: string | null = null;
   const usage: Usage = { promptTokens: 0, completionTokens: 0 };
   let reported = false;
+  let priority: number | undefined = opts.priority;
+  // With hints on, a model call waits until the seat's job priority is known: the daemon can wake
+  // Pi as soon as the qitem exists, before the worker has the claim response (PW-29).
+  // A held call whose client goes away is dropped, never sent later with another job's priority.
+  const waiting = new Set<() => void>();
+  const priorityKnown = (signal: AbortSignal) => new Promise<void>((resolve) => {
+    if (priority !== undefined || signal.aborted) return resolve();
+    const release = () => { waiting.delete(release); signal.removeEventListener("abort", release); resolve(); };
+    waiting.add(release);
+    signal.addEventListener("abort", release, { once: true });
+  });
   const inFlight = new Set<AbortController>();
 
   async function handle(req: IncomingMessage, res: ServerResponse) {
@@ -94,8 +126,15 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
     for await (const chunk of req) chunks.push(chunk as Buffer);
     let body: Buffer | undefined = chunks.length ? Buffer.concat(chunks) : undefined;
     const path = req.url ?? "/";
-    const isCompletion = req.method === "POST" && /\/(chat\/)?completions$/.test(path.split("?")[0]);
-    if (body && isCompletion) body = governBody(body, c);
+    const completion = req.method === "POST" && /\/(chat\/)?completions$/.test(path.split("?")[0]);
+    // Watch for the client going away from here on, including while the call is held below.
+    const abort = new AbortController();
+    res.on("close", () => abort.abort(new Error("client went away")));
+    if (completion && opts.priorityHints) {
+      await priorityKnown(abort.signal);
+      if (abort.signal.aborted) return;
+    }
+    if (body && completion) body = governBody(body, c, opts.priorityHints ? priority : undefined);
 
     const headers: Record<string, string> = {};
     for (const [k, v] of Object.entries(req.headers)) if (!HOP_BY_HOP.has(k) && typeof v === "string") headers[k] = v;
@@ -109,9 +148,7 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
       res.end(JSON.stringify({ error: { message: `model calls are cut off: ${cut}`, type: "governor" } }));
     };
     if (cut) { refuse(); log(record); return; }
-    const abort = new AbortController();
     inFlight.add(abort);
-    res.on("close", () => abort.abort(new Error("client went away")));
     try {
       for (let delay = backoff.first; ; delay = Math.min(delay * 2, backoff.max)) {
         const started = Date.now();
@@ -123,7 +160,7 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
             const out: Record<string, string> = {};
             upstream.headers.forEach((v, k) => { if (!HOP_BY_HOP.has(k)) out[k] = v; });
             res.writeHead(upstream.status, out);
-            const counts = upstream.ok && isCompletion;
+            const counts = upstream.ok && completion;
             const decoder = new TextDecoder();
             let seen = "";
             if (upstream.body) for await (const chunk of upstream.body) {
@@ -187,5 +224,9 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
     },
     restore() { cut = null; },
     usage: () => (reported ? { ...usage } : undefined),
+    setPriority(n) {
+      priority = n;
+      if (n !== undefined) for (const release of [...waiting]) release();
+    },
   };
 }
