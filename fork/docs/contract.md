@@ -42,3 +42,24 @@ acknowledgement. `repo` is an `owner/name` string, `contextBudget` a positive in
 an opaque non-empty `{ "kind", "ref" }` pair. `priority`, when present, is `urgent`, `high`,
 `normal`, or `low`. The job contract and state details live in
 [`../src/contract/README.md`](../src/contract/README.md).
+
+## Card status
+
+A front door moves its card from each `plantworks.job.state` event by this mapping (D15). It is
+fork-defined, pending HarnessHG acknowledgement, and comes from the PW-24 bridge skill
+([`../src/hermes/plantworks-bridge/SKILL.md`](../src/hermes/plantworks-bridge/SKILL.md)).
+
+| Event state | Card |
+|---|---|
+| `queued`, `claimed`, `running` | in progress |
+| `held` | blocked: pending an approval decision |
+| `done`, outcome `succeeded` | done |
+| `done`, outcome `rejected-by-checks` | blocked, with the checks' reason |
+| `done`, closure `handoff-sre` (whatever the outcome) | blocked: a person brings in the SRE agent |
+| `failed` | blocked, with the reason |
+| `cancelled` | closed |
+| `retried` | unchanged: the card follows the next attempt's job. A D15 addition (not in the PW-24 table), fork-defined pending HarnessHG acknowledgement |
+
+The front-door consumer contract test (`fork/src/events/front-door.test.ts`) applies this
+mapping to real broker events for every state, outcome and closure. Adding a job state or
+outcome without a card in that test's mapping fails it, so this table and the test change together.

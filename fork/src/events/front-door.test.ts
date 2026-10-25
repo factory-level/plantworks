@@ -11,7 +11,8 @@ import { emitTeam } from "../team/command.ts";
 import { PHASE_0_1 } from "../team/spec.ts";
 import { API, loadTeams, startBroker } from "../broker/server.ts";
 import { openStore } from "../broker/store.ts";
-import { frontDoor } from "./fixtures/front-door.ts";
+import { DONE_OUTCOMES, JOB_STATES } from "../contract/job.ts";
+import { cardFor, frontDoor } from "./fixtures/front-door.ts";
 
 const open = new Set<() => Promise<unknown>>();
 afterEach(async () => {
@@ -182,4 +183,64 @@ test("an events.auth reference with no operator credential stops the broker befo
   const w = world([definition("social-media", "FRONTDOOR")]);
   await assert.rejects(w.boot({ SOCIAL_MEDIA_CALLBACK: fd.url }), /configured callback credential is unavailable/);
   assert.equal(fd.received.length + fd.rejected.length, 0, "no unauthenticated delivery");
+});
+
+test("D15: the front door moves the card from each event by the fork-defined mapping, for every state, outcome and closure", async () => {
+  const fd = await frontDoor();
+  open.add(fd.close);
+  const w = world([definition("social-media")]);
+  const b = await w.boot({ SOCIAL_MEDIA_CALLBACK: fd.url });
+  const s = b.store;
+  const envelope = (card: string) => ({ jobId: jobId("social-media", card), team: "social-media", task: { prompt: `do ${card}` } });
+  /** queued -> claimed for one job; jobs are driven one at a time, so reserve picks this one. */
+  const claim = (id: string) => {
+    assert.equal(s.reserve("social-media", "quick", "seat-a", `q-${id}`)?.job_id, id);
+    assert.notEqual(s.confirmClaim(id, "seat-a", `q-${id}`), "lost");
+  };
+  const toRunning = (id: string) => { claim(id); s.transition(id, "running"); };
+  const ids: Record<string, string> = {};
+  const held = (card: string) => { ids[card] = jobId("social-media", card); s.insert(envelope(card), "quick", "held", 3600); return ids[card]; };
+  const queued = async (card: string) => { ids[card] = jobId("social-media", card); assert.equal((await b.submit("social-media", card)).status, 201); return ids[card]; };
+
+  s.transition(held("t_denied"), "cancelled", { reason: "denied" });
+  const approved = held("t_approved");
+  s.transition(approved, "queued");
+  toRunning(approved);
+  s.transition(approved, "done", { outcome: "succeeded" });
+  s.transition(await queued("t_cancel"), "cancelled", { reason: "front-door" });
+  const early = await queued("t_early");
+  claim(early);
+  s.transition(early, "failed", { reason: "error" });
+  const checks = await queued("t_checks");
+  toRunning(checks);
+  s.transition(checks, "done", { outcome: "rejected-by-checks" });
+  const sre = await queued("t_sre");
+  toRunning(sre);
+  s.transition(sre, "done", { outcome: "succeeded", closure: "handoff-sre" });
+  const retry = await queued("t_retry");
+  toRunning(retry);
+  s.transition(retry, "failed", { reason: "timeout" });
+  s.transition(retry, "retried");
+
+  await until("every lifecycle", () => fd.applied.length === 25);
+  assert.deepEqual(fd.rejected, [], "every event had a card");
+  const work = ["in-progress", "in-progress", "in-progress"];
+  assert.deepEqual(fd.cards(ids.t_denied!), ["blocked", "closed"]);
+  assert.deepEqual(fd.cards(ids.t_approved!), ["blocked", ...work, "done"]);
+  assert.deepEqual(fd.cards(ids.t_cancel!), ["in-progress", "closed"]);
+  assert.deepEqual(fd.cards(ids.t_early!), ["in-progress", "in-progress", "blocked"]);
+  assert.deepEqual(fd.cards(ids.t_checks!), [...work, "blocked"]);
+  assert.deepEqual(fd.cards(ids.t_sre!), [...work, "blocked"], "handoff-sre blocks even with outcome succeeded");
+  assert.deepEqual(fd.cards(ids.t_retry!), [...work, "blocked", "unchanged"], "retried leaves the card to the next attempt's job");
+  // Every contract state, done outcome and closure went through a real event above.
+  assert.deepEqual([...new Set(fd.applied.map((a) => a.state))].sort(), [...JOB_STATES].sort());
+  assert.deepEqual([...new Set(fd.applied.filter((a) => a.state === "done").map((a) => a.detail.outcome))].sort(), [...DONE_OUTCOMES].sort());
+  assert.ok(fd.applied.some((a) => a.detail.closure === "handoff-sre"));
+});
+
+test("D15: every contract state and done outcome has a card, and a state or outcome the mapping does not know throws", async () => {
+  for (const state of JOB_STATES) assert.doesNotThrow(() => cardFor(state, state === "done" ? { outcome: "succeeded" } : {}), state);
+  for (const outcome of DONE_OUTCOMES) assert.doesNotThrow(() => cardFor("done", { outcome }), outcome);
+  assert.throws(() => cardFor("paused", {}), /no card mapping for paused/);
+  assert.throws(() => cardFor("done", { outcome: "partial" }), /no card mapping for done/);
 });
