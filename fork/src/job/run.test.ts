@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { RejectedJob, hostLockPath, runJob, sessionFor, takeJobLock, type RunOptions } from "./run.ts";
+import { RejectedJob, hostLockPath, runJob, sessionFor, takeJobLock, trustedOwners, type RunOptions } from "./run.ts";
 import { stubConsumer, stubModel } from "./fixtures/stubs.ts";
 
 const fakePi = [process.execPath, fileURLToPath(new URL("./fixtures/fake-pi.mjs", import.meta.url))];
@@ -330,4 +330,36 @@ test("D14 host lock path: XDG_RUNTIME_DIR, else <base>/plantworks-<uid>; a direc
   const swapped = mkdtempSync(join(tmpdir(), "pw-swap-"));
   symlinkSync(mkdtempSync(join(tmpdir(), "pw-elsewhere-")), join(swapped, `plantworks-${uid}`));
   assert.throws(() => hostLockPath({}, swapped), (e: Error) => e instanceof RejectedJob && /is not a directory \(a symlink or a file\)/.test(e.message));
+});
+
+test("D14: the overflow uid (nobody) is trusted like root only inside a user namespace", () => {
+  // The initial namespace's identity map: 65534 is the real nobody account there, so a nobody-owned ancestor is refused.
+  assert.deepEqual([...trustedOwners("         0          0 4294967295\n", 1000, 65534)].sort((a, b) => a - b), [0, 1000]);
+  // Inside a namespace that maps only this user, the host's root (and everyone unmapped) shows as 65534.
+  assert.deepEqual([...trustedOwners("      1000       1000          1\n", 1000, 65534)].sort((a, b) => a - b), [0, 1000, 65534]);
+  // Can't tell: treated as not in a namespace (stricter).
+  assert.deepEqual([...trustedOwners(undefined, 1000, 65534)].sort((a, b) => a - b), [0, 1000]);
+  assert.deepEqual([...trustedOwners("", 1000, 65534)].sort((a, b) => a - b), [0, 1000]);
+});
+
+test("D14: outside a namespace, a parent owned by nobody (65534) is refused", async (t) => {
+  // A nobody-owned directory needs root to make, but a user namespace that maps only this user shows
+  // the host's root-owned / and /tmp as 65534. Given the initial namespace's identity uid_map, as on an
+  // ordinary host, hostLockPath must refuse them; with the namespace's real map it accepts them.
+  const { spawnSync } = await import("node:child_process");
+  const probe = spawnSync("unshare", ["--user", `--map-user=${process.getuid!()}`, `--map-group=${process.getgid!()}`, "true"]);
+  if (probe.status !== 0) { t.skip(`unprivileged user namespaces are unavailable here (${String(probe.stderr).trim() || probe.error?.message || `exit ${probe.status}`})`); return; }
+  const runTs = fileURLToPath(new URL("./run.ts", import.meta.url));
+  const dir = mkdtempSync(join(tmpdir(), "pw-nobody-"));
+  const script = `import(${JSON.stringify(runTs)}).then(({ hostLockPath }) => {
+    const identity = "         0          0 4294967295\\n";
+    for (const [name, map] of [["identity", identity], ["namespace", undefined]]) {
+      try { hostLockPath({ XDG_RUNTIME_DIR: ${JSON.stringify(dir)} }, "/tmp", map ?? require("node:fs").readFileSync("/proc/self/uid_map", "utf8")); console.log(name + ": accepted"); }
+      catch (e) { console.log(name + ": " + e.message); }
+    }
+  });`;
+  const r = spawnSync("unshare", ["--user", `--map-user=${process.getuid!()}`, `--map-group=${process.getgid!()}`, process.execPath, "-e", script], { encoding: "utf8", env: { PATH: process.env.PATH } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^identity: the job lock directory's parent "[^"]+" is owned by uid 65534/m, "outside a namespace, nobody is not trusted");
+  assert.match(r.stdout, /^namespace: accepted$/m, "inside one, 65534 stands for the host's root");
 });

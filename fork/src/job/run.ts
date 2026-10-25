@@ -303,7 +303,7 @@ const alive = (pid: number) => {
  * job is refused. Another user's or a shared writable directory could let someone else hold or swap
  * the lock, so this fails closed.
  */
-export function hostLockPath(env: NodeJS.ProcessEnv = process.env, base = "/tmp"): { path: string; source: string } {
+export function hostLockPath(env: NodeJS.ProcessEnv = process.env, base = "/tmp", uidMap: string | undefined = readUidMap()): { path: string; source: string } {
   const uid = process.getuid!();
   const xdg = env.XDG_RUNTIME_DIR?.trim();
   const [parent, leaf, source] = xdg && isAbsolute(xdg)
@@ -312,9 +312,7 @@ export function hostLockPath(env: NodeJS.ProcessEnv = process.env, base = "/tmp"
   // Resolve the parent once and use only the canonical path from here on (the checks, the mkdir and the
   // lock), so a symlink in the way is never followed again after it was checked.
   const canonical = realpathSync(parent);
-  // Owners that are as good as root: root, and the kernel's overflow uid, which a user namespace shows
-  // for an owner outside it (typically the host's root).
-  const trusted = new Set([uid, 0, overflowUid()]);
+  const trusted = trustedOwners(uidMap, uid, overflowUid());
   // Every directory above the lock's must be one nobody else can rename entries in: owned by a trusted
   // owner, and not group- or world-writable unless sticky (like /tmp). Otherwise someone could move the
   // checked directory away, and the next run would lock a fresh one alongside.
@@ -339,7 +337,20 @@ export function hostLockPath(env: NodeJS.ProcessEnv = process.env, base = "/tmp"
   return { path: join(dir, "job.lock"), source };
 }
 
-/** The kernel's overflow uid (65534 unless configured): the owner a user namespace shows for an unmapped uid. */
+/**
+ * Owners a lock directory's ancestors may have: this user and root. Inside a user namespace (a uid_map
+ * other than the initial namespace's identity map) the kernel shows owners outside it, such as the
+ * host's root, as the overflow uid, so that one is trusted too. Outside a namespace the overflow uid is
+ * the real `nobody` account, which anything running as nobody could use, so it is not trusted there.
+ * An unreadable uid_map counts as not in a namespace (the stricter choice).
+ */
+export function trustedOwners(uidMap: string | undefined, uid: number, overflow: number): Set<number> {
+  const identity = /^\s*0\s+0\s+4294967295\s*$/.test(uidMap ?? "");
+  const inNamespace = uidMap !== undefined && uidMap.trim() !== "" && !identity;
+  return new Set(inNamespace ? [uid, 0, overflow] : [uid, 0]);
+}
+const readUidMap = () => { try { return readFileSync("/proc/self/uid_map", "utf8"); } catch { return undefined; } };
+/** The kernel's overflow uid (65534 unless configured). */
 function overflowUid(): number {
   try { return Number(readFileSync("/proc/sys/kernel/overflowuid", "utf8").trim()) || 65534; } catch { return 65534; }
 }
