@@ -14,7 +14,7 @@ try {
   console.error(`plantworks: ${e.message}`);
   process.exit(2);
 }
-if (dropped.length) console.error(`plantworks: PLANTWORKS_HOME is set, so the inherited ${dropped.join(", ")} (another daemon's) are ignored`);
+if (dropped.length) console.error(`plantworks: PLANTWORKS_HOME is set, so the inherited ${dropped.join(", ")} (another daemon's) ${dropped.length === 1 ? "is" : "are"} ignored`);
 const { ConfigStore } = await import("../../packages/cli/dist/config-store.js");
 const store = new ConfigStore();
 const fromFile = (key) => {
