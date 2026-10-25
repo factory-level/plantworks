@@ -31,9 +31,11 @@ PW-21).
   shows another process holding the file and that daemon's `daemon.json` and `/healthz` agree.
   It reads a slow or failing probe (`lsof` over 1 s, `/healthz` over 500 ms) as "no holder" and
   starts. So under `stop`, `plantworks daemon start` first runs the same probes itself
-  (`db-conflict.ts`, 2 s each), before upstream spawns its daemon. A confirmed other daemon, or a
-  probe that can't answer (a missing or hanging `lsof`, an unreadable `daemon.json`, a `/healthz`
-  that doesn't answer for a matching record), stops the start with one line and exit 2. A database
+  (`db-conflict.ts`, 2 s each), before upstream spawns its daemon. A confirmed other daemon, any
+  other process holding the file that isn't confirmed as this home's daemon (a split-path or
+  systemd-run daemon, a test harness, an `sqlite3` shell), or a probe that can't answer (a missing
+  or hanging `lsof`, an unreadable `daemon.json`, a `/healthz` that doesn't answer for a matching
+  record) stops the start with one line and exit 2. A database
   that doesn't exist yet skips the probes. `warn`, `--allow-db-conflict` and
   `OPENRIG_ALLOW_DB_CONFLICT=1` skip the pre-check and keep upstream's behaviour. It is a
   best-effort check for a confirmed holder, not an atomic lock: a daemon that opens the database

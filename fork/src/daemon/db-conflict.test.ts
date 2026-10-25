@@ -48,16 +48,29 @@ test("inconclusive probes refuse under stop; warn and the one-boot escape do not
   } finally { f.done(); }
 });
 
-test("conclusive answers: a confirmed other daemon refuses; no holder, a non-daemon holder, a stale record and this home's own daemon pass", async () => {
+test("holders: a confirmed other daemon refuses; any holder not confirmed as this home's daemon is inconclusive; no holder and this home's own daemon pass", async () => {
   const f = fixture();
   try {
     const none: Lsof = async () => ({ code: 1, stdout: "" });
     assert.deepEqual(await dbHolder(f.db, f.home, { lsof: none, healthz: answers() }), { kind: "none" }, "lsof exit 1 with no output is nothing found");
-    assert.deepEqual(await dbHolder(f.db, f.home, { lsof: holds(), healthz: answers() }), { kind: "none" }, "a holder with no daemon.json is not a daemon");
-    f.record(f.other);
-    assert.deepEqual(await dbHolder(f.db, f.home, { lsof: holds(), healthz: answers(PID + 1) }), { kind: "none" }, "healthz names another pid: the record is stale");
-    assert.deepEqual(await dbHolder(f.db, f.home, { lsof: holds(PID + 1), healthz: answers() }), { kind: "none" }, "the record names another pid");
     assert.deepEqual(await dbHolder(f.db, f.home, { lsof: holds(), healthz: answers(), self: PID }), { kind: "none" }, "this process is never its own conflict");
+    const unconfirmed = /^pid \d+ has .*shared\.sqlite open and is not confirmed as this home's daemon$/;
+    const kept = async (why: string, lsof: Lsof, healthz = answers()) => {
+      const v = await dbHolder(f.db, f.home, { lsof, healthz });
+      assert.equal(v.kind, "inconclusive", why);
+      assert.match((v as { why: string }).why, unconfirmed, why);
+      assert.match(await dbConflictRefusal({ db: f.db, home: f.home, policy: "stop", allow: false, probes: { lsof, healthz } }) ?? "", /^cannot confirm/, why);
+      assert.equal(await dbConflictRefusal({ db: f.db, home: f.home, policy: "warn", allow: false, probes: { lsof, healthz } }), null, `${why}: warn keeps upstream's lenient rule`);
+    };
+    await kept("a holder with no daemon.json anywhere (an sqlite3 shell, a test harness, systemd stdout)", holds());
+    // Split paths: the holder's daemon.json is in its own home, not beside the database, and its stdout is not a daemon.log.
+    const split = join(f.root, "split-home");
+    mkdirSync(split);
+    f.record(split);
+    await kept("a split-path daemon whose record is not beside the database", holds());
+    f.record(f.other);
+    await kept("healthz names another pid: the record is stale but the file is still held", holds(), answers(PID + 1));
+    await kept("the record names another pid", holds(PID + 1));
     const confirmed = await dbConflictRefusal({ db: f.db, home: f.home, policy: "stop", allow: false, probes: { lsof: holds(), healthz: answers() } });
     assert.match(confirmed ?? "", /^OPENRIG_DB_CONFLICT: another live daemon \(pid 424242, record .*daemon\.json\) has .*shared\.sqlite open; daemon start stopped/);
 

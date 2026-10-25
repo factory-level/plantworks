@@ -24,7 +24,7 @@ export const lsofProbe: Lsof = (args) => new Promise((resolve) => {
     const err = e as NodeJS.ErrnoException & { killed?: boolean; code?: number | string };
     if (err.killed) return resolve({ error: `lsof gave no answer within ${LSOF_TIMEOUT_MS} ms` });
     if (typeof err.code === "number") return resolve({ code: err.code, stdout });
-    resolve({ error: `lsof could not run (${err.code ?? err.message})` });
+    resolve({ error: `lsof could not run (${err.code ?? err.message}); install lsof, or set daemon.db_conflict=warn` });
   });
 });
 
@@ -38,7 +38,10 @@ export const healthzProbe: Healthz = async (port) => {
   }
 };
 
-/** Who holds `db`, by upstream's rule: an open-file holder whose daemon.json (same pid and db) and healthz (same pid) agree. */
+/**
+ * Who holds `db`. A holder is a daemon by upstream's rule: its daemon.json (same pid and db) and healthz (same pid)
+ * agree. Unlike upstream, any other holder is inconclusive, not "none": this check runs only under stop.
+ */
 export async function dbHolder(db: string, home: string, probes: { lsof?: Lsof; healthz?: Healthz; self?: number } = {}): Promise<Verdict> {
   const lsof = probes.lsof ?? lsofProbe;
   const healthz = probes.healthz ?? healthzProbe;
@@ -71,6 +74,9 @@ export async function dbHolder(db: string, home: string, probes: { lsof?: Lsof; 
       if (realPath(recordPath) === realPath(ownRecord)) return { kind: "own-home" };
       return { kind: "confirmed", why: `another live daemon (pid ${pid}, record ${recordPath}) has ${target} open` };
     }
+    // Upstream skips a holder it can't identify as a daemon. Fail closed instead: a daemon whose record is
+    // elsewhere (split paths, systemd stdout), a test harness or an sqlite3 shell is still a second opener.
+    return { kind: "inconclusive", why: `pid ${pid} has ${target} open and is not confirmed as this home's daemon` };
   }
   return { kind: "none" };
 }
