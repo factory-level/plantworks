@@ -58,7 +58,7 @@ fork-defined, pending HarnessHG acknowledgement, and comes from the PW-24 bridge
 | `done`, closure `handoff-sre` (whatever the outcome) | blocked: a person brings in the SRE agent |
 | `failed` | blocked, with the reason |
 | `cancelled` | closed |
-| `retried` | unchanged: the card follows the next attempt's job |
+| `retried` | unchanged: the card follows the next attempt's job. A D15 addition (not in the PW-24 table), fork-defined pending HarnessHG acknowledgement |
 
 The front-door consumer contract test (`fork/src/events/front-door.test.ts`) applies this
 mapping to real broker events for every state, outcome and closure. Adding a job state or
