@@ -10,10 +10,11 @@ import { serve } from "@hono/node-server";
 import { isLoopbackBind } from "../../../packages/daemon/dist/middleware/auth-bearer-token.js";
 import { canTransition, JOB_PRIORITIES, validateEnvelope, type JobEnvelope, type JobState } from "../contract/job.ts";
 import { createEmitter, type CloudEvent } from "../events/job-state.ts";
-import { createJobStateOutbox, eventForTransition, transitionColumns } from "../events/outbox.ts";
+import { createJobStateOutbox, eventsForTransition, transitionColumns } from "../events/outbox.ts";
 import { SWEEP_MS, decisionRoute, requestApproval, sweepApprovals } from "./approvals.ts";
 import { PHASE_0_1, validateSpec, type Platform, type TeamSpec } from "../team/spec.ts";
 import type { JobRow, Report, Store } from "./store.ts";
+import type { HandoffReport } from "./handoff.ts";
 
 export const API = "/plantworks/v1";
 /** A largest-possible envelope (65,536-character prompt, 200-character title) is well under this. */
@@ -58,7 +59,7 @@ export function validateReport(body: unknown, jobId: string): { ok: true; fence:
   const str = (v: unknown) => typeof v === "string" && v.length > 0;
   const count = (v: unknown) => Number.isInteger(v) && (v as number) >= 0;
   if (typeof body !== "object" || body === null || Array.isArray(body)) return { ok: false, errors: ["the body must be a JSON object"] };
-  const known = ["seat", "qitemId", "closingTransitionId", "usage", "usageStatus", "artifacts"];
+  const known = ["seat", "qitemId", "closingTransitionId", "usage", "usageStatus", "artifacts", "handoff"];
   for (const k of Object.keys(b)) if (!known.includes(k)) errors.push(`unknown field ${k}`);
   if (!str(b.seat)) errors.push("seat must be a non-empty string");
   if (!str(b.qitemId)) errors.push("qitemId must be a non-empty string");
@@ -83,8 +84,14 @@ export function validateReport(body: unknown, jobId: string): { ok: true; fence:
       }
     }
   }
+  // PW-34: optional, {artifact} (the parsed file, checked against the team's sre.agents when the job finishes) or {unavailable}.
+  const h = b.handoff as Record<string, unknown> | undefined;
+  if (h !== undefined && !(typeof h === "object" && h !== null && !Array.isArray(h) && Object.keys(h).length === 1
+    && ("artifact" in h || (typeof h.unavailable === "string" && h.unavailable.length > 0 && h.unavailable.length <= REPORT_LIMITS.skippedChars)))) {
+    errors.push(`handoff must be {artifact} or {unavailable} (1-${REPORT_LIMITS.skippedChars} characters)`);
+  }
   if (errors.length) return { ok: false, errors };
-  return { ok: true, fence: { seat: b.seat, qitemId: b.qitemId, closingTransitionId: b.closingTransitionId }, report: { usage: b.usage, ...(b.usageStatus ? { usageStatus: b.usageStatus } : {}), artifacts: a as Report["artifacts"] } };
+  return { ok: true, fence: { seat: b.seat, qitemId: b.qitemId, closingTransitionId: b.closingTransitionId }, report: { usage: b.usage, ...(b.usageStatus ? { usageStatus: b.usageStatus } : {}), artifacts: a as Report["artifacts"], ...(h ? { handoff: h as HandoffReport } : {}) } };
 }
 
 export type Emit = (row: Pick<JobRow, "job_id" | "team">, state: JobState, detail?: Record<string, unknown>) => void;
@@ -131,7 +138,7 @@ export function createBroker(opts: BrokerOptions): Hono & { sweepApprovals: () =
     const job = store.get(row.job_id);
     const transition = store.db.prepare("SELECT * FROM job_transitions WHERE job_id = ? ORDER BY id DESC LIMIT 1").get(row.job_id) as import("./store.ts").TransitionRow | undefined;
     if (!job || !transition || transition.to_state !== state) throw new Error(`missing persisted ${state} transition for ${row.job_id}`);
-    send(row.team, eventForTransition(job, transition, transitionColumns(store, transition)));
+    for (const event of eventsForTransition(job, transition, transitionColumns(store, transition))) send(row.team, event);
   });
   const decisionUrl = (jobId: string) => {
     if (!opts.publicUrl) throw new Error("no publicUrl for decision URLs");
@@ -265,7 +272,7 @@ export function startBroker(opts: BrokerOptions & { host: string; port: number }
     const job = opts.store.get(row.job_id);
     const transition = opts.store.db.prepare("SELECT * FROM job_transitions WHERE job_id = ? ORDER BY id DESC LIMIT 1").get(row.job_id) as import("./store.ts").TransitionRow | undefined;
     if (!job || !transition || transition.to_state !== state) throw new Error(`missing persisted ${state} transition for ${row.job_id}`);
-    send(row.team, eventForTransition(job, transition, transitionColumns(opts.store, transition)));
+    for (const event of eventsForTransition(job, transition, transitionColumns(opts.store, transition))) send(row.team, event);
   });
   const live = { ...opts, send, emitJobState: emit }; // publicUrl is filled in once the port is known; createBroker reads it per request
   const app = createBroker(live);
