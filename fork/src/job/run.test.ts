@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { RejectedJob, runJob, sessionFor, takeJobLock, type RunOptions } from "./run.ts";
+import { RejectedJob, hostLockPath, runJob, sessionFor, takeJobLock, type RunOptions } from "./run.ts";
 import { stubConsumer, stubModel } from "./fixtures/stubs.ts";
 
 const fakePi = [process.execPath, fileURLToPath(new URL("./fixtures/fake-pi.mjs", import.meta.url))];
@@ -287,4 +287,26 @@ test("a stale lock (runner and Pi both gone) is replaced; an unreadable one is r
     assert.throws(() => takeJobLock(path), (e: Error) => e instanceof RejectedJob && /can't be read as a job lock/.test(e.message));
     assert.equal(readFileSync(path, "utf8"), garbage, "the unreadable lock is left exactly as it was");
   }
+});
+
+test("D14 host lock path: XDG_RUNTIME_DIR, else <base>/plantworks-<uid>; a directory others could write or swap is refused", async () => {
+  const { chmodSync, statSync, symlinkSync } = await import("node:fs");
+  const uid = process.getuid!();
+  const runtime = mkdtempSync(join(tmpdir(), "pw-xdg-"));
+  assert.equal(hostLockPath({ XDG_RUNTIME_DIR: runtime }).path, join(runtime, "plantworks", "job.lock"));
+  assert.equal(statSync(join(runtime, "plantworks")).mode & 0o777, 0o700, "created mode 700");
+  // No (or a relative) XDG_RUNTIME_DIR: the per-uid fallback, here under a temp base instead of /tmp.
+  const base = mkdtempSync(join(tmpdir(), "pw-tmpbase-"));
+  for (const env of [{}, { XDG_RUNTIME_DIR: "relative/dir" }]) {
+    const { path, source } = hostLockPath(env, base);
+    assert.equal(path, join(base, `plantworks-${uid}`, "job.lock"));
+    assert.match(source, /no \$XDG_RUNTIME_DIR/);
+  }
+  const loose = mkdtempSync(join(tmpdir(), "pw-loose-"));
+  mkdirSync(join(loose, `plantworks-${uid}`), { mode: 0o700 });
+  chmodSync(join(loose, `plantworks-${uid}`), 0o777);
+  assert.throws(() => hostLockPath({}, loose), (e: Error) => e instanceof RejectedJob && /is group- or world-writable \(mode 777\)/.test(e.message));
+  const swapped = mkdtempSync(join(tmpdir(), "pw-swap-"));
+  symlinkSync(mkdtempSync(join(tmpdir(), "pw-elsewhere-")), join(swapped, `plantworks-${uid}`));
+  assert.throws(() => hostLockPath({}, swapped), (e: Error) => e instanceof RejectedJob && /is not a directory \(a symlink or a file\)/.test(e.message));
 });

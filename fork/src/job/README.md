@@ -35,12 +35,20 @@ An interrupt before Pi runs does the same. A second Ctrl-C/SIGTERM gets the defa
 stop that hangs can still be killed; a runner killed with SIGKILL reports nothing. No branch is
 created, so there is none to leave intact.
 
-**One job at a time.** The runner holds `<home>/plantworks/job.lock` while a job runs, where
-`<home>` is the selected home: `PLANTWORKS_HOME` when set (it wins over `OPENRIG_HOME`, as for every
-`plantworks` command), else `OPENRIG_HOME`. The lock is created exclusively,
-recording the runner's and Pi's PIDs. A second `pw job run` with that lock is rejected (exit 2)
-before any event. The lock is per home by default; set `PLANTWORKS_JOB_LOCK` to one path to
-cover every home on the host. Fail-closed:
+**One job at a time on the host (D14).** `pw job run` holds one lock per host while a job runs,
+whatever home it uses. It is **per uid, not cross-user**: two users on one host each get their own.
+The path is chosen in this order, and the refusal messages say which applied:
+1. `PLANTWORKS_JOB_LOCK`, when set;
+2. `$XDG_RUNTIME_DIR/plantworks/job.lock`, when `XDG_RUNTIME_DIR` is set and absolute;
+3. `/tmp/plantworks-<uid>/job.lock`.
+
+For 2 and 3 the directory is created mode 700, then checked without following symlinks. It must be a
+real directory owned by this user with no group or world write; otherwise the job is refused, since
+another user could hold or swap the lock. (`runJob()`, the library, takes an explicit `lockPath`;
+without one it uses `<home>/plantworks/job.lock`.)
+
+The lock is created exclusively, recording the runner's and Pi's PIDs. A second `pw job run` while
+it is held is rejected (exit 2) before any event. Fail-closed:
 - the lock is released when the run ends, and only if it is still this run's;
 - it is stale, and replaced, only when the runner and the Pi it records are both gone, so a Pi left
   running by a killed runner still holds it. The lock says `starting` just before Pi is spawned and
@@ -52,9 +60,8 @@ To clear a lock the runner refuses (a runner died while starting Pi, or the file
 the refusal message also says:
 1. Check that no runner Pi is left: `pgrep -af -- '--mode rpc --no-session'` prints nothing, or only
    Pis you can account for. Stop any stray one.
-2. Delete the lock file the refusal names, exactly that path. It is the selected home's (with
-   `PLANTWORKS_HOME` set, that home, not `OPENRIG_HOME`), or `PLANTWORKS_JOB_LOCK`; don't rebuild it
-   by hand.
+2. Delete the lock file the refusal names, exactly that path (the message also says how it was
+   chosen). Don't rebuild the path by hand.
 
 A PID can be reused, so a stale lock whose PIDs now belong to other processes is refused until it
 is removed.
