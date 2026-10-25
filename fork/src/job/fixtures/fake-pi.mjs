@@ -7,6 +7,7 @@
 //   "mute" (settle, then never answer get_last_assistant_text),
 //   "child" (start a detached long-running child like Pi's bash tool; kill its group on abort),
 //   "env" (write this process's environment to $PI_FAKE_ENV_OUT, then behave as "ok").
+// PI_FAKE_WRITE writes files into the working directory first, in any mode.
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -20,6 +21,11 @@ const out = (rec) => process.stdout.write(`${JSON.stringify(rec)}\n`);
 let lastText = null;
 
 async function run(message) {
+  // PI_FAKE_WRITE="path=content;path=content": files Pi "edits" in its working directory, as a tool would.
+  for (const spec of (process.env.PI_FAKE_WRITE ?? "").split(";").filter(Boolean)) {
+    const at = spec.indexOf("=");
+    writeFileSync(join(process.cwd(), spec.slice(0, at)), spec.slice(at + 1));
+  }
   if (mode === "env") writeFileSync(process.env.PI_FAKE_ENV_OUT, JSON.stringify(process.env));
   if (mode === "hang") return;
   if (mode === "child") {

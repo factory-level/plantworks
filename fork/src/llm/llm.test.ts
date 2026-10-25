@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { CLASSES, ceilingProblems } from "./classes.ts";
 import { preflight, readEndpoint } from "./endpoint.ts";
-import { governBody, startGovernor as startGovernorUntracked, type CallRecord, type GovernorOptions } from "./governor.ts";
+import { governBody, startGovernor as startGovernorUntracked, usageOf, type CallRecord, type GovernorOptions } from "./governor.ts";
 import { emitTeam } from "../team/command.ts";
 
 type Seen = { method: string; url: string; auth?: string; body: string };
@@ -194,6 +194,29 @@ test("cutOff refuses the seat's calls and aborts the one in flight; restore lets
   g.restore();
   assert.equal((await fetch(`${g.url}/chat/completions`, { method: "POST", body: "{}" })).status, 200);
   assert.deepEqual(records.map((r) => [r.status, r.deadline]), [[403, false], [403, false], [200, false]]);
+});
+
+test("the governor totals the endpoint-reported tokens of successful completions, JSON or SSE", async (t) => {
+  let reply = 0;
+  const s = await stub((req, res) => {
+    reply++;
+    if (reply === 1) return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ choices: [], usage: { prompt_tokens: 100, completion_tokens: 20 } }));
+    if (reply === 2) {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n');
+      return res.end('data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}\n\ndata: [DONE]\n\n');
+    }
+    if (reply === 3) return res.writeHead(200).end("{}"); // reports no usage: adds nothing
+    return res.writeHead(400).end(JSON.stringify({ usage: { prompt_tokens: 999, completion_tokens: 999 } })); // a failed call is not counted
+  });
+  const g = await startGovernor({ endpoint: { url: s.url }, workerClass: CLASSES.quick, log: () => {} });
+  t.after(async () => { await g.close(); await s.close(); });
+  assert.equal(g.usage(), undefined, "unknown until a call reports usage");
+  for (let i = 0; i < 4; i++) await (await fetch(`${g.url}/chat/completions`, { method: "POST", body: "{}" })).text();
+  await (await fetch(`${g.url}/models`)).text(); // not a completion
+  assert.deepEqual(g.usage(), { promptTokens: 107, completionTokens: 23 });
+  assert.equal(usageOf("not json"), undefined);
+  assert.deepEqual(usageOf('{"usage":{"prompt_tokens":1,"completion_tokens":2}}'), { promptTokens: 1, completionTokens: 2 });
 });
 
 test("`plantworks pw llm preflight` checks the class model against the endpoint", async () => {

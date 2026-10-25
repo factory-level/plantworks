@@ -92,11 +92,36 @@ acknowledged are listed in `undelivered`, and the caller owns re-sending them
 (`../events/README.md`).
 
 **Results (Phase 0 scope):** the job's result is the runner's own return. The caller reads the
-result JSON on stdout, or the value `runJob()` returns. State events carry only the state and
-its detail (the settled PW-09/PW-10 contract), so **the callback alone is not a result channel**.
-This fits Phase 0, where a script stands in for the front door. Storing and retrieving results
-and artifacts for the broker and front door is a follow-up. It is needed before the full ADR 0204
-flow ("result + artifacts" back to the front door) can be said to work.
+result JSON on stdout, or the value `runJob()` returns. This fits Phase 0, where a script stands in
+for the front door. The broker path doesn't collect any of this yet.
+
+**Usage and artifacts (PW-13).** The result also carries:
+- `usage: {promptTokens, completionTokens, wallSeconds}`. The tokens are what the endpoint reported
+  on the job's successful completions, totalled by the governor, or `null` when no call reported
+  any. `wallSeconds` runs from `running` to the end, 0 if the job never ran.
+- `artifacts: {branch, commit, files: [{path, sha256}]}` when the working directory is in a git
+  repository and the job changed it. After Pi has stopped, on any ending (an interrupted job
+  included), the work tree is committed to `pw/<jobId>` with HEAD as its parent, through a temporary
+  index: the user's checkout, index and current branch aren't touched, and the commit's author is
+  a fixed neutral identity. Untracked files are taken with the standard excludes, so ignored files
+  such as `.env` never reach it. `files` lists the added or changed paths (not deletions) with the
+  sha256 of their committed content, streamed whatever the size. The branch is written last, so a
+  snapshot that fails leaves none. Under sparse checkout, files outside the cone (skip-worktree in the
+  user's index) keep HEAD's version, so they don't read as deleted.
+- **The snapshot runs nothing the job could have planted.** Pi ran as this user in this work tree,
+  so it could have written the repository's config and `.gitattributes`. So there is no `git add`
+  (clean filters), files are hashed with `--no-filters`, fsmonitor, hooks and the untracked cache are
+  off, and system and global git config aren't read. A tool process that outlived Pi's stop (see
+  "Stopping Pi") can still change the tree while it is read. Otherwise `{branch: null, skipped: <why>}`: not a git work tree, an unborn HEAD, a merge,
+  rebase, cherry-pick, revert or bisect in progress, nothing changed, or the snapshot failed (which
+  never fails the job).
+- A job whose `pw/<jobId>` branch already exists is rejected before any event: a branch is never
+  overwritten.
+
+The terminal `plantworks.job.state` event carries the D11 shapes, fork-defined pending HarnessHG
+ack: `usage: {promptTokens, completionTokens}` only when known (no wall time), and `artifacts: [{name: <path>, uri:
+git:<commit>:<path>}]` (no sha256: D11 has no field for it). The full card shape is the result
+JSON's. Nothing is pushed: the branch stays in the local repository.
 
 Pi is `@earendil-works/pi-coding-agent`, pinned in the platform's `versions.json`. Tests use
 a fake Pi (`fixtures/fake-pi.mjs`) and a stub OpenAI-compatible server. Set `PLANTWORKS_PI_BIN`

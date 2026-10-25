@@ -46,7 +46,29 @@ export type Governor = {
    * priority hints on, undefined holds model calls until a value is set, so no call goes out early.
    */
   setPriority: (priority: number | undefined) => void;
+  /** PW-13: the tokens the endpoint reported so far, or undefined until a call reports usage. */
+  usage: () => Usage | undefined;
 };
+
+/** Token totals the endpoint reported on the calls that went through (PW-13). Calls that reported none add nothing; `usage()` is undefined until one does. */
+export type Usage = { promptTokens: number; completionTokens: number };
+
+/** The OpenAI `usage` in a completions response: the JSON body, or the last SSE chunk that carries one. */
+export function usageOf(text: string): Usage | undefined {
+  const pick = (o: unknown) => {
+    const u = (o as { usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } } | null)?.usage;
+    return u && Number.isInteger(u.prompt_tokens) && Number.isInteger(u.completion_tokens) ? { promptTokens: u.prompt_tokens as number, completionTokens: u.completion_tokens as number } : undefined;
+  };
+  try { return pick(JSON.parse(text)); } catch { /* not one JSON body: an SSE stream */ }
+  let found: Usage | undefined;
+  for (const line of text.split("\n")) {
+    if (!line.startsWith("data:")) continue;
+    try { found = pick(JSON.parse(line.slice(5))) ?? found; } catch { /* [DONE], or a chunk cut by the scan window */ }
+  }
+  return found;
+}
+/** How much of a response is kept to read its usage: the usage chunk comes last, so the tail is enough. */
+const USAGE_WINDOW = 1 << 20;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "transfer-encoding", "content-length", "content-encoding", "host", "authorization"]);
@@ -84,6 +106,8 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
   let consecutiveDeadlines = 0;
   let failed = false;
   let cut: string | null = null;
+  const usage: Usage = { promptTokens: 0, completionTokens: 0 };
+  let reported = false;
   let priority: number | undefined = opts.priority;
   // With hints on, a model call waits until the seat's job priority is known: the daemon can wake
   // Pi as soon as the qitem exists, before the worker has the claim response (PW-29).
@@ -136,9 +160,17 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
             const out: Record<string, string> = {};
             upstream.headers.forEach((v, k) => { if (!HOP_BY_HOP.has(k)) out[k] = v; });
             res.writeHead(upstream.status, out);
-            if (upstream.body) for await (const chunk of upstream.body) res.write(chunk);
+            const counts = upstream.ok && completion;
+            const decoder = new TextDecoder();
+            let seen = "";
+            if (upstream.body) for await (const chunk of upstream.body) {
+              res.write(chunk);
+              if (counts) { seen += decoder.decode(chunk as Uint8Array, { stream: true }); if (seen.length > USAGE_WINDOW) seen = seen.slice(-USAGE_WINDOW); }
+            }
             res.end();
             record.status = upstream.status;
+            const u = counts ? usageOf(seen) : undefined;
+            if (u) { reported = true; usage.promptTokens += u.promptTokens; usage.completionTokens += u.completionTokens; }
             return;
           }
           await upstream.body?.cancel();
@@ -191,6 +223,7 @@ export async function startGovernor(opts: GovernorOptions): Promise<Governor> {
       for (const a of inFlight) a.abort(new Error(`cut off: ${why}`));
     },
     restore() { cut = null; },
+    usage: () => (reported ? { ...usage } : undefined),
     setPriority(n) {
       priority = n;
       if (n !== undefined) for (const release of [...waiting]) release();

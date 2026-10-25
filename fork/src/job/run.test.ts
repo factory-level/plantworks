@@ -39,7 +39,11 @@ async function setup(piMode = "ok") {
 test("a job runs queued -> claimed -> running -> done through the governor", async () => {
   const t = await setup();
   const result = await runJob(t.opts());
-  assert.deepEqual(result, { jobId: envelope.jobId, state: "done", detail: { outcome: "succeeded" }, text: "hello from the stub", undelivered: [] });
+  const { usage, artifacts, ...rest } = result;
+  assert.deepEqual(rest, { jobId: envelope.jobId, state: "done", detail: { outcome: "succeeded" }, text: "hello from the stub", undelivered: [] });
+  assert.deepEqual([usage.promptTokens, usage.completionTokens], [10, 2], "the stub endpoint's reported usage");
+  assert.ok(usage.wallSeconds >= 0 && usage.wallSeconds < 30);
+  assert.deepEqual(artifacts, { branch: null, skipped: "the working directory is not in a git work tree" });
   assert.deepEqual(t.consumer.states(), ["queued", "claimed", "running", "done"]);
   assert.deepEqual(t.consumer.events.map((e) => e.id), [1, 2, 3, 4].map((seq) => `${envelope.jobId}:${seq}`));
   // Pi's call went through the governor: output capped to the quick class, num_ctx stripped.
