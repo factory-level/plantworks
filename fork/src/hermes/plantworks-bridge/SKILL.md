@@ -67,7 +67,7 @@ edit the board.
 | `held` | blocked: pending an external approval decision. Say it can't be approved from here |
 | `done`, outcome `succeeded` | done, with the summary from step 4 |
 | `done`, outcome `rejected-by-checks` | blocked, with the checks' reason |
-| `done`, closure `handoff-sre` | blocked: needs a human to bring in the SRE agent |
+| `done`, closure `handoff-sre` (whatever the outcome) | blocked: needs a human to bring in the SRE agent |
 | `failed` | blocked, with the reason. A retry is a new attempt, and only on request |
 | `cancelled` | closed as cancelled, with the reason. Don't reopen it |
 | `retried` | leave it: the next attempt's job moves the card |
