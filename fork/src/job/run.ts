@@ -4,8 +4,8 @@
 // OpenRig daemon and no broker: the runner plays the broker's part for exactly one job.
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, closeSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, linkSync, lstatSync, mkdirSync, realpathSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, closeSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { DEFAULT_CLASS, classByName, type WorkerClass } from "../llm/classes.ts";
 import { readEndpoint } from "../llm/endpoint.ts";
 import { startGovernor, type Governor } from "../llm/governor.ts";
@@ -31,8 +31,10 @@ export interface RunOptions {
   log?: (line: string) => void;
   /** Aborting it (Ctrl-C/SIGTERM in `pw job run`) stops Pi and ends the job `failed` with reason `interrupted`. */
   signal?: AbortSignal;
-  /** The single-job lock. Default: <openrigHome>/plantworks/job.lock. */
+  /** The single-job lock. Default: <openrigHome>/plantworks/job.lock. `pw job run` passes the host's (hostLockPath). */
   lockPath?: string;
+  /** How lockPath was chosen, for the refusal messages. */
+  lockSource?: string;
 }
 
 export interface RunResult {
@@ -76,7 +78,7 @@ export async function runJob(opts: RunOptions): Promise<RunResult> {
 
   const log = opts.log ?? ((line) => process.stderr.write(`${line}\n`));
   // PW-13: one job at a time. Taken before any event, so a refused job emits nothing.
-  const lock = takeJobLock(opts.lockPath ?? join(opts.openrigHome, "plantworks", "job.lock"));
+  const lock = takeJobLock(opts.lockPath ?? join(opts.openrigHome, "plantworks", "job.lock"), undefined, opts.lockSource ?? (opts.lockPath ? "given by the caller" : "this home's default"));
   try {
     return await runLocked(opts, job, className, workerClass, timeoutSeconds, log, lock);
   } finally {
@@ -295,7 +297,66 @@ const alive = (pid: number) => {
  * replaced, only when the runner and the Pi it records are both gone; a lock that can't be read or
  * parsed is refused and left in place, since nothing proves its job stopped.
  */
-export function takeJobLock(path: string, now = () => new Date()): JobLock {
+/**
+ * D14: the host's job lock for `pw job run`, one per uid: $XDG_RUNTIME_DIR/plantworks/job.lock, else
+ * <base>/plantworks-<uid>/job.lock (base /tmp). The directory is created mode 700 and then checked
+ * without following symlinks: a real directory owned by this uid with no group or world write, or the
+ * job is refused. Another user's or a shared writable directory could let someone else hold or swap
+ * the lock, so this fails closed.
+ */
+export function hostLockPath(env: NodeJS.ProcessEnv = process.env, base = "/tmp", uidMap: string | undefined = readUidMap()): { path: string; source: string } {
+  const uid = process.getuid!();
+  const xdg = env.XDG_RUNTIME_DIR?.trim();
+  const [parent, leaf, source] = xdg && isAbsolute(xdg)
+    ? [xdg, "plantworks", "the host default under $XDG_RUNTIME_DIR; PLANTWORKS_JOB_LOCK overrides it"]
+    : [base, `plantworks-${uid}`, `the host default ${join(base, `plantworks-${uid}`)} (no $XDG_RUNTIME_DIR); PLANTWORKS_JOB_LOCK overrides it`];
+  // Resolve the parent once and use only the canonical path from here on (the checks, the mkdir and the
+  // lock), so a symlink in the way is never followed again after it was checked.
+  const canonical = realpathSync(parent);
+  const trusted = trustedOwners(uidMap, uid, overflowUid());
+  // Every directory above the lock's must be one nobody else can rename entries in: owned by a trusted
+  // owner, and not group- or world-writable unless sticky (like /tmp). Otherwise someone could move the
+  // checked directory away, and the next run would lock a fresh one alongside.
+  for (let up = canonical; ; up = dirname(up)) {
+    const a = lstatSync(up);
+    const unsafe = !a.isDirectory() ? "is not a directory"
+      : !trusted.has(a.uid) ? `is owned by uid ${a.uid}`
+      : a.mode & 0o022 && !(a.mode & 0o1000) ? `is group- or world-writable without the sticky bit (mode ${(a.mode & 0o7777).toString(8)})`
+      : undefined;
+    if (unsafe) throw new RejectedJob(`the job lock directory's parent ${JSON.stringify(up)} ${unsafe}, so another user could replace the lock directory; refusing to run. Fix that directory, or set PLANTWORKS_JOB_LOCK to a path under directories only you can change`);
+    if (up === dirname(up)) break;
+  }
+  const dir = join(canonical, leaf);
+  // Only the leaf is created (the parent was checked above); one left by an earlier run is checked below.
+  try { mkdirSync(dir, { mode: 0o700 }); } catch (e) { if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e; }
+  const st = lstatSync(dir);
+  const problem = !st.isDirectory() ? "is not a directory (a symlink or a file)"
+    : st.uid !== uid ? `is owned by uid ${st.uid}, not this user (${uid})`
+    : st.mode & 0o022 ? `is group- or world-writable (mode ${(st.mode & 0o777).toString(8)})`
+    : undefined;
+  if (problem) throw new RejectedJob(`the job lock directory ${JSON.stringify(dir)} ${problem}, so another user could hold or replace the lock; refusing to run. Fix its ownership and mode (700), or set PLANTWORKS_JOB_LOCK to a path you own`);
+  return { path: join(dir, "job.lock"), source };
+}
+
+/**
+ * Owners a lock directory's ancestors may have: this user and root. Inside a user namespace (a uid_map
+ * other than the initial namespace's identity map) the kernel shows owners outside it, such as the
+ * host's root, as the overflow uid, so that one is trusted too. Outside a namespace the overflow uid is
+ * the real `nobody` account, which anything running as nobody could use, so it is not trusted there.
+ * An unreadable uid_map counts as not in a namespace (the stricter choice).
+ */
+export function trustedOwners(uidMap: string | undefined, uid: number, overflow: number): Set<number> {
+  const identity = /^\s*0\s+0\s+4294967295\s*$/.test(uidMap ?? "");
+  const inNamespace = uidMap !== undefined && uidMap.trim() !== "" && !identity;
+  return new Set(inNamespace ? [uid, 0, overflow] : [uid, 0]);
+}
+const readUidMap = () => { try { return readFileSync("/proc/self/uid_map", "utf8"); } catch { return undefined; } };
+/** The kernel's overflow uid (65534 unless configured). */
+function overflowUid(): number {
+  try { return Number(readFileSync("/proc/sys/kernel/overflowuid", "utf8").trim()) || 65534; } catch { return 65534; }
+}
+
+export function takeJobLock(path: string, now = () => new Date(), source = "given by the caller"): JobLock {
   mkdirSync(dirname(path), { recursive: true });
   const mine: LockRecord = { runner: process.pid, pi: null, token: randomBytes(8).toString("hex"), since: now().toISOString() };
   const write = (target: string, flag?: string) => {
@@ -319,10 +380,10 @@ export function takeJobLock(path: string, now = () => new Date()): JobLock {
       held = JSON.parse(raw);
       if (!Number.isInteger(held.runner) || (held.pi !== null && held.pi !== "starting" && !Number.isInteger(held.pi))) throw new Error("not a lock record");
     } catch (e) {
-      throw new RejectedJob(`${path} exists but can't be read as a job lock (${(e as Error).message}); refusing to run. ${CLEAR_LOCK(path)}`);
+      throw new RejectedJob(`${path} (${source}) exists but can't be read as a job lock (${(e as Error).message}); refusing to run. ${CLEAR_LOCK(path)}`);
     }
-    if (held.pi === "starting" && !alive(held.runner)) throw new RejectedJob(`${path}: runner ${held.runner} died while starting Pi, so a Pi may still be running unrecorded; refusing to run. ${CLEAR_LOCK(path)}`);
-    if (alive(held.runner) || (typeof held.pi === "number" && alive(held.pi))) throw new RejectedJob(`one job at a time on this host: ${path} is held by runner ${held.runner}${typeof held.pi === "number" ? ` and Pi ${held.pi}` : ""} since ${held.since}`);
+    if (held.pi === "starting" && !alive(held.runner)) throw new RejectedJob(`${path} (${source}): runner ${held.runner} died while starting Pi, so a Pi may still be running unrecorded; refusing to run. ${CLEAR_LOCK(path)}`);
+    if (alive(held.runner) || (typeof held.pi === "number" && alive(held.pi))) throw new RejectedJob(`one job at a time on this host: ${path} (${source}) is held by runner ${held.runner}${typeof held.pi === "number" ? ` and Pi ${held.pi}` : ""} since ${held.since}`);
     // Stale: move it aside, then make sure what moved is the lock we judged stale, not one just taken.
     const aside = `${path}.stale.${process.pid}.${mine.token}`;
     renameSync(path, aside);

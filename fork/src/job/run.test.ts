@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { RejectedJob, runJob, sessionFor, takeJobLock, type RunOptions } from "./run.ts";
+import { RejectedJob, hostLockPath, runJob, sessionFor, takeJobLock, trustedOwners, type RunOptions } from "./run.ts";
 import { stubConsumer, stubModel } from "./fixtures/stubs.ts";
 
 const fakePi = [process.execPath, fileURLToPath(new URL("./fixtures/fake-pi.mjs", import.meta.url))];
@@ -287,4 +287,79 @@ test("a stale lock (runner and Pi both gone) is replaced; an unreadable one is r
     assert.throws(() => takeJobLock(path), (e: Error) => e instanceof RejectedJob && /can't be read as a job lock/.test(e.message));
     assert.equal(readFileSync(path, "utf8"), garbage, "the unreadable lock is left exactly as it was");
   }
+});
+
+test("D14 host lock path: XDG_RUNTIME_DIR, else <base>/plantworks-<uid>; a directory others could write or swap is refused", async () => {
+  const { chmodSync, realpathSync, statSync, symlinkSync } = await import("node:fs");
+  const uid = process.getuid!();
+  const runtime = mkdtempSync(join(tmpdir(), "pw-xdg-"));
+  assert.equal(hostLockPath({ XDG_RUNTIME_DIR: runtime }).path, join(realpathSync(runtime), "plantworks", "job.lock"));
+  assert.equal(statSync(join(runtime, "plantworks")).mode & 0o777, 0o700, "created mode 700");
+  // No (or a relative) XDG_RUNTIME_DIR: the per-uid fallback, here under a temp base instead of /tmp.
+  const base = mkdtempSync(join(tmpdir(), "pw-tmpbase-"));
+  for (const env of [{}, { XDG_RUNTIME_DIR: "relative/dir" }]) {
+    const { path, source } = hostLockPath(env, base);
+    assert.equal(path, join(realpathSync(base), `plantworks-${uid}`, "job.lock"));
+    assert.match(source, /no \$XDG_RUNTIME_DIR/);
+  }
+  const loose = mkdtempSync(join(tmpdir(), "pw-loose-"));
+  mkdirSync(join(loose, `plantworks-${uid}`), { mode: 0o700 });
+  chmodSync(join(loose, `plantworks-${uid}`), 0o777);
+  assert.throws(() => hostLockPath({}, loose), (e: Error) => e instanceof RejectedJob && /is group- or world-writable \(mode 777\)/.test(e.message));
+  // An unsafe parent (r2): world-writable without the sticky bit lets anyone rename the checked
+  // directory away and make the next run lock a fresh one. Refused; with the sticky bit, as /tmp has, accepted.
+  const openParent = mkdtempSync(join(tmpdir(), "pw-openparent-"));
+  chmodSync(openParent, 0o777);
+  assert.throws(() => hostLockPath({ XDG_RUNTIME_DIR: openParent }), (e: Error) => e instanceof RejectedJob && /parent .* is group- or world-writable without the sticky bit \(mode 777\)/.test(e.message));
+  assert.equal(existsSync(join(openParent, "plantworks")), false, "nothing was created under it");
+  chmodSync(openParent, 0o1777);
+  assert.equal(hostLockPath({ XDG_RUNTIME_DIR: openParent }).path, join(openParent, "plantworks", "job.lock"), "a sticky shared parent is fine");
+  // A symlinked XDG_RUNTIME_DIR (r2): the lock is placed under the resolved directory and that path's
+  // ancestors are what get checked, so the symlink is never followed again after the check.
+  const real = mkdtempSync(join(tmpdir(), "pw-realxdg-"));
+  const alias = join(mkdtempSync(join(tmpdir(), "pw-alias-")), "xdg");
+  symlinkSync(real, alias);
+  assert.equal(hostLockPath({ XDG_RUNTIME_DIR: alias }).path, join(realpathSync(real), "plantworks", "job.lock"), "the canonical path is used");
+  const unsafeReal = mkdtempSync(join(tmpdir(), "pw-unsafe-"));
+  chmodSync(unsafeReal, 0o777);
+  const unsafeAlias = join(mkdtempSync(join(tmpdir(), "pw-alias-")), "xdg");
+  symlinkSync(unsafeReal, unsafeAlias);
+  assert.throws(() => hostLockPath({ XDG_RUNTIME_DIR: unsafeAlias }), /parent .* is group- or world-writable without the sticky bit/, "a symlink to an unsafe directory is judged by its target");
+  hostLockPath({ XDG_RUNTIME_DIR: runtime });
+  assert.equal(hostLockPath({ XDG_RUNTIME_DIR: runtime }).path, join(realpathSync(runtime), "plantworks", "job.lock"), "an existing safe lock directory is reused");
+  const swapped = mkdtempSync(join(tmpdir(), "pw-swap-"));
+  symlinkSync(mkdtempSync(join(tmpdir(), "pw-elsewhere-")), join(swapped, `plantworks-${uid}`));
+  assert.throws(() => hostLockPath({}, swapped), (e: Error) => e instanceof RejectedJob && /is not a directory \(a symlink or a file\)/.test(e.message));
+});
+
+test("D14: the overflow uid (nobody) is trusted like root only inside a user namespace", () => {
+  // The initial namespace's identity map: 65534 is the real nobody account there, so a nobody-owned ancestor is refused.
+  assert.deepEqual([...trustedOwners("         0          0 4294967295\n", 1000, 65534)].sort((a, b) => a - b), [0, 1000]);
+  // Inside a namespace that maps only this user, the host's root (and everyone unmapped) shows as 65534.
+  assert.deepEqual([...trustedOwners("      1000       1000          1\n", 1000, 65534)].sort((a, b) => a - b), [0, 1000, 65534]);
+  // Can't tell: treated as not in a namespace (stricter).
+  assert.deepEqual([...trustedOwners(undefined, 1000, 65534)].sort((a, b) => a - b), [0, 1000]);
+  assert.deepEqual([...trustedOwners("", 1000, 65534)].sort((a, b) => a - b), [0, 1000]);
+});
+
+test("D14: outside a namespace, a parent owned by nobody (65534) is refused", async (t) => {
+  // A nobody-owned directory needs root to make, but a user namespace that maps only this user shows
+  // the host's root-owned / and /tmp as 65534. Given the initial namespace's identity uid_map, as on an
+  // ordinary host, hostLockPath must refuse them; with the namespace's real map it accepts them.
+  const { spawnSync } = await import("node:child_process");
+  const probe = spawnSync("unshare", ["--user", `--map-user=${process.getuid!()}`, `--map-group=${process.getgid!()}`, "true"]);
+  if (probe.status !== 0) { t.skip(`unprivileged user namespaces are unavailable here (${String(probe.stderr).trim() || probe.error?.message || `exit ${probe.status}`})`); return; }
+  const runTs = fileURLToPath(new URL("./run.ts", import.meta.url));
+  const dir = mkdtempSync(join(tmpdir(), "pw-nobody-"));
+  const script = `import(${JSON.stringify(runTs)}).then(({ hostLockPath }) => {
+    const identity = "         0          0 4294967295\\n";
+    for (const [name, map] of [["identity", identity], ["namespace", undefined]]) {
+      try { hostLockPath({ XDG_RUNTIME_DIR: ${JSON.stringify(dir)} }, "/tmp", map ?? require("node:fs").readFileSync("/proc/self/uid_map", "utf8")); console.log(name + ": accepted"); }
+      catch (e) { console.log(name + ": " + e.message); }
+    }
+  });`;
+  const r = spawnSync("unshare", ["--user", `--map-user=${process.getuid!()}`, `--map-group=${process.getgid!()}`, process.execPath, "-e", script], { encoding: "utf8", env: { PATH: process.env.PATH } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^identity: the job lock directory's parent "[^"]+" is owned by uid 65534/m, "outside a namespace, nobody is not trusted");
+  assert.match(r.stdout, /^namespace: accepted$/m, "inside one, 65534 stands for the host's root");
 });
