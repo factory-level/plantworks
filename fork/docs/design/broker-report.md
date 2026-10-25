@@ -189,8 +189,10 @@ Restart and crash, which are the cases the tests cover:
    seconds, so that leaves margin. It delays `done`, and the slot's release, by up to that long when a
    worker is gone. Drain sees the job as in flight during the wait, which is correct. Values under
    10 s are refused (above).
-3. **`.pi/SYSTEM.md` in the workspace** (r1: in, as part of slice 3). At take-up the worker refuses
-   to claim for a workspace that ships `.pi/SYSTEM.md` or `APPEND_SYSTEM.md`. That is the broker half
+3. **`.pi/SYSTEM.md` in the workspace** (r1: in, as part of slice 3). The worker refuses to claim
+   for a workspace that ships `.pi/SYSTEM.md` or `APPEND_SYSTEM.md`. The check runs at worker start
+   and again **before each `claim-next`**, never after one: once claimed, the qitem exists and Pi is
+   awake, so a refusal then would leave a claimed job. That is the broker half
    of PW-12's `6adc1667`. It inherits the co-location caveat, since it inspects the tree the worker
    sees, so it is worded "refused when seen".
 
