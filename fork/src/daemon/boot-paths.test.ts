@@ -49,3 +49,18 @@ test("unresolvable write paths fail closed rather than being treated as missing 
     }
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
+
+test("symlinks are resolved before parent traversal, for existing and missing targets", () => {
+  const root = mkdtempSync(join(tmpdir(), "pw-link-parent-"));
+  const home = join(root, "pw"), other = join(root, "other");
+  mkdirSync(home); mkdirSync(join(other, "child"), { recursive: true });
+  try {
+    symlinkSync(join(other, "child"), join(home, "link"));
+    writeFileSync(join(other, "existing.sqlite"), "sentinel");
+    for (const filename of ["existing.sqlite", "missing.sqlite"]) {
+      // Do not use path.join: lexical normalization would erase the symlink before checking it.
+      const path = `${home}/link/../${filename}`;
+      assert.deepEqual(applyHomeDefaults({ PLANTWORKS_HOME: home, OPENRIG_DB: path }), ["OPENRIG_DB"]);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

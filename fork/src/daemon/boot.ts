@@ -5,7 +5,7 @@
 // Everything here is environment the upstream CLI and daemon already read; nothing upstream changes.
 import { homedir } from "node:os";
 import { lstatSync, readlinkSync, realpathSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { isLoopbackBind } from "../../../packages/daemon/dist/middleware/auth-bearer-token.js";
 
 /** Upstream's defaults are ~/.openrig, 7433 and a database-conflict warning. */
@@ -59,23 +59,28 @@ function dropInheritedDaemon(env: Env, home: string): string[] {
 
 /** Resolve missing tails AND dangling symlinks, without creating anything. Unverifiable paths fail closed. */
 function realPath(path: string, seen = new Set<string>()): string {
-  const absolute = resolve(path);
+  // Preserve parent traversal until the filesystem has resolved symlinks: link/../db can
+  // name an outside file even when lexical path.resolve would place it inside the home.
+  const absolute = isAbsolute(path) ? path : `${process.cwd()}${sep}${path}`;
   if (seen.has(absolute)) throw new Error(`symlink cycle while resolving ${path}`);
   seen.add(absolute);
   try {
-    return realpathSync(absolute);
+    return realpathSync.native(absolute);
   } catch (realpathError) {
+    if ((realpathError as NodeJS.ErrnoException).code !== "ENOENT") throw realpathError;
     let stat: ReturnType<typeof lstatSync>;
     try {
       stat = lstatSync(absolute);
     } catch (lstatError) {
       // Only ENOENT means an absent tail. EACCES, ENOTDIR and other errors cannot establish containment.
-      if ((realpathError as NodeJS.ErrnoException).code !== "ENOENT" ||
-          (lstatError as NodeJS.ErrnoException).code !== "ENOENT") throw realpathError;
+      if ((lstatError as NodeJS.ErrnoException).code !== "ENOENT") throw realpathError;
       const parent = dirname(absolute);
       return parent === absolute ? absolute : join(realPath(parent, seen), basename(absolute));
     }
-    if (stat.isSymbolicLink()) return realPath(resolve(dirname(absolute), readlinkSync(absolute)), seen);
+    if (stat.isSymbolicLink()) {
+      const target = readlinkSync(absolute);
+      return realPath(isAbsolute(target) ? target : `${dirname(absolute)}${sep}${target}`, seen);
+    }
     throw realpathError;
   }
 }
