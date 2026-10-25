@@ -514,9 +514,17 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   }
 
   const recentLines = lastNonBlank.slice(-8);
+  const claudeComposer = findClaudeComposer(paneContent, options);
+  // Claude's own timer row above its complete, empty input box means the turn is running, not waiting at a dialogue:
+  // a real dialogue replaces the input box, and a prompt drawn above the box shows no timer row. So for a Claude read,
+  // prompt-looking text above that box is quoted output or history. Only the timer row counts, never a selector-shaped
+  // "mid-work" line.
+  const historyAboveInput = options.runtime === "claude-code" && claudeComposer?.framed === true &&
+    CLAUDE_ANCHORED_MODE_FOOTER.test(claudeComposer.bar) && IDLE_PROMPT_PATTERNS.some(pattern => pattern.test(claudeComposer.text)) &&
+    !!claudeComposer.liveStatus && CLAUDE_LIVE_STATUS_PATTERN.test(claudeComposer.liveStatus);
   // Wider window for prompt SIGNATURES so a tall footer can't push a real prompt out of view (see
   // PROMPT_SCAN_LINES). The generic activity checks below keep the tighter 8-line window.
-  const promptScanLines = lastNonBlank.slice(-PROMPT_SCAN_LINES);
+  const promptScanLines = historyAboveInput ? [] : lastNonBlank.slice(-PROMPT_SCAN_LINES);
   const trailingNonBlank = lastNonBlank.slice(-3);
   const lastLine = lastNonBlank.at(-1) ?? "";
   const idlePromptLine = trailingNonBlank.find((line) =>
@@ -525,7 +533,6 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   const idleStatusBarLine = IDLE_STATUS_BAR_PATTERNS.some((pattern) => pattern.test(lastLine))
     ? lastLine
     : null;
-  const claudeComposer = findClaudeComposer(paneContent, options);
   const oldQuestionEnd = promptScanLines.lastIndexOf(CLAUDE_QUESTION_FOOTER);
   const permissionPromptEvidence = findPatternEvidence(promptScanLines, PERMISSION_PROMPT_PATTERNS);
   // A complete later empty composer with a recognized Claude bar makes the preceding question history.
@@ -1567,7 +1574,7 @@ export function readInputBox(pane: string | null, runtime: "claude-code" | "code
 }
 
 export interface SendOpts {
-  /** Internal provenance derived by the authenticated transport route. */
+  /** Internal provenance derived by the transport route. */
   identityProvenance?: string;
   /** Internal wake provenance, never accepted from the public transport route. */
   queueWake?: boolean;
@@ -1651,6 +1658,18 @@ export interface SendOpts {
 }
 
 const CALLER_CANCELLED = "caller_cancelled";
+
+/** The readiness reason's tail when only the retained hook says the seat waits on a person: the pane shows no prompt it
+ *  recognizes. */
+const LATEST_HOOK_ONLY = "latest hook, pane unrecognized";
+
+/** What to do when the refusal rests only on a retained hook (a Claude waiting hook, or a Codex permission request the pane
+ *  can't confirm): a prompt declined or answered with no hook after it reads that way until someone who saw it end says so. */
+function clearAttentionHint(sessionName: string, reason: string): string {
+  return reason.endsWith(LATEST_HOOK_ONLY) || reason === "permission_request_unverified"
+    ? ` Look first: rig capture ${sessionName}. If that prompt is gone (declined or answered), clear it: rig seat clear-attention ${sessionName} --reason "<what you saw>".`
+    : "";
+}
 
 /** The caller's cancellation signal, or none for sends no caller owns (queue wakes, committed outbox deliveries). */
 function callerSignal(opts?: SendOpts): AbortSignal | undefined {
@@ -2836,7 +2855,7 @@ export class SessionTransport {
             recheck.state === "needs_input"
               ? {
                   reason: "target_needs_input",
-                  error: `Refused: '${sessionName}' is at an interactive prompt (${recheck.reason}). A message must not select or approve it. To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>". No text was sent.`,
+                  error: `Refused: '${sessionName}' is at an interactive prompt (${recheck.reason}). A message must not select or approve it. To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>".${clearAttentionHint(sessionName, recheck.reason)} No text was sent.`,
                 }
               : recheck.state === "unknown"
                 ? {
@@ -2945,7 +2964,7 @@ export class SessionTransport {
             sessionName,
             reason: "target_needs_input",
             activity: readiness,
-            error: `Refused: '${sessionName}' is at an interactive prompt (${readiness.reason}). A message must not select or approve it. To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>". No text was sent.`,
+            error: `Refused: '${sessionName}' is at an interactive prompt (${readiness.reason}). A message must not select or approve it. To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>".${clearAttentionHint(sessionName, readiness.reason)} No text was sent.`,
           };
         }
       } else if (readiness.state === "unknown") {
@@ -3300,7 +3319,7 @@ export class SessionTransport {
         return {
           ok: false,
           reason: "target_needs_input",
-          error: `Target requires attention (${activity.reason}). No text was sent.`,
+          error: `Target requires attention (${activity.reason}).${clearAttentionHint(input.sessionName, activity.reason)} No text was sent.`,
           activity,
           waitedMs,
           attempts,
@@ -3510,7 +3529,7 @@ export class SessionTransport {
       return {
         ...hookActivity,
         state: "needs_input",
-        reason: `${hookActivity.rawSubtype ?? hookActivity.rawEvent ?? "needs_input"}; latest hook, pane unrecognized`,
+        reason: `${hookActivity.rawSubtype ?? hookActivity.rawEvent ?? "needs_input"}; ${LATEST_HOOK_ONLY}`,
       };
     }
     return probe;
