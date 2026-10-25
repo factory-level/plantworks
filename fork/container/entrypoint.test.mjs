@@ -9,6 +9,7 @@ import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sealedEnv } from "../src/test-support/sealed-env.ts";
 
 const entrypoint = fileURLToPath(new URL("./entrypoint.sh", import.meta.url));
 
@@ -92,7 +93,7 @@ test("health: broker is healthy only on a 200 from /healthz", async () => {
   const check = (env) => new Promise((resolve) => {
     const dir = mkdtempSync(join(tmpdir(), "pw-health-"));
     writeFileSync(join(dir, "role"), "broker\n");
-    spawn("bash", [entrypoint, "health"], { env: { ...process.env, FORK_ROLE_FILE: join(dir, "role"), PLANTWORKS_BROKER_PORT: port, ...env } }).on("exit", resolve);
+    spawn("bash", [entrypoint, "health"], { env: sealedEnv({ FORK_ROLE_FILE: join(dir, "role"), PLANTWORKS_BROKER_PORT: port, ...env }) }).on("exit", resolve);
   });
   try {
     assert.equal(await check({}), 0);

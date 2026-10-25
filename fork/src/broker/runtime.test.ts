@@ -14,6 +14,7 @@ import { runtimeRoutes } from "./runtime.ts";
 import { API, createBroker, loadTeams, startBroker, type Send } from "./server.ts";
 import { openStore } from "./store.ts";
 import { parseSlotCaps } from "./slots.ts";
+import { sealedEnv } from "../test-support/sealed-env.ts";
 
 const cls = (approval: string, extra = {}) => ({ slots: 1, model: "qwen3.5:9b", context: { maxContextTokens: 16384, thinkingTokens: 0 }, perCall: { maxOutputTokens: 1536, deadlineSeconds: 60 }, approval, timeoutSeconds: 900, maxAttempts: 1, ...extra });
 const definition = {
@@ -114,7 +115,7 @@ test("plantworks pw worker drain: exit 3 while work is in flight, 4 when another
   store.confirmClaim(id(3), "seat-c", "q-3");
   const broker = await startBroker({ store, teams: loadTeams(dir, platform), send, token: "t0k", host: "127.0.0.1", port: 0, routes: [runtimeRoutes({ slotCaps })] });
   const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
-  const env = { ...process.env, OPENRIG_HOME: mkdtempSync(join(tmpdir(), "pw-home-")), PLANTWORKS_BROKER_URL: broker.url, PLANTWORKS_BROKER_TOKEN: "t0k" };
+  const env = sealedEnv({ OPENRIG_HOME: mkdtempSync(join(tmpdir(), "pw-home-")), PLANTWORKS_BROKER_URL: broker.url, PLANTWORKS_BROKER_TOKEN: "t0k" });
   const drain = (timeoutS = 1) => promisify(execFile)(process.execPath, [bin, "pw", "worker", "drain", "--seat", "seat-c", "--timeout-s", String(timeoutS), "--poll-ms", "100"], { env })
     .then((r) => ({ code: 0, ...r }), (e) => ({ code: e.code as number, stdout: e.stdout as string, stderr: e.stderr as string }));
   try {

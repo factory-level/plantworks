@@ -13,6 +13,7 @@ import { API, createBroker, expand, jobRecord, loadTeams, startBroker, type Brok
 import type { CloudEvent } from "../events/job-state.ts";
 import { openStore } from "./store.ts";
 import Database from "better-sqlite3";
+import { sealedEnv } from "../test-support/sealed-env.ts";
 
 // The ADR 0204 sample team: `quick` needs no approval, `long` is per-job; `review` is `always`, with a 60 s TTL.
 const definition = (team = "social-media") => ({
@@ -219,7 +220,7 @@ test("plantworks pw broker serve: submit over HTTP, the event is delivered, and 
   const home = mkdtempSync(join(tmpdir(), "pw-broker-"));
   const platformFile = join(home, "platform.json");
   writeFileSync(platformFile, JSON.stringify(platform));
-  const env = { ...process.env, OPENRIG_HOME: home, PLANTWORKS_TEAMS_DIR: teamsDir(), PLANTWORKS_FRONTDOOR_CALLBACK: consumer.url, PLANTWORKS_BROKER_TOKEN: "t0k", PLANTWORKS_SLOT_CAP: "social-media=3" };
+  const env = sealedEnv({ OPENRIG_HOME: home, PLANTWORKS_TEAMS_DIR: teamsDir(), PLANTWORKS_FRONTDOOR_CALLBACK: consumer.url, PLANTWORKS_BROKER_TOKEN: "t0k", PLANTWORKS_SLOT_CAP: "social-media=3" });
   const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
   const serve = async () => {
     const child = spawn(process.execPath, [bin, "pw", "broker", "serve", "--platform", platformFile, "--port", "0"], { env });
@@ -318,8 +319,8 @@ test("plantworks pw broker serve: a class over an env ceiling, a bad ceiling or 
   const platformFile = join(home, "platform.json");
   writeFileSync(platformFile, JSON.stringify(platform));
   const bin = fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url));
-  const base = { ...process.env, OPENRIG_HOME: home, PLANTWORKS_TEAMS_DIR: teamsDir(), PLANTWORKS_FRONTDOOR_CALLBACK: "http://127.0.0.1:9/cb", PLANTWORKS_BROKER_TOKEN: "t0k" };
-  for (const k of ["PLANTWORKS_MAX_CALL_SECONDS", "PLANTWORKS_MAX_CALL_OUTPUT", "PLANTWORKS_SLOT_CAP"]) delete (base as Record<string, unknown>)[k];
+  // Built from scratch, so PLANTWORKS_MAX_CALL_SECONDS, _MAX_CALL_OUTPUT and _SLOT_CAP are unset.
+  const base = sealedEnv({ OPENRIG_HOME: home, PLANTWORKS_TEAMS_DIR: teamsDir(), PLANTWORKS_FRONTDOOR_CALLBACK: "http://127.0.0.1:9/cb", PLANTWORKS_BROKER_TOKEN: "t0k" });
   // With PLANTWORKS_SLOT_CAP unset (1 per key), a team asking for one slot: quick only.
   const oneSlot = teamsDir();
   const spec = join(oneSlot, "social-media", "team.json");
@@ -456,7 +457,7 @@ test("plantworks pw broker serve: a held job is approved through the decision UR
   const home = mkdtempSync(join(tmpdir(), "pw-broker-"));
   const platformFile = join(home, "platform.json");
   writeFileSync(platformFile, JSON.stringify(platform));
-  const env = { ...process.env, OPENRIG_HOME: home, PLANTWORKS_TEAMS_DIR: teamsDir(), PLANTWORKS_FRONTDOOR_CALLBACK: consumer.url, PLANTWORKS_BROKER_TOKEN: "t0k", PLANTWORKS_SLOT_CAP: "social-media=3" };
+  const env = sealedEnv({ OPENRIG_HOME: home, PLANTWORKS_TEAMS_DIR: teamsDir(), PLANTWORKS_FRONTDOOR_CALLBACK: consumer.url, PLANTWORKS_BROKER_TOKEN: "t0k", PLANTWORKS_SLOT_CAP: "social-media=3" });
   const child = spawn(process.execPath, [fileURLToPath(new URL("../../bin/plantworks.mjs", import.meta.url)), "pw", "broker", "serve", "--platform", platformFile, "--port", "0"], { env });
   try {
     const url = await new Promise<string>((resolve, reject) => {
