@@ -246,3 +246,78 @@ test("W4-A: a report stays within the broker's limits: too many files become a s
   const ok = { branch: `pw/${jobId}`, commit: "c".repeat(40), files: files.slice(0, 256) };
   assert.equal(withinLimits(ok), ok, "within the limits it is unchanged");
 });
+
+// --- W4-E: the handoff member ---------------------------------------------------------------------
+const sre = { agents: { "platform-sre": { slackApp: "${PLANTWORKS_SRE_SLACK_PLATFORM}" } } };
+const validHandoff = { targetAgent: "platform-sre", summary: "disk pressure on the build host", suggestedAction: "expand the volume", evidence: [{ kind: "log", uri: "https://logs.invalid/1" }] };
+
+test("W4-E e2e: Pi writes .plantworks/handoff.json; the worker's report carries it, and the real broker settles done with closure handoff-sre for the mapped agent", async () => {
+  const ws = workspaceRepo();
+  const env = home(ws);
+  const { s, url } = stubBroker();
+  worker(env, await url, await llm());
+  await until(() => s.claims > 0);
+  assert.equal((await modelCall(env.h)).status, 200); // after take-up
+  mkdirSync(join(ws, ".plantworks"));
+  writeFileSync(join(ws, ".plantworks", "handoff.json"), JSON.stringify(validHandoff));
+  s.closed = true;
+  await until(() => s.reports.length > 0);
+  const body = s.reports[0]!;
+  assert.deepEqual(body.handoff, { artifact: validHandoff }, "the artifact rides the report");
+  assert.doesNotMatch(JSON.stringify(body.artifacts), /\.plantworks/, "and not the snapshot");
+  // The same body, through #115's real validator and store: done, closure handoff-sre, the mapped agent.
+  const { validateReport } = await import("./server.ts");
+  const { openStore } = await import("./store.ts");
+  const v = validateReport(body, jobId);
+  assert.ok(v.ok, JSON.stringify(v));
+  const store = openStore(":memory:");
+  try {
+    store.insert({ jobId, team: "t", task: { prompt: "p" } } as never, "small", "queued");
+    store.reserve("t", "small", seat, "q1");
+    store.confirmClaim(jobId, seat, "q1");
+    store.transition(jobId, "running");
+    assert.equal(store.settleReport(jobId, "handoff-sre", 7, 30_000, { sre }), null, "the seat's handoff-sre closure opens the wait");
+    assert.equal(store.storeReport(jobId, v.ok ? v.fence : (undefined as never), v.ok ? v.report : (undefined as never)), "stored");
+    const settled = store.settleReport(jobId, "handoff-sre", 7, 30_000, { sre });
+    assert.deepEqual(settled?.detail, { outcome: "rejected-by-checks", closure: "handoff-sre" }, "a handoff never claims success by default");
+    const result = JSON.parse(store.get(jobId)!.result!);
+    assert.equal(result.handoff.targetAgent, "platform-sre");
+    assert.equal(result.handoff.slackApp, "PLANTWORKS_SRE_SLACK_PLATFORM", "the reference's name, never a value");
+  } finally { store.close(); }
+});
+
+test("W4-E: the handoff on the wire is {artifact} or exactly 'missing'/'invalid'; the detail stays in the log", async () => {
+  const { take, handoffOf } = await import("./report.ts");
+  const usage = { promptTokens: 0, completionTokens: 0 };
+  const taken = (ws: string | undefined, env = home(ws), recovered = false) => take(jobId, usage, { recovered, workspace: ws, openrigHome: env.h, seat });
+  // A file already there at take-up and unchanged: stale, so missing.
+  const stale = workspaceRepo();
+  mkdirSync(join(stale, ".plantworks"));
+  writeFileSync(join(stale, ".plantworks", "handoff.json"), JSON.stringify(validHandoff));
+  assert.deepEqual(handoffOf(taken(stale), stale), { handoff: { unavailable: "missing" }, detail: "unchanged since take-up" });
+  // A symlink, and an oversize file: invalid, exactly, with the reason only in the detail.
+  const linked = workspaceRepo();
+  const t1 = taken(linked);
+  mkdirSync(join(linked, ".plantworks"));
+  const outside = join(mkdtempSync(join(tmpdir(), "pw-out-")), "h.json");
+  writeFileSync(outside, JSON.stringify(validHandoff));
+  (await import("node:fs")).symlinkSync(outside, join(linked, ".plantworks", "handoff.json"));
+  assert.deepEqual(handoffOf(t1, linked), { handoff: { unavailable: "invalid" }, detail: "invalid: symlink" });
+  const big = workspaceRepo();
+  const t2 = taken(big);
+  mkdirSync(join(big, ".plantworks"));
+  writeFileSync(join(big, ".plantworks", "handoff.json"), JSON.stringify({ ...validHandoff, summary: "x".repeat(20_000) }));
+  assert.deepEqual(handoffOf(t2, big), { handoff: { unavailable: "invalid" }, detail: "invalid: over 16 KiB" });
+  // No workspace, an unverifiable one, a recovered job: missing.
+  assert.deepEqual(handoffOf(taken(undefined), undefined).handoff, { unavailable: "missing" });
+  const plain = mkdtempSync(join(tmpdir(), "pw-plain-"));
+  assert.deepEqual(handoffOf(taken(plain), plain), { handoff: { unavailable: "missing" }, detail: "workspace unverifiable: not a git work tree" });
+  const rec = workspaceRepo();
+  assert.deepEqual(handoffOf(taken(rec, home(rec), true), rec), { handoff: { unavailable: "missing" }, detail: "baseline lost (worker restarted)" });
+  // A valid new file: the artifact.
+  const fresh = workspaceRepo();
+  const t3 = taken(fresh);
+  mkdirSync(join(fresh, ".plantworks"));
+  writeFileSync(join(fresh, ".plantworks", "handoff.json"), JSON.stringify(validHandoff));
+  assert.deepEqual(handoffOf(t3, fresh), { handoff: { artifact: validHandoff } });
+});
