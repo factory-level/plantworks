@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -238,9 +238,22 @@ test("home config resolves under PLANTWORKS_HOME, never the ambient OPENRIG_HOME
   const started = await pw(first, "daemon", "start");
   try {
     assert.equal(started.code, 0, started.stderr);
+    // Refused by the fork's pre-check, whether its probes confirm the first daemon or (on a loaded host) can't
+    // answer in time: either way it is refused before a second daemon is spawned, so this no longer depends on timing.
     const refused = await pw(second, "daemon", "start");
-    assert.notEqual(refused.code, 0, "the second daemon must not start");
-    assert.match(readFileSync(join(root, "c", "daemon.log"), "utf8"), /OPENRIG_DB_CONFLICT: .*daemon\.db_conflict=stop/);
+    assert.equal(refused.code, 2, `the second daemon must not start: ${refused.stderr}`);
+    assert.match(refused.stderr, /^plantworks: (OPENRIG_DB_CONFLICT: another live daemon \(pid \d+, record .*daemon\.json\) has .*shared\.sqlite open|cannot confirm that no other daemon has the database open \(.*\)); daemon start stopped/);
+    assert.equal(existsSync(join(root, "c", "daemon.json")), false, "no second daemon was spawned");
+    // With an explicit warn, a check that can't answer (a hanging lsof) does not stop the start: upstream's behaviour.
+    const shim = join(root, "shim");
+    mkdirSync(shim);
+    writeFileSync(join(shim, "lsof"), "#!/bin/sh\nexec sleep 30\n");
+    chmodSync(join(shim, "lsof"), 0o755);
+    const warned = { OPENRIG_HOME: join(root, "e"), OPENRIG_DB: join(root, "e.sqlite"), OPENRIG_PORT: String(await freePort()), OPENRIG_DAEMON_DB_CONFLICT: "warn", PATH: `${shim}:${base.PATH}` };
+    writeFileSync(warned.OPENRIG_DB, "");
+    const startedWarn = await pw(warned, "daemon", "start");
+    assert.equal(startedWarn.code, 0, `warn starts despite the hanging lsof: ${startedWarn.stderr}`);
+    await pw(warned, "daemon", "stop");
     // Explicit CLI selections remain intentional even with PLANTWORKS_HOME isolation enabled.
     const third = { PLANTWORKS_HOME: join(root, "d") };
     const escaped = await pw(third, "daemon", "start", "--db", db, "--port", String(portC), "--allow-db-conflict");

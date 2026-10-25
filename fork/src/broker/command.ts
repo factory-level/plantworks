@@ -37,6 +37,7 @@ export function brokerVerb(pw: Command): void {
         const teams = loadTeams(dir, { ...loadPlatform(opts.platform), callCeilings: callCeilingsFromEnv(process.env) });
         const over = slotCapProblems(teams, slotCaps);
         if (over.length) throw new Error(`team specs exceed the runtime slot cap:\n  ${over.join("\n  ")}`);
+        const reportWaitMs = reportWaitFromEnv(process.env.PLANTWORKS_REPORT_WAIT_S);
         store = openStore(opts.db ?? join(process.env.OPENRIG_HOME!, "plantworks", "broker.sqlite"));
         // claim-next (PW-18) hands jobs to seats through the daemon's queue: PLANTWORKS_DAEMON_URL, with
         // the daemon's own OPENRIG_AUTH_BEARER_TOKEN when it has one.
@@ -45,7 +46,7 @@ export function brokerVerb(pw: Command): void {
         const routes = [claimNextRoutes({ daemon, slotCaps, brokerSession }), runtimeRoutes({ slotCaps })];
         const server = await startBroker({ store, teams, routes, token: process.env.PLANTWORKS_BROKER_TOKEN?.trim() || undefined, host: opts.host, port: Number(opts.port), publicUrl: opts.publicUrl ?? (process.env.PLANTWORKS_BROKER_PUBLIC_URL?.trim() || undefined), onListen: ({ store, emit }) => {
           let reconciling = false;
-          const run = createReconciler(store, daemon, emit, (line) => console.error(line), undefined, { brokerSession });
+          const run = createReconciler(store, daemon, emit, (line) => console.error(line), undefined, { brokerSession }, reportWaitMs);
           const timer = setInterval(async () => {
             if (reconciling) return;
             reconciling = true;
@@ -63,4 +64,17 @@ export function brokerVerb(pw: Command): void {
         process.exitCode = 1;
       }
     });
+}
+
+/**
+ * W4-A: PLANTWORKS_REPORT_WAIT_S, how long the broker waits for a worker's report after the seat
+ * closes a job (default 30). 0 finishes at once with no report. Between 0 and 10 is refused: shorter
+ * than two worker polls plus a snapshot, it would defeat the report without anyone noticing.
+ */
+export function reportWaitFromEnv(raw: string | undefined): number {
+  const v = raw?.trim();
+  if (!v) return 30_000;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0 || (n > 0 && n < 10)) throw new Error(`PLANTWORKS_REPORT_WAIT_S must be 0 (no report) or at least 10 seconds, not ${v}`);
+  return n * 1000;
 }

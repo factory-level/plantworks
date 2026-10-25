@@ -143,6 +143,9 @@ qitem evidence (`fork/src/broker/README.md`, "Worker lifecycle").
   The seats a worker names must already run in that daemon.
 - **A worker leaves its wait only on `done`.** Reconciliation records `running` and `done` for a
   claimed job. Any other outcome keeps the worker, and the slot, waiting (`fork/src/broker/worker.ts:41`).
+  After the seat's closure, `done` can come up to `PLANTWORKS_REPORT_WAIT_S` (default 30 s) later
+  while the broker waits for the worker's report (W4-A). The job and its slot stay in flight for that
+  time, and drain counts it.
 - **Worker health is process liveness only.** It doesn't read Pi's `runner-state.json` (W3-B).
 - **Shutdown after `daemon stop` is not established here.** Neither the broker nor `daemon stop`
   is bounded in `fork/` source, and nothing here shows what `daemon stop` does to running Pi

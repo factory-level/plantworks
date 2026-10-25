@@ -28,6 +28,17 @@ try {
 } catch (e) {
   refused = e;
 }
+// Under daemon.db_conflict=stop, an inconclusive check for another daemon on the database refuses the start,
+// where upstream's own check would read a slow probe as "no holder" (db-conflict.ts).
+if (!refused && process.argv[2] === "daemon" && process.argv[3] === "start") {
+  const { dbConflictRefusal } = await import("../src/daemon/db-conflict.ts");
+  const rest = process.argv.slice(4);
+  const at = rest.findLastIndex((a) => a === "--db" || a.startsWith("--db="));
+  const db = at < 0 ? store.resolveWithSource("db.path").value : rest[at].startsWith("--db=") ? rest[at].slice("--db=".length) : rest[at + 1];
+  const why = await dbConflictRefusal({ db, home: process.env.OPENRIG_HOME, policy: store.resolveWithSource("daemon.db_conflict").value,
+    allow: rest.includes("--allow-db-conflict") || process.env.OPENRIG_ALLOW_DB_CONFLICT === "1" });
+  if (why) refused = new Error(why);
+}
 if (refused) {
   console.error(`plantworks: ${refused.message}`);
   process.exitCode = 2;

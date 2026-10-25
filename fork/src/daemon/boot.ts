@@ -72,7 +72,7 @@ function verified(why: string, path: string): string {
 export class BootPathError extends Error {}
 
 /** Resolve missing tails AND dangling symlinks, without creating anything. Unverifiable paths fail closed. */
-function realPath(path: string, seen = new Set<string>()): string {
+export function realPath(path: string, seen = new Set<string>()): string {
   // Preserve parent traversal until the filesystem has resolved symlinks: link/../db can
   // name an outside file even when lexical path.resolve would place it inside the home.
   const absolute = isAbsolute(path) ? path : `${process.cwd()}${sep}${path}`;

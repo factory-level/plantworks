@@ -4,7 +4,14 @@
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { transition as checkTransition, type JobEnvelope, type JobState, type TransitionDetail } from "../contract/job.ts";
+import { transition as checkTransition, type DoneOutcome, type JobEnvelope, type JobState, type TransitionDetail } from "../contract/job.ts";
+
+/** W4-A: what a worker reports for one job (validated by the report route before it is stored). */
+export interface Report {
+  usage: { promptTokens: number; completionTokens: number } | null;
+  usageStatus?: string;
+  artifacts: { branch: string; commit: string; files: { path: string; sha256: string }[]; observedBy: "worker" } | { branch: null; skipped: string; observedBy: "worker" };
+}
 
 /**
  * How old a claim-next reservation must be before reconciliation (PW-21) treats it as stuck and
@@ -37,6 +44,12 @@ export interface JobRow {
   approval_decision: string | null;
   /** Effective priority (class priority + job priority offset); claim-next takes the lowest first. */
   priority: number;
+  /** W4-A: the worker's report for this job (JSON, as validated by the report route), once stored. */
+  report: string | null;
+  /** W4-A: when the reconciler first saw the seat's closure and started waiting for the report. */
+  report_wait_since: string | null;
+  /** W4-A: the closing transitionId of the seat's closure the wait (and the report) belongs to. */
+  report_closing_id: number | null;
 }
 
 /** Extra columns a transition may set alongside the state (PW-18 sets claimed_by, claimed_at and qitem_id). */
@@ -63,7 +76,10 @@ CREATE TABLE IF NOT EXISTS jobs (
   result TEXT,
   approval_expires_at TEXT,
   approval_decision TEXT,
-  priority INTEGER NOT NULL DEFAULT 0
+  priority INTEGER NOT NULL DEFAULT 0,
+  report TEXT,
+  report_wait_since TEXT,
+  report_closing_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS jobs_claimable ON jobs (team, class, state, seq);
 -- PW-22: seats told to take no new work (worker preStop). Kept across broker restarts.
@@ -81,7 +97,7 @@ CREATE TABLE IF NOT EXISTS job_transitions (
 CREATE INDEX IF NOT EXISTS job_transitions_job ON job_transitions (job_id, id);
 `;
 /** Columns added after PW-17, for a broker file created before them. */
-const ADDED_COLUMNS = ["approval_expires_at TEXT", "approval_decision TEXT", "priority INTEGER NOT NULL DEFAULT 0"];
+const ADDED_COLUMNS = ["approval_expires_at TEXT", "approval_decision TEXT", "priority INTEGER NOT NULL DEFAULT 0", "report TEXT", "report_wait_since TEXT", "report_closing_id INTEGER"];
 
 export type Store = ReturnType<typeof openStore>;
 
@@ -211,6 +227,66 @@ export function openStore(path: string, now: () => Date = () => new Date()) {
     transitions(opts: { afterId?: number; jobId?: string; limit?: number } = {}): TransitionRow[] {
       return db.prepare(`SELECT * FROM job_transitions WHERE id > @afterId${opts.jobId === undefined ? "" : " AND job_id = @jobId"} ORDER BY id LIMIT @limit`)
         .all({ afterId: opts.afterId ?? 0, jobId: opts.jobId, limit: opts.limit ?? 1000 }) as TransitionRow[];
+    },
+
+    /**
+     * W4-A: one reconciler pass over a running job whose seat has closed its qitem (`closingId` is
+     * that closing transition). Opens the wait the first time; restarts it, dropping any report,
+     * when the closure is a different one (a reopen and re-close between polls); then finishes the
+     * job as `done` with the stored report, or once `waitMs` has passed without one. The report is
+     * read in the same immediate transaction as the transition, so a report the route stores
+     * concurrently is either in the result or refused as `job_settled`. Returns the transition, or
+     * null while waiting.
+     */
+    settleReport(jobId: string, outcome: DoneOutcome, closingId: number, waitMs: number): { row: JobRow; detail: TransitionDetail } | null {
+      return tx(() => {
+        const row = get(jobId);
+        if (!row || row.state !== "running") return null;
+        if (row.report_closing_id !== closingId || row.report_wait_since === null) {
+          db.prepare("UPDATE jobs SET report = NULL, report_wait_since = ?, report_closing_id = ? WHERE job_id = ? AND state = 'running'").run(iso(), closingId, jobId);
+          return null;
+        }
+        let result: Record<string, unknown>;
+        if (row.report !== null) {
+          const report = JSON.parse(row.report) as Report;
+          const a = report.artifacts;
+          result = {
+            text: null, usage: report.usage, ...(report.usageStatus ? { usageStatus: report.usageStatus } : {}),
+            artifacts: a.branch === null ? [] : a.files.map((f) => ({ name: f.path, uri: `git:${a.commit}:${f.path}` })),
+            snapshot: a, reportProvenance: "worker-asserted", report: "ok",
+          };
+        } else if (now().getTime() - Date.parse(row.report_wait_since) >= waitMs) {
+          result = { text: null, usage: null, artifacts: [], report: "unavailable(timeout)" };
+        } else return null;
+        return apply(jobId, "done", { outcome }, { result: JSON.stringify(result) });
+      });
+    },
+
+    /**
+     * W4-A: the seat's closure is gone again (the qitem was reopened or handed off): the wait and any
+     * report belong to an earlier closure, so both are dropped.
+     */
+    clearReportWait(jobId: string): void {
+      db.prepare("UPDATE jobs SET report = NULL, report_wait_since = NULL, report_closing_id = NULL WHERE job_id = ? AND state = 'running' AND report_wait_since IS NOT NULL").run(jobId);
+    },
+
+    /**
+     * W4-A: stores the worker's report if every fence holds, first write wins. The fence checks
+     * consistency, not identity: seat and qitem are caller-asserted under the broker-wide bearer.
+     */
+    storeReport(jobId: string, fence: { seat: string; qitemId: string; closingTransitionId: number }, report: Report): "stored" | "not_found" | "job_settled" | "report_not_wanted" | "report_fence" | "report_stale" | "report_exists" {
+      return tx(() => {
+        const row = get(jobId);
+        if (!row) return "not_found";
+        if (!["held", "queued", "claimed", "running"].includes(row.state)) return "job_settled";
+        if (row.state !== "running") return "report_not_wanted";
+        if (row.claimed_by !== fence.seat || row.qitem_id !== fence.qitemId) return "report_fence";
+        if (row.report_wait_since === null) return "report_not_wanted";
+        if (row.report_closing_id !== fence.closingTransitionId) return "report_stale";
+        if (row.report !== null) return "report_exists";
+        const r = db.prepare("UPDATE jobs SET report = ? WHERE job_id = ? AND state = 'running' AND report IS NULL AND report_closing_id = ?").run(JSON.stringify(report), jobId, fence.closingTransitionId);
+        return r.changes === 1 ? "stored" : "report_exists";
+      });
     },
 
     /** PW-22: marks a seat draining (claim-next gives it no new work), or resumes it. */
