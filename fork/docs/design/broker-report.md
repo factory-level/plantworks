@@ -11,10 +11,13 @@ Pi seat's own closure of its qitem and writes `{text: null, artifacts: []}`
 (`fork/src/broker/reconcile.ts`, the `store.transition(…, "done", …)` call).
 
 Wave 3 established why it can't simply be added there (`wave3/report.md`, 00:26Z and 00:28Z, dev-build):
-- **Only the seat can close the job.** The reconciler trusts only the Pi seat's own
-  transport-authenticated `done` transition, the latest one (`seatOutcome`, reconcile.ts). The
-  worker is a separate process and cannot author that closure: upstream derives the actor from the
-  transport header (`queue.ts:702-708`).
+- **Only the seat closes the job.** The reconciler accepts only the latest `done` transition
+  recorded as the Pi seat's own, with `transport:v1` provenance (`seatOutcome`, reconcile.ts).
+  Upstream derives that actor from the transport header (`queue.ts:702-708`). The worker is a
+  separate process and, by design, doesn't author that closure. That is the design's division of
+  labour, not an enforced barrier: `transport:v1` isn't authentication, and a process that can reach
+  the daemon can send the seat's name, with no token (`require-sender-identity.ts:7`–`:10`; see the broker
+  README, "What a seat's closure proves").
 - **The worker has no ordering point.** The usage tally lives in the worker's governor. A worker
   write before Pi closes races the reconciler, and a write after the terminal state is refused
   (`queue-repository.ts:2033-2037`).

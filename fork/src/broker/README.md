@@ -51,7 +51,8 @@ The record is `fork/schema/job-record.schema.json`:
 - `priority` is the effective priority stored at submit (class priority + envelope offset), the
   number claim-next orders by. It is additive and fork-defined, pending the HarnessHG ack (PW-29).
 - `detail` is the PW-09 detail for the current state.
-- `result` is `null` until reconciliation records an authenticated logical completion (PW-21).
+- `result` is `null` until reconciliation records the seat's logical completion (PW-21). That is the
+  seat's closure as the daemon records it, not an authenticated one: see "What a seat's closure proves".
 - `reportWanted: {closingTransitionId, qitemId}` is present only while the broker waits for the
   worker's report on that closure (W4-A).
 
@@ -77,7 +78,7 @@ cap belong to claim-next (PW-18, PW-19).
 
 ## Job report (W4-A, `fork/docs/design/broker-report.md`)
 
-The seat's own authenticated closure stays the only thing that finishes a job. The report only
+The seat's own closure (see "What a seat's closure proves") stays the only thing that finishes a job. The report only
 adds what the worker saw, and a missing report never holds `done` for longer than the bound.
 
 - **The wait.** When reconciliation first sees the seat's closure of a `running` job, it stores
@@ -372,14 +373,27 @@ to the qitem destination and `identityProvenance: transport:v1`, and the closure
 - `denied` with the closure target `rejected-by-checks`: broker `done {outcome: rejected-by-checks}`.
   Upstream records `denied` as "receiver rejected the work" with the reason text as the target. The
   exact target `rejected-by-checks` is this fork's convention for a seat whose checks rejected the
-  result; `denied` with any other text proves nothing.
+  result; `denied` with any other text proves nothing;
+- `escalation` with the closure target `handoff-sre`: broker `done {outcome, closure: handoff-sre}`
+  (PW-34, below).
+
+**What a seat's closure proves.** `identityProvenance: transport:v1` says how the daemon got the
+closer's name: from the `X-OpenRig-Session` header on a direct request, which the CLI sets from the
+seat's `OPENRIG_SESSION_NAME`. Upstream is explicit that this **isn't authentication**: any process
+that can reach the daemon can send that header, with no token, because the daemon's queue routes take
+no bearer (PW-16; `fork/container/README.md`)
+(`packages/daemon/src/routes/require-sender-identity.ts:7`–`:10`,
+`docs/as-built/architecture/coordination-primitive.md:432`–`:434`). So the rule above proves that the
+daemon recorded the closure as made by the destination seat over the transport, with no body-claimed,
+relayed or unknown-origin actor, and no reopen since. It does not prove which process sent it. The
+trust boundary is network reachability of the daemon, the same as for every other queue write.
 
 It first confirms any matching queued reservation, then records broker `running` and `done`.
 Nothing maps to broker `failed`: the qitem state `failed` isn't a terminal closure upstream (only
 `done` and `handed-off` are), so even a seat-authored `failed` leaves the job in flight, holding its
 slot. A failure the seat reports that way is a known gap: it needs a terminal failure closure from
-the seat that is as strong as `done`. Ambiguous evidence stays in flight. This is authenticated
-logical completion; it does not prove the Pi process exited or bound physical execution
+the seat that is as strong as `done`. Ambiguous evidence stays in flight. This is the seat's
+recorded logical completion, not an authenticated one; it does not prove the Pi process exited or bound physical execution
 concurrency. An unresolved job can therefore hold a slot indefinitely and requires an operator to
 verify that work stopped before any manual recovery.
 
@@ -442,7 +456,7 @@ Design: [`../../docs/design/sre-handoff.md`](../../docs/design/sre-handoff.md). 
 fork-defined, pending the HarnessHG ack. The fork has no Slack or Eve code.
 
 - **Handoff out.** A seat closes its qitem `done` with closure reason `escalation` and target
-  `handoff-sre`, by the same authenticated-closure rule as the other outcomes. The job ends
+  `handoff-sre`, by the same closure rule as the other outcomes. The job ends
   `done {outcome, closure: "handoff-sre"}`. The outcome comes from the handoff artifact and
   defaults to `rejected-by-checks`.
 - **The artifact.** The worker reads `.plantworks/handoff.json` from the class workspace

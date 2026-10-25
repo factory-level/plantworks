@@ -126,6 +126,12 @@ is the boundary, and it isn't built.
 
 ## Limits
 
+- **No runtime switch on a remote seat.** Upstream's `rig seat set-runtime` (switching a seat
+  between Codex and Claude Code) swaps panes with `swap-pane` (`packages/daemon/src/adapters/tmux.ts:714`).
+  The seat agent's allowlist has no `swap-pane`, and allows `if-shell` only in upstream's guarded
+  kill form, so a switch against a routed seat is refused and fails closed: the seat keeps its
+  runtime and occupant. Upstream also refuses any Pi seat before that point
+  (`packages/daemon/src/domain/seat-runtime-switch-service.ts:195`).
 - **No remote stop.** Nothing here physically stops a remote Pi or process, and no timeout,
   drain or grace period should be read as one.
 - **Scoped launch environments can't run on a remote seat.** Upstream stages the env file
