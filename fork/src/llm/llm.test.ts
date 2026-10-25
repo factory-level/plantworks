@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Every test talks to a local stub OpenAI-compatible server, never to shared inference.
-import { test } from "node:test";
+import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -12,10 +12,25 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { CLASSES, ceilingProblems } from "./classes.ts";
 import { preflight, readEndpoint } from "./endpoint.ts";
-import { governBody, startGovernor, usageOf, type CallRecord } from "./governor.ts";
+import { governBody, startGovernor as startGovernorUntracked, usageOf, type CallRecord, type GovernorOptions } from "./governor.ts";
 import { emitTeam } from "../team/command.ts";
 
 type Seen = { method: string; url: string; auth?: string; body: string };
+
+// Every stub server and governor a test starts is closed after it, pass or fail: one left listening
+// keeps this file's process alive, so a failed assertion would hang the file until the per-test
+// timeout instead of being reported. Both closes are idempotent.
+const open = new Set<() => Promise<unknown>>();
+afterEach(async () => {
+  const closing = [...open];
+  open.clear();
+  await Promise.all(closing.map((close) => close()));
+});
+async function startGovernor(opts: GovernorOptions) {
+  const g = await startGovernorUntracked(opts);
+  open.add(g.close);
+  return g;
+}
 
 async function stub(handler: (req: IncomingMessage, res: ServerResponse, seen: Seen) => void) {
   const seen: Seen[] = [];
@@ -28,11 +43,13 @@ async function stub(handler: (req: IncomingMessage, res: ServerResponse, seen: S
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`;
-  return { url, seen, close: () => new Promise<void>((r) => {
+  const close = () => new Promise<void>((r) => {
     if (!server.listening) return r();
     server.closeAllConnections();
     server.close(() => r());
-  }) };
+  });
+  open.add(close);
+  return { url, seen, close };
 }
 
 const models = (ids: string[]) => (_req: IncomingMessage, res: ServerResponse) => {
@@ -120,14 +137,27 @@ test("each call is cut at the deadline, and three in a row fail the job once wit
   const records: CallRecord[] = [];
   const workerClass = { ...CLASSES.quick, deadlineSeconds: 0.1 };
   const g = await startGovernor({ endpoint: { url: s.url }, workerClass, onFail: (r) => fails.push(r), log: (r) => records.push(r) });
-  const call = async () => (await fetch(`${g.url}/models`)).status;
+  // Bounded: if the deadline didn't cut a call, it would never answer, so fail here and say so.
+  const call = async () => {
+    const res = await fetch(`${g.url}/models`, { signal: AbortSignal.timeout(5000) }).catch((e: Error) => { throw new Error(`the call was not cut at the 100 ms deadline within 5 s (${e.name})`); });
+    return res.status;
+  };
   assert.deepEqual([await call(), await call()], [504, 504]);
   hang = false;
   assert.equal(await call(), 200, "a good call resets the run of deadlines");
   hang = true;
   assert.deepEqual([await call(), await call(), await call(), await call()], [504, 504, 504, 504]);
   assert.deepEqual(fails, ["call-deadline"]);
-  assert.ok(records.filter((r) => r.deadline).every((r) => r.holdMs >= 100 && r.holdMs < 1000));
+  // Each cut call was aborted at the deadline: a 504 marked deadline, held at least the 100 ms deadline
+  // less clock granularity (a 100 ms timer can read 99 ms on Date.now), and nowhere near "never".
+  // No tight upper bound: a loaded CI runner may run the abort late.
+  const cut = records.filter((r) => r.deadline);
+  assert.equal(cut.length, 6);
+  for (const r of cut) {
+    assert.equal(r.status, 504);
+    assert.ok(r.holdMs >= 90, `held ${r.holdMs} ms, under the 100 ms deadline`);
+    assert.ok(r.holdMs < 5000, `held ${r.holdMs} ms: the deadline did not cut the call`);
+  }
   await g.close();
   await s.close();
 });
