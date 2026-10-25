@@ -31,6 +31,9 @@ export interface NodeBinding extends Binding {
   teamPermissionDefault?: boolean;
   /** Reserved successor generation; current tenure remains the input fence until commit. */
   launchGeneration?: string;
+  /** Slice 16: a successor staged beside the seat's current occupant on another runtime. That occupant stays the
+   *  bound one until the runtime switch commits. */
+  runtimeSwitchFrom?: { runtime: string; session: string; pane: string; generation: string };
   /** OPR.0.7.0.13: where this seat's skills go, its own storage outside the project (the plugin there is already on the
    *  seat's CLAUDE_CODE_PLUGIN_DIRS). Absent = the project, as before. Only the Claude adapter reads it. */
   seatSkillsRoot?: string;
@@ -151,6 +154,9 @@ export type HarnessLaunchResult =
     resumeUnproven?: true;
     /** Codex (#1524), reporting only: the resumed process's own records name a different conversation (`opened`). */
     resumeMismatch?: { opened: string };
+    /** Codex, reporting only, with `resumeUnproven` or `resumeMismatch`: `error` without its closing "The session was
+     *  preserved; nothing was restarted.", for a caller that did restart the pane (an in-place restart). */
+    resumeDetail?: string;
     /** The native fork command was sent, but its child identity is not yet available. */
     forkIdentityPending?: boolean;
     launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess };

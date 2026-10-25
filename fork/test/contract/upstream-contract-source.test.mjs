@@ -10,13 +10,13 @@ import { seatAgentDir } from "../../src/seat/pi-seat-files.ts";
 const root = join(dirname(fileURLToPath(import.meta.url)), "../../..");
 const source = (path) => readFileSync(join(root, path), "utf8");
 
-test("DaemonOptions/createDaemon at packages/daemon/src/startup.ts:199-230,310 and startServer at packages/daemon/src/index.ts:249 stay pinned", () => {
+test("DaemonOptions/createDaemon at packages/daemon/src/startup.ts:204-237,317 and startServer at packages/daemon/src/index.ts:249 stay pinned", () => {
   const startup = source("packages/daemon/src/startup.ts");
   const index = source("packages/daemon/src/index.ts");
   const options = startup.match(/interface DaemonOptions\s*\{([\s\S]*?)\n\}/)?.[1];
-  assert.ok(options, "upstream packages/daemon/src/startup.ts:199 declares DaemonOptions");
+  assert.ok(options, "upstream packages/daemon/src/startup.ts:204 declares DaemonOptions");
   assert.match(startup, /export async function createDaemon\(opts\?: DaemonOptions\)/,
-    "upstream packages/daemon/src/startup.ts:310 exports createDaemon with DaemonOptions");
+    "upstream packages/daemon/src/startup.ts:317 exports createDaemon with DaemonOptions");
   for (const name of [
     "dbPath", "bindPlan", "tmuxExec", "argvExec", "cmuxExec", "cmuxFactory", "cmuxTimeoutMs",
     "tmuxOptionPlatform", "slowOpRecorder", "bearerToken", "terminalBearerToken", "webUiEnabled",
@@ -25,14 +25,14 @@ test("DaemonOptions/createDaemon at packages/daemon/src/startup.ts:199-230,310 a
     "upstream packages/daemon/src/index.ts:249 accepts the createDaemon options as startServer's second argument");
 });
 
-test("daemon queue create/claim/unclaim wire shapes stay pinned to packages/daemon/src/routes/queue.ts:533-643", () => {
+test("daemon queue create/claim/unclaim wire shapes stay pinned to packages/daemon/src/routes/queue.ts:545-658", () => {
   const routes = source("packages/daemon/src/routes/queue.ts");
   const server = source("packages/daemon/src/server.ts");
   const identity = source("packages/daemon/src/routes/require-sender-identity.ts");
   assert.match(server, /app\.route\("\/api\/queue", queueRoutes\(\)\)/,
-    "upstream packages/daemon/src/server.ts:795 mounts queueRoutes at /api/queue");
+    "upstream packages/daemon/src/server.ts:798 mounts queueRoutes at /api/queue");
   assert.match(identity, /SENDER_IDENTITY_HEADER\s*=\s*"x-openrig-session"/,
-    "upstream packages/daemon/src/routes/require-sender-identity.ts:34 defines the sender header");
+    "upstream packages/daemon/src/routes/require-sender-identity.ts:36 defines the sender header");
   assert.match(routes, /app\.post\("\/create"/);
   const create = routes.slice(routes.indexOf('app.post("/create"'), routes.indexOf("// POST /:qitemId/claim"));
   const createRequest = create.slice(create.indexOf("c.req.json<{"), create.indexOf("}>().catch"));
@@ -75,10 +75,10 @@ test("Pi seat directories stay pinned to packages/daemon/src/adapters/pi-runner-
   });
 });
 
-test("the fork's seat agent dir is upstream's: OPENRIG_HOME/state/pi (startup.ts:693) joined by piSeatPaths", () => {
+test("the fork's seat agent dir is upstream's: OPENRIG_HOME/state/pi (startup.ts:711) joined by piSeatPaths", () => {
   // Upstream's daemon roots Pi seat state at OPENRIG_HOME/state/pi and hands that root to the Pi adapters.
   assert.match(source("packages/daemon/src/startup.ts"), /const piStateRoot = nodePath\.join\(OPENRIG_HOME, "state", "pi"\);/,
-    "upstream packages/daemon/src/startup.ts:693 roots Pi seat state at OPENRIG_HOME/state/pi");
+    "upstream packages/daemon/src/startup.ts:711 roots Pi seat state at OPENRIG_HOME/state/pi");
   // fork/src/seat/pi-seat-files.ts builds the same directory itself; if upstream moves it, the fork's seat files go unread.
   for (const session of ["worker@rig", "pw-kb-b-t_1-a1", "dev-worker.0@team"]) {
     const home = "/srv/home";

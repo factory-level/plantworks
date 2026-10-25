@@ -15,6 +15,8 @@ export interface NativeResumeProbeInput {
   claudeAutoIdentityVerified?: boolean;
   /** Only an exact --resume process-lineage proof may use the visible composer as readiness. */
   claudeResumeIdentityVerified?: boolean;
+  /** Only a verified foreground Codex process may corroborate a non-gpt status footer. */
+  codexProcessVerified?: boolean;
 }
 
 export interface NativeResumeProbeResult {
@@ -30,6 +32,16 @@ export interface ProbeShellReadyInput {
 }
 
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
+// Provider model identifiers are not limited to the default gpt-* family.
+// Keep the fallback structural so ordinary status prose cannot prove readiness.
+const CODEX_MODEL_FIELD = /^[A-Za-z][A-Za-z0-9._:/@-]*[._:/@-]\d[A-Za-z0-9._:/@-]*(?: [A-Za-z][\w-]*)?(?:\s+⚠ \d+ warnings?)?$/i;
+// Codex renders the model field as "{model_display_name} {effort_label}{ service_tier_name}" (codex-rs/tui
+// chatwidget/status_surfaces.rs): an optional capitalized display word after the id, one of its effort labels
+// (status_controls.rs; ReasoningEffort::as_str), then an optional tier, as in "GPT-6.1 Sol medium fast". Only that
+// shape takes more than one word, so short prose after a model id ("GPT-6.1 is not ready") is not a footer.
+const CODEX_RENDERED_SUFFIX = "(?: [A-Z][A-Za-z0-9]*)? (?:default|none|minimal|low|medium|high|xhigh|max|ultra|persistent)(?: [A-Za-z][\\w-]*)?";
+const CODEX_RENDERED_GPT_FIELD = new RegExp(`^[Gg][Pp][Tt]-\\d[\\w.-]*${CODEX_RENDERED_SUFFIX}$`);
+const CODEX_RENDERED_MODEL_FIELD = new RegExp(`^[A-Za-z][A-Za-z0-9._:/@-]*[._:/@-]\\d[A-Za-z0-9._:/@-]*${CODEX_RENDERED_SUFFIX}(?:\\s+⚠ \\d+ warnings?)?$`);
 
 export function buildNativeResumeCommand(
   runtime: string | null,
@@ -218,14 +230,18 @@ export function assessNativeResumeProbe(
     // Only the current-format panel can override TUI evidence. Legacy text
     // retains its existing position after the TUI check, including scrollback.
     const currentTrustPrompt = looksLikeCurrentCodexTrustPrompt(paneContent);
-    if (!currentTrustPrompt && looksLikeCodexTui(paneContent)) {
+    const legacyTrustPrompt = looksLikeCodexTrustPrompt(paneContent);
+    const dismissedLegacyTrustPrompt = paneContent.includes("OpenAI Codex (v")
+      || input.codexProcessVerified === true && hasCodexCustomModelFooterAfterComposer(paneContent);
+    if (!currentTrustPrompt && (!legacyTrustPrompt || dismissedLegacyTrustPrompt)
+      && looksLikeCodexTui(paneContent, input.codexProcessVerified === true)) {
       return {
         status: "resumed",
         code: "active_runtime",
         detail: "Codex is running with an active interactive TUI in the probe pane.",
       };
     }
-    if (currentTrustPrompt || looksLikeCodexTrustPrompt(paneContent)) {
+    if (currentTrustPrompt || (legacyTrustPrompt && !dismissedLegacyTrustPrompt)) {
       return {
         status: "inconclusive",
         code: "trust_gate",
@@ -397,20 +413,23 @@ function hasCodexComposer(paneContent: string): boolean {
   });
 }
 
-function looksLikeCodexTui(paneContent: string): boolean {
+function looksLikeCodexTui(paneContent: string, codexProcessVerified: boolean): boolean {
   const current = paneContent.slice(Math.max(0, paneContent.lastIndexOf("OpenAI Codex (v")));
   if (/model:\s*loading\b/i.test(current)) return false;
   const recentLines = current.trimEnd().split("\n").slice(-20).join("\n");
   const hasPromptLine = hasCodexComposer(recentLines);
-  const hasModelFooter = /(^|\n)\s{2,}gpt-[^\n]+ · [^\n]+(?:\n|$)/.test(recentLines);
+  const hasDefaultModelFooter = /(^|\n)\s{2,}gpt-[^\n]+ · [^\n]+(?:\n|$)/.test(recentLines);
+  const hasDelimitedModelFooter = recentLines.split("\n").some(isCodexGptModelFooterLine);
   // Custom status lines can put the model's display name in any field. Keep
   // corroboration structural: an indented status row and a whole model field,
   // not a model mentioned somewhere in conversation prose.
   // A custom row must not make an unresolved trust/update panel disappear.
-  const hasCustomModelFooter = !looksLikeCodexTrustPrompt(current)
-    && !hasCodexUpdateHeader(current) && !current.includes("Updating Codex")
-    && recentLines.split("\n").some(isCodexModelFooterLine);
-  return hasPromptLine && (current.includes("OpenAI Codex (v") || hasModelFooter || hasCustomModelFooter);
+  const verifiedCustomModelFooter = codexProcessVerified && hasCodexCustomModelFooterAfterComposer(recentLines);
+  const activeLegacyTrustPrompt = looksLikeCodexTrustPrompt(current) && !verifiedCustomModelFooter;
+  const hasCustomModelFooter = (hasDelimitedModelFooter || verifiedCustomModelFooter)
+    && !activeLegacyTrustPrompt
+    && !hasCodexUpdateHeader(current) && !current.includes("Updating Codex");
+  return hasPromptLine && (current.includes("OpenAI Codex (v") || hasDefaultModelFooter || hasCustomModelFooter);
 }
 
 // Codex prints these messages when its stored OAuth access token can no
@@ -445,7 +464,29 @@ function isCodexModelFooterLine(line: string): boolean {
   if (/^\s{2,}gpt-[^\n]+ · [^\n]+$/.test(line)) return true;
   const fields = line.trim().split(" · ");
   return /^[ \t]{2,}\S/.test(line) && fields.length > 1
-    && fields.some((field) => /^gpt-\d[\w.-]*(?: [\w-]+)?$/i.test(field));
+    && fields.some((field) => CODEX_MODEL_FIELD.test(field) || CODEX_RENDERED_MODEL_FIELD.test(field));
+}
+
+function isCodexGptModelFooterLine(line: string): boolean {
+  if (/^\s{2,}gpt-[^\n]+ · [^\n]+$/.test(line)) return true;
+  const fields = line.trim().split(" · ");
+  return /^[ \t]{2,}\S/.test(line) && fields.length > 1
+    && fields.some((field) => /^gpt-\d[\w.-]*(?: [\w-]+)?$/i.test(field) || CODEX_RENDERED_GPT_FIELD.test(field));
+}
+
+function hasCodexGptModelFooter(paneContent: string): boolean {
+  return /(^|\n)\s{2,}gpt-[^\n]+ · [^\n]+(?:\n|$)/i.test(paneContent)
+    || paneContent.split("\n").some(isCodexGptModelFooterLine);
+}
+
+function hasCodexCustomModelFooterAfterComposer(paneContent: string): boolean {
+  const lines = paneContent.split("\n");
+  let lastComposer = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (hasCodexComposer(lines[index]!)) lastComposer = index;
+  }
+  return lastComposer >= 0 && lines.slice(lastComposer + 1).some((line) =>
+    isCodexModelFooterLine(line) && !isCodexGptModelFooterLine(line));
 }
 
 function looksLikeCurrentCodexTrustPrompt(paneContent: string): boolean {
@@ -459,8 +500,7 @@ function looksLikeCurrentCodexTrustPrompt(paneContent: string): boolean {
     if (!choice) continue;
     const afterChoice = paneContent.slice(start + choice.index + choice[0].length);
     return !hasCodexComposer(afterChoice)
-      && !/(^|\n)\s{2,}gpt-[^\n]+ · [^\n]+(?:\n|$)/.test(afterChoice)
-      && !afterChoice.split("\n").some(isCodexModelFooterLine);
+      && !hasCodexGptModelFooter(afterChoice);
   }
   return false;
 }
