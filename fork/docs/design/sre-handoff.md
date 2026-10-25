@@ -52,6 +52,30 @@ second one.
 
 Unknown fields are rejected, as for the envelope.
 
+### How the artifact gets from Pi to the report (r1)
+
+The worker can't see Pi's output, only usage and the workspace tree (#105). So the channel is
+**one file in the class `workspace`: `.plantworks/handoff.json`**. The seat's Pi writes it before
+closing with `escalation` / `handoff-sre`. The qitem closure text isn't used, because upstream's
+`closure_target` is a short reason string, and `handoff-sre` already fills it.
+
+The worker reads the file once, when it builds the #105 report, and puts the result in the
+report's `handoff` member. The read fails closed:
+- **No `workspace`** for the class, or a workspace that fails #105's co-location check →
+  `unavailable: missing`.
+- **File absent**, or unchanged from the take-up baseline → `unavailable: missing`. A stale file
+  left by an earlier job never counts; the worker records its hash in the #105 per-job baseline.
+- **Not a regular file:** a symlink (`lstat`), a directory, over 16 KiB, unreadable, not UTF-8
+  JSON, or a path that resolves outside the workspace → `unavailable: invalid: <why>`.
+- **Parses** → the broker validates it as above.
+
+`.plantworks/` is fork-owned scratch and is excluded from the #105 artifact file list.
+
+The artifact inherits #105's caveats unchanged:
+- It is **worker-asserted**. It is stored with `reportProvenance: "worker-asserted"`, the broker
+  can't verify it, and consumers must not treat it as broker-verified.
+- It has the same co-location limit, because it is read from the tree the worker checks.
+
 ### The `targetAgent` mapping (team spec)
 
 A new optional top-level team spec member is added in `fleet.schema.json` and validated by
@@ -104,6 +128,19 @@ It must **not** use the in-memory `ctx.send` path that approval events use, whic
 (see the broker README's Limitations). That gives at-least-once delivery like PW-10. Consumers
 dedupe on `id`, and a redelivery is byte-identical.
 
+**Two events, one transition (r1).** The outbox cursor, failure, backoff and park rows are all
+keyed by `(team, transition_id)`, so a handoff `done` is delivered as **one pair**:
+- `job.state` goes first, then `handoff.requested`. **The cursor advances only after both are
+  delivered.**
+- **A transient failure of either** records one failure row for the transition, and the existing
+  exponential backoff applies to the pair. The retry redelivers **both**, from `job.state`, with
+  unchanged ids. A `job.state` that was already delivered is then a duplicate, which
+  at-least-once already allows. No sub-cursor is added.
+- **A permanent failure of either** parks the transition as today: the park and the cursor
+  advance are one transaction, and the log names the failing event's id. An event already
+  delivered stays delivered. Parking means the pair isn't guaranteed, not that both failed.
+- An aborted delivery (the outbox stopping) records nothing and moves no cursor, as today.
+
 **Consumer contract** (Hermes and the bridge skill, not fork code): post the handoff in Slack
 addressed to the mapped SRE agent's app, then wait for a person (HITL). Plantworks never calls
 Eve or an SRE agent, and has no cluster access.
@@ -128,7 +165,9 @@ Eve or an SRE agent, and has no cluster access.
 
 ### Semantics
 
-The broker keeps a map `wakeId → {agent, until}`.
+The broker keeps a map `wakeId → {agent, until}`. It is in memory and **per broker process**,
+so a second broker process would need its own copy of each event. The deployment rule is one
+broker per team.
 
 | Event | Effect |
 |---|---|
@@ -191,7 +230,20 @@ can send them. See open questions.
    - id `<jobId>:<transitionId>:handoff.requested`;
    - emitted after that transition's `job.state`;
    - survives a broker restart mid-retry (outbox);
-   - a redelivery is identical.
+   - a redelivery is identical;
+   - the pair: a transient failure of `handoff.requested` after `job.state` was delivered leaves
+     the cursor in place, backs off once for the transition, and redelivers both with unchanged
+     ids;
+   - a permanent failure of either parks the transition, advances the cursor in the same
+     transaction, and lets the next transition deliver.
+   - **Artifact read** (worker side), each giving the `unavailable` reason above:
+     - no workspace;
+     - file absent;
+     - stale file unchanged since take-up;
+     - a symlink;
+     - over 16 KiB;
+     - bad JSON;
+     - a valid file → `handoff` in the report, with `reportProvenance: "worker-asserted"`.
 5. **Front door** (`fork/src/events/front-door.test.ts`): `handoff-sre` → blocked, as today, plus a
    consumer fixture for `handoff.requested` that dedupes on `id`.
 6. **Pause:**
